@@ -1,0 +1,64 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  background: #f4f4f4;
+}
+
+.page {
+  padding: 1rem 2rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+}
+
+li {
+  background: #fff;
+  margin-bottom: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 4px;
+}
+
+.centered {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+
+.card {
+  background: #fff;
+  padding: 2rem;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+input,
+button {
+  padding: 0.75rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+.severity-low {
+  border-left: 4px solid green;
+}
+
+.severity-med {
+  border-left: 4px solid orange;
+}
+
+.severity-high {
+  border-left: 4px solid red;
+}

@@ -1,0 +1,22 @@
+# Python
+backend/venv/
+__pycache__/
+*.py[cod]
+backend/db.sqlite3
+
+# Django
+/staticfiles/
+/media/
+
+# Node/React
+frontend-web/node_modules/
+frontend-web/dist/
+
+# Expo/React Native
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/.expo-shared/
+
+# OS
+.DS_Store
+Thumbs.db
