@@ -9,7 +9,8 @@ import SyncScreen from "./screens/SyncScreen";
 const Stack = createNativeStackNavigator();
 
 export default function App() {
-  const [token, setToken] = useState(null);
+  const AUTH_BYPASS = true; // temporary disable auth
+  const [token, setToken] = useState(AUTH_BYPASS ? "dev-token" : null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [online, setOnline] = useState(true);
 
