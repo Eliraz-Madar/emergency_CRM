@@ -62,7 +62,7 @@ const FieldIncidentDashboard = () => {
     };
 
     loadInitialData();
-  }, [setMajorIncident, setSectors, setTaskGroups, setEvents, setLoading, setError]);
+  }, []); // Empty dependency array - only run once on mount
 
   // Connect to real-time updates
   useEffect(() => {
@@ -141,7 +141,7 @@ const FieldIncidentDashboard = () => {
         clearTimeout(reconnectTimeout);
       }
     };
-  }, [setConnectionStatus, updateMajorIncident, updateSector, updateTaskGroup, addEvent]);
+  }, []); // Empty dependency array - Zustand setters are stable
 
   // Simulate updates for demo (remove in production)
   useEffect(() => {

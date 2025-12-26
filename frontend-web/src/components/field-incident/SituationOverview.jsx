@@ -9,9 +9,14 @@ import { useFieldIncidentStore } from '../../store/fieldIncident';
 
 const SituationOverview = () => {
   const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
-  const summary = useFieldIncidentStore((s) => s.getSituationSummary());
-  const avgProgress = useFieldIncidentStore((s) => s.getAverageTaskProgress());
-  const alerts = useFieldIncidentStore((s) => s.getCriticalAlerts());
+  const taskGroups = useFieldIncidentStore((s) => s.taskGroups);
+  const getSituationSummary = useFieldIncidentStore((s) => s.getSituationSummary);
+  const getAverageTaskProgress = useFieldIncidentStore((s) => s.getAverageTaskProgress);
+  const getCriticalAlerts = useFieldIncidentStore((s) => s.getCriticalAlerts);
+  
+  const summary = getSituationSummary();
+  const avgProgress = getAverageTaskProgress();
+  const alerts = getCriticalAlerts();
 
   if (!majorIncident || !summary) {
     return (
@@ -119,9 +124,8 @@ const SituationOverview = () => {
           <span className="stat-label">Resources Deployed:</span>
           <span className="stat-value">
             {Math.round(
-              summary.taskGroups > 0
-                ? (summary.taskGroups
-                    .reduce((sum, tg) => sum + tg.assigned_units_count, 0) || 0) / summary.taskGroups
+              taskGroups.length > 0
+                ? (taskGroups.reduce((sum, tg) => sum + (tg.assigned_units_count || 0), 0) || 0) / taskGroups.length
                 : 0
             )}{' '}
             units/group avg

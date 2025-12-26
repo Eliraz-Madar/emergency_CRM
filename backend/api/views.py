@@ -5,6 +5,7 @@ from django.http import JsonResponse, StreamingHttpResponse
 import json
 import time
 import random
+import os
 
 from .models import Incident, Task, Unit
 from .serializers import IncidentSerializer, TaskSerializer, UnitSerializer
@@ -220,7 +221,6 @@ def field_incident_detail(request):
     global _field_incident_data
     
     if _field_incident_data is None:
-        import os
         seed = int(os.getenv("DEMO_SEED", "42"))
         field_service = get_field_incident_service(seed=seed)
         _field_incident_data = field_service.generate_major_incident(incident_type="EARTHQUAKE")

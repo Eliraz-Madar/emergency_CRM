@@ -235,6 +235,10 @@ def get_mock_service(seed: int = None) -> MockDataService:
     """Get or create mock data service."""
     global _mock_service
     if _mock_service is None:
-        seed = seed or int(os.environ.get("DEMO_SEED", ""))
-        _mock_service = MockDataService(seed=seed if seed else None)
+        seed_env = os.environ.get("DEMO_SEED", "0")
+        try:
+            seed = seed or (int(seed_env) if seed_env.strip() else None)
+        except (ValueError, AttributeError):
+            seed = None
+        _mock_service = MockDataService(seed=seed)
     return _mock_service
