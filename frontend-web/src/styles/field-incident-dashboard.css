@@ -308,6 +308,13 @@
   font-size: 0.9rem;
   color: var(--fi-text-primary);
   box-shadow: var(--fi-soft-shadow);
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.alert:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-left: 4px solid rgba(255, 255, 255, 0.25) !important;
 }
 
 .alert-critical {
@@ -346,6 +353,14 @@
   flex-direction: column;
   gap: 0.5rem;
   box-shadow: var(--fi-soft-shadow);
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.metric-card:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
 }
 
 .metric-label {
@@ -444,8 +459,10 @@
 }
 
 .sector-card:hover {
-  background: var(--fi-bg-card-soft);
-  border-color: color-mix(in srgb, var(--fi-accent) 35%, var(--fi-border) 65%);
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid var(--fi-border) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
+  cursor: pointer;
 }
 
 .sector-card.selected {
@@ -657,11 +674,14 @@
   overflow: hidden;
   transition: all 0.2s ease;
   box-shadow: var(--fi-soft-shadow);
+  cursor: pointer;
 }
 
 .task-group-item:hover {
-  background: var(--fi-bg-card-soft);
-  border-color: color-mix(in srgb, var(--fi-accent) 30%, var(--fi-border) 70%);
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid var(--fi-border) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
+  cursor: pointer;
 }
 
 .task-group-item.completed {
@@ -852,10 +872,81 @@
   gap: 1rem;
 }
 
+.timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
 .operational-timeline h3 {
   margin: 0;
   color: var(--fi-text-primary);
   font-size: 1rem;
+  flex: 0 0 auto;
+}
+
+/* Filter Chips */
+.filter-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+
+.filter-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--fi-text-primary);
+  padding: 0.4rem 0.75rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.filter-chip:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: translateY(-2px);
+}
+
+.filter-chip.active {
+  border-color: currentColor;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.filter-chip.active:hover {
+  transform: translateY(-2px);
+}
+
+.legend-toggle-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--fi-text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.legend-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.legend-toggle-btn:active {
+  transform: scale(0.98);
 }
 
 .timeline-container {
@@ -874,6 +965,13 @@
   border-bottom: 1px solid var(--fi-border);
   position: relative;
   color: var(--fi-text-primary);
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.timeline-event:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
 }
 
 .timeline-event:last-child {
@@ -970,21 +1068,40 @@
   font-size: 0.95rem;
 }
 
-.timeline-legend {
-  border-top: 1px solid var(--fi-border);
-  padding-top: 1rem;
+.timeline-legend-popup {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 0.5rem;
+  animation: slideDown 0.2s ease;
 }
 
-.timeline-legend h4 {
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.legend-content h4 {
   margin: 0 0 0.75rem;
   font-size: 0.9rem;
   color: var(--fi-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .legend-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 0.5rem;
+  margin-bottom: 1rem;
 }
 
 .legend-item {
@@ -996,10 +1113,44 @@
 }
 
 .legend-icon {
-  font-size: 1rem;
+  font-size: 1.1rem;
   flex-shrink: 0;
-  color: var(--fi-text-primary);
 }
+
+.legend-severity h4 {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  color: var(--fi-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.severity-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.severity-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--fi-text-secondary);
+}
+
+.severity-dot {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.timeline-legend {
+  display: none;
+}
+
+/* EVENT DETAILS & INFO BUTTON - REMOVED (entire card is now clickable) */
 
 /* ============================================
    RESPONSIVE
@@ -1086,30 +1237,7 @@
   background: color-mix(in srgb, var(--fi-accent) 40%, var(--fi-bg-card) 60%);
 }
 
-/* ============================================
-   EVENT DETAILS & INFO BUTTON
-   ============================================ */
-
-.event-info-btn {
-  background: none;
-  border: none;
-  color: var(--fi-text-primary);
-  font-size: 1.1rem;
-  cursor: pointer;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.35rem;
-  transition: all 0.2s ease;
-  flex-shrink: 0;
-}
-
-.event-info-btn:hover {
-  background: var(--fi-bg-card-soft);
-  transform: scale(1.15);
-}
-
-.event-info-btn:active {
-  transform: scale(0.95);
-}
+/* EVENT DETAILS & INFO BUTTON - REMOVED (entire card is now clickable) */
 
 /* Event Details Modal */
 .event-details-modal-overlay {

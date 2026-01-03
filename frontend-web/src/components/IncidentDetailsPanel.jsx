@@ -232,8 +232,26 @@ export function IncidentDetailsPanel() {
       </div>
 
       <div className="details-footer">
-        <small>Created: {new Date(incident.created_at).toLocaleString()}</small>
-        <small>Updated: {new Date(incident.updated_at).toLocaleString()}</small>
+        <small>
+          Created: {
+            incident.created_at
+              ? (() => {
+                const date = new Date(incident.created_at);
+                return !isNaN(date.getTime()) ? date.toLocaleString() : 'Unknown';
+              })()
+              : 'Unknown'
+          }
+        </small>
+        <small>
+          Updated: {
+            incident.updated_at
+              ? (() => {
+                const date = new Date(incident.updated_at);
+                return !isNaN(date.getTime()) ? date.toLocaleString() : 'Unknown';
+              })()
+              : 'Unknown'
+          }
+        </small>
       </div>
     </div>
   );

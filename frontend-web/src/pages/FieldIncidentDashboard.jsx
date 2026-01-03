@@ -269,9 +269,18 @@ const FieldIncidentDashboard = () => {
               <div className="detail-row">
                 <strong>Timestamp:</strong>
                 <span>
-                  {typeof selectedTimelineEvent.created_at === 'number'
-                    ? new Date(selectedTimelineEvent.created_at * 1000).toLocaleString()
-                    : new Date(selectedTimelineEvent.created_at).toLocaleString()}
+                  {(() => {
+                    let date = null;
+                    if (selectedTimelineEvent.created_at) {
+                      date = typeof selectedTimelineEvent.created_at === 'number'
+                        ? new Date(selectedTimelineEvent.created_at * 1000)
+                        : new Date(selectedTimelineEvent.created_at);
+                    }
+                    if (date && !isNaN(date.getTime())) {
+                      return date.toLocaleString();
+                    }
+                    return 'No timestamp available';
+                  })()}
                 </span>
               </div>
               {selectedTimelineEvent.created_by && (
