@@ -7,7 +7,7 @@
 
 import { useFieldIncidentStore } from '../../store/fieldIncident';
 
-const OperationalTimeline = () => {
+const OperationalTimeline = ({ onShowDetails }) => {
   const events = useFieldIncidentStore((s) => s.events);
 
   const eventTypeIcons = {
@@ -69,6 +69,15 @@ const OperationalTimeline = () => {
                   >
                     {event.severity}
                   </span>
+                  {onShowDetails && (
+                    <button
+                      className="event-info-btn"
+                      onClick={() => onShowDetails(event)}
+                      title="Show event details"
+                    >
+                      ℹ️
+                    </button>
+                  )}
                 </div>
 
                 <div className="event-metadata">

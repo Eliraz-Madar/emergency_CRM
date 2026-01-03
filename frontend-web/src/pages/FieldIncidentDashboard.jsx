@@ -12,7 +12,7 @@
  * - Operational timeline for decision trail
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useFieldIncidentStore } from '../store/fieldIncident';
 import {
   getFieldIncident,
@@ -26,6 +26,8 @@ import OperationalTimeline from '../components/field-incident/OperationalTimelin
 import '../styles/field-incident-dashboard.css';
 
 const FieldIncidentDashboard = () => {
+  const [selectedTimelineEvent, setSelectedTimelineEvent] = useState(null);
+
   const setMajorIncident = useFieldIncidentStore((s) => s.setMajorIncident);
   const setSectors = useFieldIncidentStore((s) => s.setSectors);
   const setTaskGroups = useFieldIncidentStore((s) => s.setTaskGroups);
@@ -174,8 +176,8 @@ const FieldIncidentDashboard = () => {
         <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100vh', fontSize: '1.2rem', color: '#ef4444' }}>
           <div>⚠️ Error loading field incident data</div>
           <div style={{ fontSize: '1rem', marginTop: '1rem' }}>{error}</div>
-          <button 
-            onClick={() => window.location.reload()} 
+          <button
+            onClick={() => window.location.reload()}
             style={{ marginTop: '2rem', padding: '0.5rem 1rem', fontSize: '1rem', cursor: 'pointer' }}
           >
             Retry
@@ -219,7 +221,7 @@ const FieldIncidentDashboard = () => {
               <SectorMap />
             </div>
             <div className="operations-card timeline-card">
-              <OperationalTimeline />
+              <OperationalTimeline onShowDetails={setSelectedTimelineEvent} />
             </div>
           </div>
         </section>
@@ -239,6 +241,64 @@ const FieldIncidentDashboard = () => {
           </span>
         </div>
       </footer>
+
+      {/* Event Details Modal */}
+      {selectedTimelineEvent && (
+        <div className="event-details-modal-overlay" onClick={() => setSelectedTimelineEvent(null)}>
+          <div className="event-details-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{selectedTimelineEvent.title}</h3>
+              <button
+                className="modal-close-btn"
+                onClick={() => setSelectedTimelineEvent(null)}
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-content">
+              <div className="detail-row">
+                <strong>Event Type:</strong>
+                <span>{selectedTimelineEvent.event_type.replace(/_/g, ' ')}</span>
+              </div>
+              <div className="detail-row">
+                <strong>Severity:</strong>
+                <span>{selectedTimelineEvent.severity}</span>
+              </div>
+              <div className="detail-row">
+                <strong>Timestamp:</strong>
+                <span>
+                  {typeof selectedTimelineEvent.created_at === 'number'
+                    ? new Date(selectedTimelineEvent.created_at * 1000).toLocaleString()
+                    : new Date(selectedTimelineEvent.created_at).toLocaleString()}
+                </span>
+              </div>
+              {selectedTimelineEvent.created_by && (
+                <div className="detail-row">
+                  <strong>Created By:</strong>
+                  <span>{selectedTimelineEvent.created_by}</span>
+                </div>
+              )}
+              {selectedTimelineEvent.description && (
+                <div className="detail-section">
+                  <strong>Description:</strong>
+                  <p>{selectedTimelineEvent.description}</p>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                className="modal-btn-primary"
+                onClick={() => setSelectedTimelineEvent(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

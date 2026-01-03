@@ -6,3 +6,4 @@ requests==2.31.0
 django-extensions==3.2.3
 python-dateutil==2.8.2
 Faker==22.0.0
+To run the server, use: python manage.py runserver
