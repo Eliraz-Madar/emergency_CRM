@@ -6,15 +6,17 @@
 :root {
   --color-primary: #3b82f6;
   --color-success: #10b981;
-  --color-warning: #f59e0b;
+  --color-warning: #ef4444;
   --color-danger: #ef4444;
   --color-critical: #dc2626;
-  --color-bg-dark: #1f2937;
-  --color-bg-light: #f9fafb;
-  --color-border: #e5e7eb;
-  --color-text-primary: #111827;
-  --color-text-secondary: #6b7280;
-  --color-shadow: rgba(0, 0, 0, 0.1);
+  --color-bg-app: #0f172a;
+  --color-bg-card: #1e293b;
+  --color-bg-input: #334155;
+  --color-bg-hover: #334155;
+  --color-border: #94a3b8;
+  --color-text-primary: #ffffff !important;
+  --color-text-secondary: #ffffff !important;
+  --color-shadow: rgba(0, 0, 0, 0.5);
 
   --spacing-xs: 0.25rem;
   --spacing-sm: 0.5rem;
@@ -51,7 +53,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--color-bg-light);
+  background: var(--color-bg-app) !important;
 }
 
 .dashboard.loading {
@@ -82,17 +84,15 @@ body {
 
 /* Top Bar */
 .dashboard-topbar {
-  background: var(--color-bg-card) !important;
-  /* Force Dark */
   background-color: var(--color-bg-card) !important;
+  background: var(--color-bg-card) !important;
   height: 50px !important;
-  /* Force Small Height */
-  min-height: 50px;
+  min-height: 50px !important;
   padding: 0 1rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border) !important;
   color: var(--color-text-primary);
   z-index: 100;
   gap: var(--spacing-lg);
@@ -101,7 +101,8 @@ body {
 
 .topbar-center,
 .feed-toggle,
-.user-actions {
+.user-actions,
+.demo-badge {
   display: none !important;
 }
 
@@ -191,6 +192,7 @@ body {
   gap: var(--spacing-md);
   padding: var(--spacing-md);
   flex: 1;
+  height: calc(100vh - 50px);
   overflow: hidden;
 }
 
@@ -219,15 +221,20 @@ body {
   align-items: center;
   gap: var(--spacing-md);
   padding: var(--spacing-md);
-  background: var(--color-bg-card);
-  border-radius: var(--border-radius-lg);
+  background: var(--color-bg-card) !important;
+  border: 1px solid var(--color-border);
   border-left: 4px solid;
+  border-radius: var(--border-radius-lg);
   box-shadow: 0 1px 3px var(--color-shadow);
   transition: all 0.2s;
+  color: var(--color-text-primary);
+  cursor: pointer;
 }
 
 .kpi-card:hover {
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
   transform: translateY(-2px);
 }
 
@@ -242,13 +249,17 @@ body {
 .kpi-value {
   font-size: 1.75rem;
   font-weight: 700;
-  color: var(--color-text-primary);
+  color: #ffffff !important;
 }
 
 .kpi-label {
   font-size: 0.875rem;
-  color: var(--color-text-secondary);
+  color: #cbd5e1 !important;
   margin-top: var(--spacing-xs);
+}
+
+.kpi-icon {
+  color: var(--color-primary);
 }
 
 /* ============================================
@@ -259,6 +270,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
+  background: var(--color-bg-card) !important;
+  color: var(--color-text-primary);
 }
 
 .filter-primary {
@@ -274,6 +287,8 @@ body {
   border-radius: var(--border-radius);
   font-size: 0.875rem;
   transition: all 0.2s;
+  background-color: var(--color-bg-input);
+  color: #ffffff !important;
 }
 
 .search-input:focus {
@@ -288,6 +303,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: var(--border-radius);
   background: var(--color-bg-card);
+  color: #ffffff !important;
   cursor: pointer;
   font-size: 0.875rem;
   font-weight: 500;
@@ -355,11 +371,13 @@ body {
 .incident-list {
   display: flex;
   flex-direction: column;
-  background: var(--color-bg-card);
+  background: var(--color-bg-card) !important;
   border-radius: var(--border-radius-lg);
   box-shadow: 0 1px 3px var(--color-shadow);
   overflow: hidden;
   height: 100%;
+  min-height: 0;
+  color: var(--color-text-primary);
 }
 
 .incident-list-header {
@@ -378,8 +396,9 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow-y: auto;
   flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .incident-item {
@@ -392,8 +411,8 @@ body {
 }
 
 .incident-item:hover {
-  background: rgba(255, 255, 255, 0.04) !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15) !important;
 }
 
 .incident-item.selected {
@@ -457,6 +476,22 @@ body {
 .incident-location,
 .incident-time {
   white-space: nowrap;
+  color: #94a3b8 !important;
+}
+
+/* Comprehensive text color overrides for visibility */
+.details-section p,
+.details-section span,
+.details-section div:not([class*="-icon"]) {
+  color: #f8fafc !important;
+}
+
+.unit-status {
+  color: #cbd5e1 !important;
+}
+
+.status-badge {
+  color: #ffffff !important;
 }
 
 /* ============================================
@@ -465,11 +500,12 @@ body {
 
 .map-container {
   position: relative;
-  background: var(--color-bg-card);
+  background: var(--color-bg-card) !important;
   border-radius: var(--border-radius-lg);
   box-shadow: 0 1px 3px var(--color-shadow);
   overflow: hidden;
   height: 100%;
+  color: var(--color-text-primary);
 }
 
 .map-view {
@@ -567,11 +603,13 @@ body {
 .incident-details-panel {
   display: flex;
   flex-direction: column;
-  background: var(--color-bg-card);
+  background: var(--color-bg-card) !important;
   border-radius: var(--border-radius-lg);
   box-shadow: 0 1px 3px var(--color-shadow);
-  overflow-y: auto;
+  overflow: hidden;
   height: 100%;
+  min-height: 0;
+  color: var(--color-text-primary);
 }
 
 .incident-details-panel.empty {
@@ -601,7 +639,19 @@ body {
   margin: 0 0 var(--spacing-md) 0;
   font-size: 0.95rem;
   font-weight: 600;
-  color: var(--color-text-primary);
+  color: #f8fafc !important;
+}
+
+.incident-title,
+.event-text,
+.unit-name {
+  color: #f8fafc !important;
+}
+
+.incident-meta,
+.event-meta,
+.text-secondary {
+  color: #94a3b8 !important;
 }
 
 .details-grid {
@@ -819,14 +869,22 @@ body {
 
 .details-footer {
   margin-top: auto;
-  padding: var(--spacing-md);
+  padding: 12px;
   border-top: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
-  color: var(--color-text-secondary);
-  font-size: 0.75rem;
+  color: #ffffff !important;
+  font-size: 0.8rem !important;
+  opacity: 0.9;
   flex-shrink: 0;
+}
+
+.details-footer small,
+.details-footer span,
+.details-footer p {
+  font-size: 0.8rem !important;
+  color: #ffffff !important;
 }
 
 .toast {
@@ -868,11 +926,13 @@ body {
 .event-feed {
   display: flex;
   flex-direction: column;
-  background: var(--color-bg-card);
+  background: var(--color-bg-card) !important;
   border-radius: var(--border-radius-lg);
   box-shadow: 0 1px 3px var(--color-shadow);
   overflow: hidden;
   height: 100%;
+  min-height: 0;
+  color: var(--color-text-primary);
 }
 
 .feed-header {
@@ -903,8 +963,9 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow-y: auto;
   flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .event-item {
@@ -918,8 +979,8 @@ body {
 }
 
 .event-item:hover {
-  background: rgba(255, 255, 255, 0.04) !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15) !important;
 }
 
 .event-item:last-child {
@@ -959,12 +1020,13 @@ body {
   display: flex;
   gap: var(--spacing-sm);
   font-size: 0.75rem;
-  color: var(--color-text-secondary);
+  color: #94a3b8 !important;
 }
 
 .event-entity,
 .event-time {
   white-space: nowrap;
+  color: #f8fafc !important;
 }
 
 .empty-state {
@@ -1032,4 +1094,165 @@ body {
   .event-feed {
     max-height: 400px;
   }
+}
+
+/* ============================================
+   FORCE ALL TEXT TO WHITE - NO GREY ALLOWED
+   ============================================ */
+
+/* Force ALL commonly grey elements to be WHITE */
+.kpi-label,
+.incident-meta,
+.event-meta,
+.detail-field label,
+.section-title,
+.topbar-center,
+small,
+span,
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: #ffffff !important;
+}
+
+/* Input fields: White text on dark background */
+input,
+select,
+textarea,
+.search-input {
+  color: #ffffff !important;
+  border-color: #ffffff !important;
+}
+
+/* Fix icons opacity so they are bright white */
+.incident-icon,
+.event-icon,
+.kpi-icon {
+  color: #ffffff !important;
+  opacity: 1 !important;
+}
+
+/* ============================================
+   Dark Theme for Leaflet Map Popups
+   ============================================ */
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background-color: #1e293b !important;
+  color: #ffffff !important;
+  border: 1px solid #475569;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5);
+}
+
+.leaflet-popup-content strong,
+.leaflet-popup-content p,
+.leaflet-popup-content span,
+.leaflet-popup-content small {
+  color: #ffffff !important;
+}
+
+.leaflet-popup-close-button {
+  color: #ffffff !important;
+}
+
+.leaflet-container a.leaflet-popup-close-button:hover {
+  color: #f8fafc !important;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* ============================================
+   Fix Workflow Section Text Visibility
+   ============================================ */
+
+.workflow-item label,
+.workflow-section label,
+.assign-unit-section label,
+.detail-field label {
+  color: #ffffff !important;
+  font-weight: 600;
+  margin-bottom: 4px;
+  display: block;
+}
+
+.workflow-btn {
+  color: #ffffff !important;
+  border-color: #475569;
+}
+
+.workflow-btn:hover {
+  background-color: #334155 !important;
+}
+
+/* ============================================
+   Fix Search Bar Input Visibility
+   ============================================ */
+
+.search-input,
+input[type="text"],
+input[type="search"] {
+  color: #ffffff !important;
+  background-color: #334155 !important;
+  border: 1px solid #64748b;
+}
+
+/* Style the placeholder text */
+::placeholder,
+.search-input::placeholder {
+  color: #94a3b8 !important;
+  opacity: 1;
+}
+
+/* ============================================
+   Fix Action Buttons (Quick Actions)
+   ============================================ */
+
+.action-btn,
+.workflow-btn,
+.assign-btn,
+.quick-action-item {
+  color: #ffffff !important;
+  background-color: #1e293b;
+  border: 1px solid #475569;
+}
+
+.action-btn:hover,
+.workflow-btn:hover {
+  background-color: #334155 !important;
+  border-color: #3b82f6;
+}
+
+/* ============================================
+   Fix Unit IDs - WHITE TEXT in Active Units
+   ============================================ */
+
+/* Fix Unit IDs and secondary info in the left panel */
+.unit-meta,
+.unit-item .text-secondary,
+.event-feed small {
+  color: #ffffff !important;
+  opacity: 0.8;
+}
+
+/* ============================================
+   Fix Incident List Details - WHITE TEXT
+   ============================================ */
+
+/* Fix visibility in Incident List */
+.incident-list .text-secondary,
+.incident-list .incident-meta,
+.incident-list small,
+.incident-item p {
+  color: #ffffff !important;
+  opacity: 0.9;
+}
+
+/* Ensure icons next to the text are also visible */
+.incident-list .bi, 
+.incident-list svg {
+  color: #ffffff !important;
+  opacity: 0.8;
 }
