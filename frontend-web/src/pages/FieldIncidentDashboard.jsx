@@ -153,7 +153,7 @@ const FieldIncidentDashboard = () => {
       } catch (err) {
         console.error('Simulation update failed:', err);
       }
-    }, 3000);
+    }, 5000);
 
     return () => clearInterval(simulationInterval);
   }, []);

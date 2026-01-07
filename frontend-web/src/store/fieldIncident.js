@@ -63,10 +63,27 @@ export const useFieldIncidentStore = create((set, get) => ({
       ),
     })),
 
-  addEvent: (event) =>
-    set((state) => ({
-      events: [event, ...state.events].slice(0, 100), // Keep last 100 events
-    })),
+  addEvent: (newEvent) =>
+    set((state) => {
+      // Check if event with same title and description already exists
+      const isDuplicate = state.events.some(
+        (e) => e.title === newEvent.title && e.description === newEvent.description
+      );
+
+      if (isDuplicate) {
+        return {}; // Do nothing if duplicate
+      }
+
+      // Ensure event has a timestamp
+      const eventWithTime = {
+        ...newEvent,
+        created_at: newEvent.created_at || new Date().toISOString(),
+      };
+
+      return {
+        events: [eventWithTime, ...state.events].slice(0, 50), // Keep last 50 events
+      };
+    }),
 
   // Selectors
   getFilteredTaskGroups: () => {

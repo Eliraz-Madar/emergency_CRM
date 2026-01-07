@@ -42,9 +42,11 @@ class FieldIncidentDataService:
 
     SECTORS = [
         {"name": "North Zone", "offset": (0.02, 0.01), "hazard": "HIGH"},
-        {"name": "East Sector", "offset": (0.015, -0.015), "hazard": "CRITICAL"},
+        {"name": "East Sector", "offset": (
+            0.015, -0.015), "hazard": "CRITICAL"},
         {"name": "South Area", "offset": (-0.015, -0.01), "hazard": "MEDIUM"},
-        {"name": "West Perimeter", "offset": (-0.01, 0.02), "hazard": "MEDIUM"},
+        {"name": "West Perimeter",
+            "offset": (-0.01, 0.02), "hazard": "MEDIUM"},
         {"name": "Central Command", "offset": (0, 0), "hazard": "LOW"},
     ]
 
@@ -66,7 +68,8 @@ class FieldIncidentDataService:
                 "priority": "CRITICAL",
                 "subtasks": 15,
             },
-            {"title": "Rubble Clearance - North Zone", "priority": "HIGH", "subtasks": 8},
+            {"title": "Rubble Clearance - North Zone",
+                "priority": "HIGH", "subtasks": 8},
             {
                 "title": "Secondary Rescue Operations",
                 "priority": "HIGH",
@@ -74,34 +77,50 @@ class FieldIncidentDataService:
             },
         ],
         "EVACUATION": [
-            {"title": "Mandatory Evacuation - East Sector", "priority": "CRITICAL", "subtasks": 12},
-            {"title": "Vulnerable Population Transport", "priority": "HIGH", "subtasks": 6},
-            {"title": "Temporary Shelter Setup", "priority": "MEDIUM", "subtasks": 8},
+            {"title": "Mandatory Evacuation - East Sector",
+                "priority": "CRITICAL", "subtasks": 12},
+            {"title": "Vulnerable Population Transport",
+                "priority": "HIGH", "subtasks": 6},
+            {"title": "Temporary Shelter Setup",
+                "priority": "MEDIUM", "subtasks": 8},
         ],
         "MEDICAL": [
-            {"title": "Triage & Emergency Care", "priority": "CRITICAL", "subtasks": 20},
-            {"title": "Field Hospital Operations", "priority": "HIGH", "subtasks": 10},
-            {"title": "Medical Supply Distribution", "priority": "HIGH", "subtasks": 5},
+            {"title": "Triage & Emergency Care",
+                "priority": "CRITICAL", "subtasks": 20},
+            {"title": "Field Hospital Operations",
+                "priority": "HIGH", "subtasks": 10},
+            {"title": "Medical Supply Distribution",
+                "priority": "HIGH", "subtasks": 5},
         ],
         "UTILITIES": [
-            {"title": "Gas Leak Detection & Isolation", "priority": "CRITICAL", "subtasks": 7},
+            {"title": "Gas Leak Detection & Isolation",
+                "priority": "CRITICAL", "subtasks": 7},
             {"title": "Power Grid Assessment", "priority": "HIGH", "subtasks": 5},
-            {"title": "Water System Restoration", "priority": "MEDIUM", "subtasks": 6},
+            {"title": "Water System Restoration",
+                "priority": "MEDIUM", "subtasks": 6},
         ],
         "SECURITY": [
-            {"title": "Perimeter Security Setup", "priority": "HIGH", "subtasks": 8},
-            {"title": "Looting Prevention Patrols", "priority": "HIGH", "subtasks": 6},
+            {"title": "Perimeter Security Setup",
+                "priority": "HIGH", "subtasks": 8},
+            {"title": "Looting Prevention Patrols",
+                "priority": "HIGH", "subtasks": 6},
             {"title": "Access Control Points", "priority": "MEDIUM", "subtasks": 4},
         ],
         "LOGISTICS": [
-            {"title": "Food & Water Distribution", "priority": "HIGH", "subtasks": 8},
-            {"title": "Medical Supply Management", "priority": "HIGH", "subtasks": 5},
-            {"title": "Fuel & Equipment Logistics", "priority": "MEDIUM", "subtasks": 6},
+            {"title": "Food & Water Distribution",
+                "priority": "HIGH", "subtasks": 8},
+            {"title": "Medical Supply Management",
+                "priority": "HIGH", "subtasks": 5},
+            {"title": "Fuel & Equipment Logistics",
+                "priority": "MEDIUM", "subtasks": 6},
         ],
         "DAMAGE_ASSESSMENT": [
-            {"title": "Building Safety Assessment", "priority": "HIGH", "subtasks": 10},
-            {"title": "Infrastructure Damage Survey", "priority": "MEDIUM", "subtasks": 8},
-            {"title": "Environmental Hazard Mapping", "priority": "MEDIUM", "subtasks": 6},
+            {"title": "Building Safety Assessment",
+                "priority": "HIGH", "subtasks": 10},
+            {"title": "Infrastructure Damage Survey",
+                "priority": "MEDIUM", "subtasks": 8},
+            {"title": "Environmental Hazard Mapping",
+                "priority": "MEDIUM", "subtasks": 6},
         ],
         "COMMUNICATIONS": [
             {
@@ -109,8 +128,10 @@ class FieldIncidentDataService:
                 "priority": "HIGH",
                 "subtasks": 4,
             },
-            {"title": "Public Information Distribution", "priority": "HIGH", "subtasks": 5},
-            {"title": "Command Post Communications", "priority": "HIGH", "subtasks": 3},
+            {"title": "Public Information Distribution",
+                "priority": "HIGH", "subtasks": 5},
+            {"title": "Command Post Communications",
+                "priority": "HIGH", "subtasks": 3},
         ],
     }
 
@@ -208,7 +229,8 @@ class FieldIncidentDataService:
             templates = self.TASK_TEMPLATES.get(category, [])
             for template in templates:
                 # Select 1-3 sectors for this task group
-                assigned_sectors = random.sample(sectors, k=random.randint(1, 3))
+                assigned_sectors = random.sample(
+                    sectors, k=random.randint(1, 3))
 
                 # Simulate progress based on priority
                 priority = template["priority"]
@@ -217,12 +239,14 @@ class FieldIncidentDataService:
                     status = random.choice(["PLANNED", "IN_PROGRESS"])
                 elif priority == "HIGH":
                     progress = random.randint(0, 80)
-                    status = random.choice(["PLANNED", "IN_PROGRESS", "PAUSED"])
+                    status = random.choice(
+                        ["PLANNED", "IN_PROGRESS", "PAUSED"])
                 else:
                     progress = random.randint(0, 40)
                     status = random.choice(["PLANNED", "IN_PROGRESS"])
 
-                completed_subtasks = int((template["subtasks"] * progress) / 100)
+                completed_subtasks = int(
+                    (template["subtasks"] * progress) / 100)
 
                 task_groups.append(
                     {
@@ -334,8 +358,10 @@ class FieldIncidentDataService:
             task_idx = random.randint(0, len(incident_data["task_groups"]) - 1)
             task = incident_data["task_groups"][task_idx]
             if task["status"] == "IN_PROGRESS":
-                new_progress = min(100, task["progress_percent"] + random.randint(5, 15))
-                new_completed = int((task["total_subtasks"] * new_progress) / 100)
+                new_progress = min(
+                    100, task["progress_percent"] + random.randint(5, 15))
+                new_completed = int(
+                    (task["total_subtasks"] * new_progress) / 100)
                 if "task_updates" not in update:
                     update["task_updates"] = {}
                 update["task_updates"][task_idx] = {
@@ -344,8 +370,8 @@ class FieldIncidentDataService:
                     "status": "COMPLETED" if new_progress >= 100 else "IN_PROGRESS",
                 }
 
-        # 50% chance to generate a new event
-        if random.random() < 0.5:
+        # 40% chance to generate a new event
+        if random.random() < 0.40:
             event = self._generate_random_event()
             if "new_event" not in update:
                 update["new_event"] = event
@@ -398,8 +424,10 @@ class FieldIncidentDataService:
         return {
             **template,
             "created_by": random.choice(
-                ["Command Center", "Field Operations", "Medical Team", "Safety Officer"]
+                ["Command Center", "Field Operations",
+                    "Medical Team", "Safety Officer"]
             ),
+            "created_at": datetime.now().isoformat(),
         }
 
 
