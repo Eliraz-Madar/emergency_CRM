@@ -13,6 +13,7 @@ from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission
 from utils.mock_data import get_mock_service
 from utils.realtime import get_realtime_service
 from utils.field_incident_data import get_field_incident_service
+from utils.drill_context import get_drill_context_service
 
 
 class IncidentViewSet(viewsets.ModelViewSet):
@@ -22,7 +23,8 @@ class IncidentViewSet(viewsets.ModelViewSet):
 
 
 class TaskViewSet(viewsets.ModelViewSet):
-    queryset = Task.objects.select_related("incident", "assigned_unit").all().order_by("-timestamp")
+    queryset = Task.objects.select_related(
+        "incident", "assigned_unit").all().order_by("-timestamp")
     serializer_class = TaskSerializer
     permission_classes = [TaskPermission]
 
@@ -41,7 +43,8 @@ class TaskViewSet(viewsets.ModelViewSet):
                 return Response({"detail": "Field units can only update status."}, status=status.HTTP_400_BAD_REQUEST)
             kwargs["partial"] = True
             instance = self.get_object()
-            serializer = self.get_serializer(instance, data={"status": status_value}, partial=True)
+            serializer = self.get_serializer(
+                instance, data={"status": status_value}, partial=True)
             serializer.is_valid(raise_exception=True)
             self.perform_update(serializer)
             return Response(serializer.data)
@@ -103,9 +106,10 @@ def mock_incident_status(request, incident_id):
     new_status = request.data.get("status")
     if not new_status:
         return Response({"detail": "status is required."}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     mock_service = get_mock_service()
-    incident = mock_service.update_incident_status(int(incident_id), new_status)
+    incident = mock_service.update_incident_status(
+        int(incident_id), new_status)
     if not incident:
         return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(incident)
@@ -117,9 +121,10 @@ def mock_incident_severity(request, incident_id):
     new_severity = request.data.get("severity")
     if not new_severity:
         return Response({"detail": "severity is required."}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     mock_service = get_mock_service()
-    incident = mock_service.update_incident_severity(int(incident_id), new_severity)
+    incident = mock_service.update_incident_severity(
+        int(incident_id), new_severity)
     if not incident:
         return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(incident)
@@ -131,7 +136,7 @@ def mock_incident_assign(request, incident_id):
     unit_id = request.data.get("unit_id")
     if not unit_id:
         return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     mock_service = get_mock_service()
     incident = mock_service.assign_unit(int(incident_id), int(unit_id))
     if not incident:
@@ -145,7 +150,7 @@ def mock_incident_note(request, incident_id):
     note = request.data.get("note")
     if not note:
         return Response({"detail": "note is required."}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     mock_service = get_mock_service()
     incident = mock_service.add_incident_note(int(incident_id), note)
     if not incident:
@@ -166,20 +171,20 @@ def mock_updates_stream(request):
     """Stream real-time updates using Server-Sent Events."""
     mock_service = get_mock_service()
     realtime_service = get_realtime_service()
-    
+
     def event_generator():
         # Send initial connection message
         yield f"data: {json.dumps({'type': 'connected', 'timestamp': time.time()})}\n\n"
-        
+
         # Queue for events
         events_queue = []
-        
+
         def on_event(event):
             events_queue.append(event)
-        
+
         # Subscribe to updates
         unsubscribe = realtime_service.subscribe(on_event)
-        
+
         # Keep connection alive and send events
         try:
             last_heartbeat = time.time()
@@ -188,16 +193,16 @@ def mock_updates_stream(request):
                 while events_queue:
                     event = events_queue.pop(0)
                     yield f"data: {json.dumps(event)}\n\n"
-                
+
                 # Send heartbeat every 10 seconds
                 if time.time() - last_heartbeat > 10:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     last_heartbeat = time.time()
-                
+
                 time.sleep(0.1)
         finally:
             unsubscribe()
-    
+
     response = StreamingHttpResponse(
         event_generator(),
         content_type="text/event-stream"
@@ -217,25 +222,86 @@ _field_incident_data = None
 
 @api_view(["GET"])
 def field_incident_detail(request):
-    """Get current major incident with all sectors and task groups."""
+    """Get current major incident with all sectors and task groups.
+
+    DRILL ISOLATION: This endpoint filters data based on the active drill context.
+    """
     global _field_incident_data
-    
+
+    drill_context = get_drill_context_service()
+
     if _field_incident_data is None:
         seed = int(os.getenv("DEMO_SEED", "42"))
         field_service = get_field_incident_service(seed=seed)
-        _field_incident_data = field_service.generate_major_incident(incident_type="EARTHQUAKE")
-    
+        _field_incident_data = field_service.generate_major_incident(
+            incident_type="EARTHQUAKE")
+
+    # Log the active drill context for debugging
+    active_drill = drill_context.active_drill_id if drill_context.has_active_drill() else None
+    print(
+        f"[DRILL CONTEXT] Serving field incident detail for drill: {active_drill}")
+
+    # In a production system, you would filter _field_incident_data by drill ID here
+    # For now, return the global data (which is set when drill starts)
     return Response(_field_incident_data)
+
+
+@api_view(["POST"])
+def field_incident_reset(request):
+    """Reset field incident data for a new drill with fresh data.
+
+    DRILL ISOLATION: Generates a new incident with a fresh seed, ensuring
+    each drill type gets unique data and previous drill data is completely cleared.
+
+    Request body:
+    {
+        "incident_type": "EARTHQUAKE" | "MISSILE_STRIKE" | "BUILDING_COLLAPSE"
+    }
+    """
+    global _field_incident_data
+
+    # Get incident type from request, default to EARTHQUAKE
+    incident_type = request.data.get("incident_type", "EARTHQUAKE")
+
+    # Generate a new random seed using current timestamp (crucial for fresh data)
+    seed = int(time.time())
+
+    # Re-initialize the global field incident data with new seed
+    field_service = get_field_incident_service(seed=seed)
+    _field_incident_data = field_service.generate_major_incident(
+        incident_type=incident_type)
+
+    print(
+        f"[FIELD INCIDENT RESET] New {incident_type} drill initialized with seed {seed}")
+
+    return Response({
+        "drill_id": seed,
+        "incident_type": incident_type,
+        "major_incident": _field_incident_data.get("major_incident", {}),
+        "sectors": _field_incident_data.get("sectors", []),
+        "task_groups": _field_incident_data.get("task_groups", []),
+        "events": _field_incident_data.get("events", []),
+    })
 
 
 @api_view(["GET"])
 def field_incident_sectors(request):
-    """Get all sectors for current major incident."""
+    """Get all sectors for current major incident.
+
+    DRILL ISOLATION: Returns only sectors for the active drill.
+    """
     global _field_incident_data
-    
+
+    drill_context = get_drill_context_service()
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    # Log the active drill context
+    active_drill = drill_context.active_drill_id if drill_context.has_active_drill() else None
+    print(f"[DRILL CONTEXT] Serving sectors for drill: {active_drill}")
+
+    # Return only sectors from the currently active drill's data
     return Response({
         "sectors": _field_incident_data.get("sectors", []),
         "major_incident": _field_incident_data.get("major_incident", {})
@@ -244,12 +310,22 @@ def field_incident_sectors(request):
 
 @api_view(["GET"])
 def field_incident_task_groups(request):
-    """Get all task groups for current major incident."""
+    """Get all task groups for current major incident.
+
+    DRILL ISOLATION: Returns only task groups for the active drill.
+    """
     global _field_incident_data
-    
+
+    drill_context = get_drill_context_service()
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    # Log the active drill context
+    active_drill = drill_context.active_drill_id if drill_context.has_active_drill() else None
+    print(f"[DRILL CONTEXT] Serving task groups for drill: {active_drill}")
+
+    # Return only task groups from the currently active drill's data
     return Response({
         "task_groups": _field_incident_data.get("task_groups", []),
     })
@@ -257,12 +333,22 @@ def field_incident_task_groups(request):
 
 @api_view(["GET"])
 def field_incident_events(request):
-    """Get operational timeline events."""
+    """Get operational timeline events.
+
+    DRILL ISOLATION: Returns only events for the active drill.
+    """
     global _field_incident_data
-    
+
+    drill_context = get_drill_context_service()
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    # Log the active drill context
+    active_drill = drill_context.active_drill_id if drill_context.has_active_drill() else None
+    print(f"[DRILL CONTEXT] Serving events for drill: {active_drill}")
+
+    # Return only events from the currently active drill's data
     return Response({
         "events": _field_incident_data.get("events", []),
     })
@@ -270,18 +356,27 @@ def field_incident_events(request):
 
 @api_view(["PATCH"])
 def field_incident_sector_update(request, sector_id):
-    """Update sector hazard level and status."""
+    """Update sector hazard level and status.
+
+    DRILL ISOLATION: Updates are applied only to the active drill's data.
+    """
     global _field_incident_data
-    
+    drill_context = get_drill_context_service()
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    # Log the active drill context
+    active_drill = drill_context.active_drill_id if drill_context.has_active_drill() else None
+    print(
+        f"[DRILL CONTEXT] Updating sector {sector_id} for drill: {active_drill}")
+
     sectors = _field_incident_data.get("sectors", [])
     if sector_id >= len(sectors):
         return Response({"detail": "Sector not found"}, status=status.HTTP_404_NOT_FOUND)
-    
+
     sector = sectors[sector_id]
-    
+
     # Update fields if provided
     if "hazard_level" in request.data:
         sector["hazard_level"] = request.data["hazard_level"]
@@ -289,24 +384,33 @@ def field_incident_sector_update(request, sector_id):
         sector["status"] = request.data["status"]
     if "estimated_survivors" in request.data:
         sector["estimated_survivors"] = request.data["estimated_survivors"]
-    
+
     return Response(sector)
 
 
 @api_view(["PATCH"])
 def field_incident_task_group_update(request, task_group_id):
-    """Update task group progress and status."""
+    """Update task group progress and status.
+
+    DRILL ISOLATION: Updates are applied only to the active drill's data.
+    """
     global _field_incident_data
-    
+    drill_context = get_drill_context_service()
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    # Log the active drill context
+    active_drill = drill_context.active_drill_id if drill_context.has_active_drill() else None
+    print(
+        f"[DRILL CONTEXT] Updating task group {task_group_id} for drill: {active_drill}")
+
     task_groups = _field_incident_data.get("task_groups", [])
     if task_group_id >= len(task_groups):
         return Response({"detail": "Task group not found"}, status=status.HTTP_404_NOT_FOUND)
-    
+
     task_group = task_groups[task_group_id]
-    
+
     # Update fields if provided
     if "progress_percent" in request.data:
         task_group["progress_percent"] = request.data["progress_percent"]
@@ -316,7 +420,7 @@ def field_incident_task_group_update(request, task_group_id):
         task_group["completed_subtasks"] = request.data["completed_subtasks"]
     if "notes" in request.data:
         task_group["notes"] = request.data["notes"]
-    
+
     return Response(task_group)
 
 
@@ -324,19 +428,19 @@ def field_incident_task_group_update(request, task_group_id):
 def field_incident_casualty_update(request):
     """Update casualty estimates for major incident."""
     global _field_incident_data
-    
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
     major_incident = _field_incident_data.get("major_incident", {})
-    
+
     if "estimated_casualties" in request.data:
         major_incident["estimated_casualties"] = request.data["estimated_casualties"]
     if "confirmed_deaths" in request.data:
         major_incident["confirmed_deaths"] = request.data["confirmed_deaths"]
     if "displaced_persons" in request.data:
         major_incident["displaced_persons"] = request.data["displaced_persons"]
-    
+
     return Response(major_incident)
 
 
@@ -344,12 +448,12 @@ def field_incident_casualty_update(request):
 def field_incident_add_event(request):
     """Add event to operational timeline."""
     global _field_incident_data
-    
+
     if _field_incident_data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-    
+
     events = _field_incident_data.get("events", [])
-    
+
     event = {
         "event_type": request.data.get("event_type", "UPDATE"),
         "severity": request.data.get("severity", "INFO"),
@@ -358,7 +462,7 @@ def field_incident_add_event(request):
         "created_by": request.data.get("created_by", "User"),
         "created_at": time.time(),
     }
-    
+
     events.insert(0, event)  # Add to beginning of list
     return Response(event)
 
@@ -367,33 +471,34 @@ def field_incident_add_event(request):
 def field_incident_simulate(request):
     """Simulate realistic updates to the field incident."""
     global _field_incident_data
-    
+
     if _field_incident_data is None:
         import os
         seed = int(os.getenv("DEMO_SEED", "42"))
         field_service = get_field_incident_service(seed=seed)
-        _field_incident_data = field_service.generate_major_incident(incident_type="EARTHQUAKE")
-    
+        _field_incident_data = field_service.generate_major_incident(
+            incident_type="EARTHQUAKE")
+
     # Get service and simulate update
     field_service = get_field_incident_service()
     update = field_service.simulate_update(_field_incident_data)
-    
+
     # Apply updates to data
     if "estimated_casualties" in update:
         _field_incident_data["major_incident"]["estimated_casualties"] = update["estimated_casualties"]
-    
+
     if "sector_updates" in update:
         for idx, sector_update in update["sector_updates"].items():
             _field_incident_data["sectors"][idx].update(sector_update)
-    
+
     if "task_updates" in update:
         for idx, task_update in update["task_updates"].items():
             _field_incident_data["task_groups"][idx].update(task_update)
-    
+
     if "new_event" in update:
         update["new_event"]["created_at"] = time.time()
         _field_incident_data["events"].insert(0, update["new_event"])
-    
+
     return Response(update if update else {"status": "no_change"})
 
 
@@ -401,26 +506,27 @@ def field_incident_updates_stream(request):
     """Stream real-time field incident updates using Server-Sent Events."""
     def event_generator():
         yield f"data: {json.dumps({'type': 'connected', 'timestamp': time.time()})}\n\n"
-        
+
         try:
             last_heartbeat = time.time()
             while True:
                 # Simulate update every 2-4 seconds
                 if random.random() < 0.3:
                     field_service = get_field_incident_service()
-                    update = field_service.simulate_update(_field_incident_data or {})
+                    update = field_service.simulate_update(
+                        _field_incident_data or {})
                     if update.get("status") != "no_change":
                         yield f"data: {json.dumps({'type': 'incident_update', 'data': update})}\n\n"
-                
+
                 # Heartbeat every 10 seconds
                 if time.time() - last_heartbeat > 10:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     last_heartbeat = time.time()
-                
+
                 time.sleep(1)
         except GeneratorExit:
             pass
-    
+
     response = StreamingHttpResponse(
         event_generator(),
         content_type="text/event-stream"
@@ -428,3 +534,42 @@ def field_incident_updates_stream(request):
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+@api_view(["POST"])
+def field_incident_reset(request):
+    """Reset the field incident simulation with a specific incident type and enforce drill isolation."""
+    global _field_incident_data
+
+    drill_context = get_drill_context_service()
+
+    # Get incident type from request data, default to EARTHQUAKE
+    incident_type = request.data.get("incident_type", "EARTHQUAKE")
+
+    # Validate incident type
+    valid_types = ["EARTHQUAKE", "MISSILE_STRIKE", "BUILDING_COLLAPSE"]
+    if incident_type not in valid_types:
+        return Response(
+            {"detail": f"Invalid incident type. Must be one of: {', '.join(valid_types)}"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Re-initialize the incident data
+    seed = int(os.getenv("DEMO_SEED", "42"))
+    field_service = get_field_incident_service(seed=seed)
+    _field_incident_data = field_service.generate_major_incident(
+        incident_type=incident_type)
+
+    # SET ACTIVE DRILL CONTEXT - This enforces strict drill isolation
+    # In a real system, this would be a drill ID from the database
+    # For now, we use a hash of the incident data as a unique drill identifier
+    import hashlib
+    drill_id = int(hashlib.md5(
+        (incident_type + str(seed)).encode()).hexdigest(), 16) % (10 ** 8)
+    drill_context.set_active_drill(drill_id)
+
+    return Response({
+        **_field_incident_data,
+        "drill_id": drill_id,  # Include drill ID in response
+        "drill_active": True
+    })

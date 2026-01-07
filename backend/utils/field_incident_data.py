@@ -277,51 +277,19 @@ class FieldIncidentDataService:
         return task_groups
 
     def _generate_initial_events(self, incident_type):
-        """Generate initial timeline events for the incident."""
+        """Start with a clean slate for the drill."""
         now = datetime.now()
-        events = [
+        # ONLY one starting event, no history.
+        return [
             {
                 "event_type": "STATUS_CHANGE",
                 "severity": "CRITICAL",
-                "title": "Incident Declared",
-                "description": f"{incident_type.replace('_', ' ')} declared as major incident",
-                "created_by": "Command Center",
-                "created_at": now - timedelta(minutes=120),
-            },
-            {
-                "event_type": "HAZARD_ALERT",
-                "severity": "CRITICAL",
-                "title": "Secondary Hazards Identified",
-                "description": "Structural damage and utility hazards confirmed across multiple sectors",
-                "created_by": "Damage Assessment Team",
-                "created_at": now - timedelta(minutes=90),
-            },
-            {
-                "event_type": "RESOURCE_ARRIVAL",
-                "severity": "INFO",
-                "title": "Rescue Teams Deployed",
-                "description": "First wave of search and rescue units arrived on scene",
-                "created_by": "Operations",
-                "created_at": now - timedelta(minutes=60),
-            },
-            {
-                "event_type": "CASUALTY_UPDATE",
-                "severity": "WARNING",
-                "title": "Casualty Estimates Revised",
-                "description": "Initial assessment: 250+ casualties, 30+ confirmed deaths",
-                "created_by": "Medical Command",
-                "created_at": now - timedelta(minutes=45),
-            },
-            {
-                "event_type": "EVACUATION",
-                "severity": "WARNING",
-                "title": "Evacuation Zones Established",
-                "description": "1000+ persons evacuated from unsafe areas",
-                "created_by": "Evacuation Coordinator",
-                "created_at": now - timedelta(minutes=30),
-            },
+                "title": "DRILL STARTED: " + incident_type.replace('_', ' '),
+                "description": "Operational drill initiated. Waiting for field reports.",
+                "created_by": "System Admin",
+                "created_at": now.isoformat(),  # Current time
+            }
         ]
-        return events
 
     def simulate_update(self, incident_data):
         """

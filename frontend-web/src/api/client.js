@@ -147,7 +147,7 @@ export const connectToFieldIncidentStream = () => {
 
 // Reset the dashboard with a new scenario drill
 export const resetFieldIncident = async (incidentType) => {
-  const res = await api.post("/field/reset/", { incident_type: incidentType });
+  const res = await api.post("/field-incident/reset/", { incident_type: incidentType });
   return res.data;
 };
 

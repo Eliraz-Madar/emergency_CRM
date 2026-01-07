@@ -31,6 +31,7 @@ const FieldIncidentDashboard = () => {
   const [selectedScenario, setSelectedScenario] = useState('EARTHQUAKE');
   const [isDrillActive, setIsDrillActive] = useState(false);
 
+  const activeDrillId = useFieldIncidentStore((s) => s.activeDrillId);
   const setMajorIncident = useFieldIncidentStore((s) => s.setMajorIncident);
   const setSectors = useFieldIncidentStore((s) => s.setSectors);
   const setTaskGroups = useFieldIncidentStore((s) => s.setTaskGroups);
@@ -147,10 +148,107 @@ const FieldIncidentDashboard = () => {
     }
   };
 
-  // Handle drill stop
+  // Load Routine Mode - Populate dashboard with 20 mock events (4 hours of history)
+  const loadRoutineMode = () => {
+    // Generate 20 mock routine events from the last 4 hours
+    const now = Date.now();
+    const fourHoursAgo = now - (4 * 60 * 60 * 1000);
+    const routineEventTypes = [
+      'Car Accident - Ayalon North',
+      'Brush Fire - Negev',
+      'Suspicious Object - Jerusalem',
+      'Medical Emergency - Tel Aviv Central',
+      'Structural Hazard - Haifa Port',
+      'Gas Leak - Beer Sheva',
+      'Electrical Fire - Ramat Gan',
+      'Vehicle Collision - Highway 6',
+      'Water Main Break - Netanya',
+      'Hazardous Materials - Ashdod',
+      'Building Alarm - Tel Aviv',
+      'Cardiac Emergency - Rishon LeZion',
+      'Traffic Congestion - Jerusalem',
+      'Minor Fire - Rehovot',
+      'Noise Complaint - Bnei Brak',
+      'Lost Person - Eilat',
+      'Animal Control - Herzliya',
+      'Minor Injury - Petach Tikva',
+      'Welfare Check - Modiin',
+      'Equipment Maintenance - Ashkelon',
+    ];
+
+    const mockEvents = routineEventTypes.map((title, index) => {
+      const timestamp = fourHoursAgo + (index * (240 * 60 * 1000 / 20)); // Spread across 4 hours
+      return {
+        id: `routine-${index}`,
+        title: title,
+        event_type: 'ROUTINE_OPERATION',
+        severity: index % 2 === 0 ? 'LOW' : 'MEDIUM',
+        description: `Routine monitoring event: ${title}`,
+        created_at: timestamp,
+        created_by: 'Automated System',
+      };
+    });
+
+    const routineIncident = {
+      id: 'routine-monitoring',
+      title: 'Routine Operations Center',
+      status: 'MONITORING',
+      description: 'Nationwide routine monitoring. No major active directives.',
+      estimated_casualties: 0,
+    };
+
+    // Update store immediately
+    setEvents(mockEvents);
+    setMajorIncident(routineIncident);
+    setActiveDrillId(null);
+    setIsDrillActive(false);
+    setIsDrillActiveStore(false);
+    setConnectionStatus('ROUTINE');
+  };
+
+  const enterRoutineMode = () => {
+    console.log("Entering Routine Mode...");
+
+    // 1. Generate 20 Mock Routine Events
+    const routineEvents = Array.from({ length: 20 }).map((_, i) => ({
+      id: `routine-${i}`,
+      title: `Routine Event #${i + 1}: ${['Traffic Accident', 'Brush Fire', 'Suspicious Object', 'Medical Emergency'][i % 4]}`,
+      event_type: ['ACCIDENT', 'FIRE', 'SECURITY', 'MEDICAL'][i % 4],
+      severity: 'LOW',
+      description: 'Routine operation reported. Units dispatched.',
+      created_at: new Date(Date.now() - (i * 1000 * 60 * 10)).toISOString(), // 10 min intervals
+      created_by: 'Dispatcher'
+    }));
+
+    // 2. Create Routine Incident Context
+    const routineIncident = {
+      title: "Routine Security Operations",
+      status: "MONITORING",
+      incident_type: "ROUTINE",
+      description: "Nationwide routine monitoring active. No major directives.",
+      estimated_casualties: 0,
+      confirmed_deaths: 0,
+      displaced_persons: 0
+    };
+
+    // 3. FORCE STORE UPDATES (Batch update)
+    clearAllDrillData(); // Clear old drill data first
+
+    // Slight delay to ensure clear finishes before setting new data
+    setTimeout(() => {
+      setEvents(routineEvents);
+      setMajorIncident(routineIncident);
+      setConnectionStatus('ROUTINE');
+      setIsDrillActive(false);
+      setIsDrillActiveStore(false);
+      setLoading(false);
+    }, 50);
+  };
+
+  // Handle drill stop - Switch to Routine Monitoring Mode
   const handleStopDrill = () => {
     if (window.confirm('Stop current drill and return to routine operation?')) {
-      window.location.reload();
+      enterRoutineMode();
     }
   };
 
@@ -171,23 +269,25 @@ const FieldIncidentDashboard = () => {
         const data = await getFieldIncident();
 
         // STEP 3: UPDATE STATE WITH FETCHED DATA (only populate what was retrieved)
-        if (data && data.major_incident) {
+        if (!data || !data.major_incident) {
+          // No active major incident - enter Routine Mode immediately
+          enterRoutineMode();
+          console.log('[LOAD-COMPLETE] No active drill - entered routine mode');
+        } else {
           setMajorIncident(data.major_incident);
+          if (data.sectors) {
+            setSectors(data.sectors);
+          }
+          if (data.task_groups) {
+            setTaskGroups(data.task_groups);
+          }
+          if (data.events) {
+            setEvents(data.events);
+          }
+          setLoading(false);
+          setConnectionStatus('CONNECTED');
+          console.log('[LOAD-COMPLETE] Field incident data loaded for active drill');
         }
-        if (data && data.sectors) {
-          setSectors(data.sectors);
-        }
-        if (data && data.task_groups) {
-          setTaskGroups(data.task_groups);
-        }
-        if (data && data.events) {
-          setEvents(data.events);
-        }
-
-        setLoading(false);
-        setConnectionStatus('CONNECTED');
-
-        console.log('[LOAD-COMPLETE] Field incident data loaded for active drill');
       } catch (err) {
         console.error('Failed to load field incident data:', err);
         setError(err.message || 'Failed to load data');
@@ -278,17 +378,17 @@ const FieldIncidentDashboard = () => {
   }, []); // Empty dependency array - Zustand setters are stable
 
   // Simulate updates for demo (remove in production)
-  useEffect(() => {
-    const simulationInterval = setInterval(async () => {
-      try {
-        await simulateFieldIncidentUpdate();
-      } catch (err) {
-        console.error('Simulation update failed:', err);
-      }
-    }, 5000);
-
-    return () => clearInterval(simulationInterval);
-  }, []);
+  // useEffect(() => {
+  //   const simulationInterval = setInterval(async () => {
+  //     try {
+  //       await simulateFieldIncidentUpdate();
+  //     } catch (err) {
+  //       console.error('Simulation update failed:', err);
+  //     }
+  //   }, 5000);
+  //
+  //   return () => clearInterval(simulationInterval);
+  // }, []);
 
   // Loading state
   if (loading) {
@@ -381,7 +481,7 @@ const FieldIncidentDashboard = () => {
         <section className="dashboard-section operations-section">
           <div className="operations-column">
             <div className="operations-card sectors-card">
-              <SectorMap />
+              <SectorMap key={activeDrillId || 'init-sectors'} />
             </div>
             <div className="operations-card timeline-card">
               <OperationalTimeline onShowDetails={setSelectedTimelineEvent} />
@@ -391,7 +491,7 @@ const FieldIncidentDashboard = () => {
 
         {/* Right Column: Task Groups */}
         <section className="dashboard-section tasks-section">
-          <TaskGroupPanel />
+          <TaskGroupPanel key={activeDrillId || 'init-tasks'} />
         </section>
       </main>
 

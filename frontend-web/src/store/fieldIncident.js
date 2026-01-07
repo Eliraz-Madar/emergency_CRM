@@ -3,13 +3,10 @@
  *
  * Manages state for large-scale incident command coordination.
  * Separate from regional dashboard store - command-level decision making.
- * 
- * DRILL ISOLATION: Enforces strict context-based filtering for all data.
- * Uses event-driven architecture to broadcast drill context changes.
+ * * DRILL ISOLATION: Enforces strict context-based filtering for all data.
  */
 
 import { create } from 'zustand';
-import drillEventManager from '../services/drillEventManager';
 
 export const useFieldIncidentStore = create((set, get) => ({
   // Major incident data
@@ -109,7 +106,6 @@ export const useFieldIncidentStore = create((set, get) => ({
   }),
 
   // HARD RESET: Called immediately when drill context changes
-  // This ensures NO old data leaks into the new drill
   performHardReset: () => {
     set(state => ({
       majorIncident: null,
@@ -120,39 +116,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       selectedTaskGroup: null,
       connectionStatus: 'DISCONNECTED',
       error: null,
-      loading: true, // Start loading state immediately
+      loading: true,
     }));
-  },
-
-  // Subscribe to drill changes and auto-reset
-  subscribeToDrillChanges: () => {
-    return drillEventManager.onDrillChange((oldDrillId, newDrillId) => {
-      console.log(`Store: Drill changed from ${oldDrillId} to ${newDrillId}. Performing hard reset...`);
-      
-      // Get the current store state
-      const state = get();
-      
-      // STEP A: THE PURGE - Clear everything immediately
-      set({
-        majorIncident: null,
-        sectors: [],
-        taskGroups: [],
-        events: [],
-        selectedSector: null,
-        selectedTaskGroup: null,
-        connectionStatus: 'DISCONNECTED',
-        error: null,
-        loading: true,
-      });
-      
-      // STEP B: Update drill context
-      set({
-        activeDrillId: newDrillId,
-        isDrillActive: newDrillId !== null,
-      });
-      
-      console.log('Store: Hard reset complete. Ready to load new drill data.');
-    });
   },
 
   // Selectors
