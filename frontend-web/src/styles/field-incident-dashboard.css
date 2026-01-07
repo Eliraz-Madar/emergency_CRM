@@ -106,6 +106,14 @@
   box-shadow: var(--fi-card-shadow);
 }
 
+.header-content {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  width: 100%;
+  justify-content: space-between;
+}
+
 .dashboard-header h1 {
   margin: 0;
   font-size: 1.75rem;
@@ -141,6 +149,122 @@
   background: color-mix(in srgb, var(--fi-danger) 18%, var(--fi-bg-card) 82%);
   color: var(--fi-danger);
   border-color: color-mix(in srgb, var(--fi-danger) 45%, var(--fi-border) 55%);
+}
+
+.simulation-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.scenario-select {
+  background: var(--fi-bg-card);
+  color: var(--fi-text-primary);
+  border: 1px solid var(--fi-border);
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.scenario-select:hover {
+  background: var(--fi-bg-card-soft);
+  border-color: var(--fi-border-strong);
+}
+
+.start-drill-btn {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 0.5rem 1.25rem;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(220, 38, 38, 0.3);
+}
+
+.start-drill-btn:hover:not(:disabled) {
+  background: #b91c1c;
+  box-shadow: 0 4px 6px rgba(220, 38, 38, 0.4);
+  transform: translateY(-1px);
+}
+
+.start-drill-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(220, 38, 38, 0.3);
+}
+
+.start-drill-btn:disabled {
+  background: #6b7280;
+  cursor: not-allowed;
+  opacity: 0.6;
+  box-shadow: none;
+}
+
+.drill-active-indicator {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: rgba(220, 38, 38, 0.15);
+  border: 2px solid #dc2626;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--fi-text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.pulsing-dot {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.6;
+    transform: scale(1.1);
+  }
+}
+
+.stop-drill-btn {
+  background: #374151;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.stop-drill-btn:hover {
+  background: #1f2937;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.4);
+  transform: translateY(-1px);
+}
+
+.stop-drill-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .dashboard-main {

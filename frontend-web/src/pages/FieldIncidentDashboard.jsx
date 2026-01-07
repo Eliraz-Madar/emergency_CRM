@@ -18,6 +18,7 @@ import {
   getFieldIncident,
   connectToFieldIncidentStream,
   simulateFieldIncidentUpdate,
+  resetFieldIncident,
 } from '../api/client';
 import SituationOverview from '../components/field-incident/SituationOverview';
 import SectorMap from '../components/field-incident/SectorMap';
@@ -27,6 +28,8 @@ import '../styles/field-incident-dashboard.css';
 
 const FieldIncidentDashboard = () => {
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState(null);
+  const [selectedScenario, setSelectedScenario] = useState('EARTHQUAKE');
+  const [isDrillActive, setIsDrillActive] = useState(false);
 
   const setMajorIncident = useFieldIncidentStore((s) => s.setMajorIncident);
   const setSectors = useFieldIncidentStore((s) => s.setSectors);
@@ -35,6 +38,9 @@ const FieldIncidentDashboard = () => {
   const setConnectionStatus = useFieldIncidentStore((s) => s.setConnectionStatus);
   const setLoading = useFieldIncidentStore((s) => s.setLoading);
   const setError = useFieldIncidentStore((s) => s.setError);
+  const setActiveDrillId = useFieldIncidentStore((s) => s.setActiveDrillId);
+  const setIsDrillActiveStore = useFieldIncidentStore((s) => s.setIsDrillActive);
+  const clearAllDrillData = useFieldIncidentStore((s) => s.clearAllDrillData);
   const addEvent = useFieldIncidentStore((s) => s.addEvent);
   const updateMajorIncident = useFieldIncidentStore((s) => s.updateMajorIncident);
   const updateSector = useFieldIncidentStore((s) => s.updateSector);
@@ -43,19 +49,145 @@ const FieldIncidentDashboard = () => {
   const loading = useFieldIncidentStore((s) => s.loading);
   const error = useFieldIncidentStore((s) => s.error);
 
+  // SAFE "Reset-Then-Load" function
+  // Ensures immediate zero state before any data operations
+  const resetThenLoad = async (drillId) => {
+    try {
+      // STEP 1: IMMEDIATE ZERO STATE (The "Purge")
+      // Clear ALL drill data atomically using the store action
+      clearAllDrillData();
+      setLoading(true);
+      setConnectionStatus('DISCONNECTED');
+
+      console.log(`[RESET-THEN-LOAD] Zero state applied for drill ${drillId}`);
+
+      // STEP 2: SCOPED DATA FETCHING
+      // After zero state is guaranteed, fetch drill-specific data
+      const data = await getFieldIncident();
+
+      // STEP 3: LOAD ONLY DRILL-SCOPED DATA
+      // The backend filters by drill context, so we only receive this drill's data
+      if (data && data.major_incident) {
+        setMajorIncident(data.major_incident);
+      }
+      if (data && data.sectors) {
+        setSectors(data.sectors);
+      }
+      if (data && data.task_groups) {
+        setTaskGroups(data.task_groups);
+      }
+      if (data && data.events) {
+        setEvents(data.events);
+      }
+
+      setConnectionStatus('CONNECTED');
+      setLoading(false);
+
+      console.log(`[RESET-THEN-LOAD] Data loaded for drill ${drillId}`);
+    } catch (err) {
+      console.error('Failed to load drill data:', err);
+      setError('Failed to load drill data');
+      setLoading(false);
+    }
+  };
+
+  // Handle drill reset with STRICT ISOLATION
+  const handleStartDrill = async () => {
+    if (!window.confirm(`Are you sure you want to START A NEW DRILL (${selectedScenario})? This will wipe current data.`)) {
+      return;
+    }
+
+    // STEP 1: HARD RESET STATE (must happen FIRST, before any API call)
+    // Clear ALL drill data atomically using the store action
+    clearAllDrillData();
+    setIsDrillActive(false);
+    setConnectionStatus('DISCONNECTED');
+    setLoading(true);
+
+    console.log('[HARD-RESET] All incident data cleared for new drill');
+
+    try {
+      // STEP 2: FETCH NEW DRILL DATA (after hard reset is guaranteed)
+      // API will initiate new drill context and return fresh data
+      const newData = await resetFieldIncident(selectedScenario);
+
+      // STEP 3: SET DRILL CONTEXT (before loading data)
+      if (newData.drill_id) {
+        setActiveDrillId(newData.drill_id);
+        console.log(`[DRILL-CONTEXT] Active drill set to: ${newData.drill_id}`);
+      }
+
+      // STEP 4: LOAD FRESH DATA FROM API
+      // Only data from the new drill context will be loaded
+      if (newData.major_incident) {
+        setMajorIncident(newData.major_incident);
+      }
+      if (newData.sectors) {
+        setSectors(newData.sectors);
+      }
+      if (newData.task_groups) {
+        setTaskGroups(newData.task_groups);
+      }
+      if (newData.events) {
+        setEvents(newData.events);
+      }
+
+      // STEP 5: UPDATE UI STATE
+      setConnectionStatus('CONNECTING');
+      setIsDrillActive(true);
+      setIsDrillActiveStore(true);
+      setLoading(false);
+
+      console.log(`[DRILL-LOADED] New drill data loaded: ${selectedScenario}`);
+      alert(`🚨 DRILL STARTED: ${selectedScenario}\nAll units reset. Operational timer started.`);
+    } catch (err) {
+      console.error('Failed to start drill:', err);
+      setError('Failed to start simulation drill');
+      setLoading(false);
+    }
+  };
+
+  // Handle drill stop
+  const handleStopDrill = () => {
+    if (window.confirm('Stop current drill and return to routine operation?')) {
+      window.location.reload();
+    }
+  };
+
   // Load initial data
   useEffect(() => {
     const loadInitialData = async () => {
       try {
+        // STEP 1: HARD RESET STATE (must happen BEFORE any API call)
+        // Clear ALL drill data atomically using the store action
+        clearAllDrillData();
         setLoading(true);
-        setError(null);
+        setConnectionStatus('DISCONNECTED');
+
+        console.log('[HARD-RESET] All incident data cleared synchronously');
+
+        // STEP 2: FETCH NEW DATA (after hard reset is guaranteed)
+        // Backend will serve only data for the active drill context
         const data = await getFieldIncident();
 
-        setMajorIncident(data.major_incident);
-        setSectors(data.sectors);
-        setTaskGroups(data.task_groups);
-        setEvents(data.events);
+        // STEP 3: UPDATE STATE WITH FETCHED DATA (only populate what was retrieved)
+        if (data && data.major_incident) {
+          setMajorIncident(data.major_incident);
+        }
+        if (data && data.sectors) {
+          setSectors(data.sectors);
+        }
+        if (data && data.task_groups) {
+          setTaskGroups(data.task_groups);
+        }
+        if (data && data.events) {
+          setEvents(data.events);
+        }
+
         setLoading(false);
+        setConnectionStatus('CONNECTED');
+
+        console.log('[LOAD-COMPLETE] Field incident data loaded for active drill');
       } catch (err) {
         console.error('Failed to load field incident data:', err);
         setError(err.message || 'Failed to load data');
@@ -193,6 +325,37 @@ const FieldIncidentDashboard = () => {
       <header className="dashboard-header">
         <div className="header-content">
           <h1>🎯 Field Incident Command Dashboard</h1>
+
+          <div className="simulation-controls">
+            {isDrillActive ? (
+              <div className="drill-active-indicator">
+                <span className="pulsing-dot">🔴</span> LIVE DRILL: {selectedScenario.replace('_', ' ')}
+                <button onClick={handleStopDrill} className="stop-drill-btn">
+                  ⏹ STOP DRILL
+                </button>
+              </div>
+            ) : (
+              <>
+                <select
+                  className="scenario-select"
+                  value={selectedScenario}
+                  onChange={(e) => setSelectedScenario(e.target.value)}
+                >
+                  <option value="EARTHQUAKE">Earthquake</option>
+                  <option value="MISSILE_STRIKE">Missile Strike</option>
+                  <option value="BUILDING_COLLAPSE">Building Collapse</option>
+                </select>
+                <button
+                  className="start-drill-btn"
+                  onClick={handleStartDrill}
+                  disabled={loading}
+                >
+                  ⚠️ START DRILL
+                </button>
+              </>
+            )}
+          </div>
+
           <div className="header-status">
             <span
               className={`connection-status ${connectionStatus.toLowerCase()}`}
