@@ -10,10 +10,11 @@ import { useFieldIncidentStore } from '../../store/fieldIncident';
 const SituationOverview = () => {
   const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
   const taskGroups = useFieldIncidentStore((s) => s.taskGroups);
+  const mode = useFieldIncidentStore((s) => s.mode);
   const getSituationSummary = useFieldIncidentStore((s) => s.getSituationSummary);
   const getAverageTaskProgress = useFieldIncidentStore((s) => s.getAverageTaskProgress);
   const getCriticalAlerts = useFieldIncidentStore((s) => s.getCriticalAlerts);
-  
+
   const summary = getSituationSummary();
   const avgProgress = getAverageTaskProgress();
   const alerts = getCriticalAlerts();
@@ -31,21 +32,37 @@ const SituationOverview = () => {
     ACTIVE: '#ef4444',
     STABILIZING: '#3b82f6',
     RECOVERY: '#10b981',
+    ROUTINE: '#10b981',
+    'ACTIVE MONITORING': '#10b981',
+    INITIALIZING: '#f59e0b',
   };
+
+  // Force display based on mode to prevent stale data
+  const isRoutine = mode === 'ROUTINE';
+  const titleColor = isRoutine ? '#10b981' : '#dc2626';
+  const displayTitle = isRoutine ? 'ROUTINE SECURITY OPERATIONS' : summary.title;
+  const displayStatus = isRoutine ? 'ACTIVE MONITORING' : summary.status;
+  const displayType = isRoutine ? 'ROUTINE' : summary.type;
 
   return (
     <div className="situation-overview">
       {/* Incident Header */}
       <div className="incident-header">
         <div className="incident-title-section">
-          <h2>{summary.title}</h2>
+          <h2 style={{ color: titleColor }}>
+            {displayTitle}
+          </h2>
           <div className="incident-meta">
-            <span className="type-badge">{summary.type.replace(/_/g, ' ')}</span>
+            <span className="type-badge" style={{
+              backgroundColor: isRoutine ? '#065f46' : undefined,
+            }}>
+              {displayType.replace(/_/g, ' ')}
+            </span>
             <span
               className="status-badge"
-              style={{ backgroundColor: statusColor[summary.status] }}
+              style={{ backgroundColor: statusColor[displayStatus] || statusColor.ACTIVE }}
             >
-              {summary.status.replace(/_/g, ' ')}
+              {displayStatus.replace(/_/g, ' ')}
             </span>
           </div>
         </div>

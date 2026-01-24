@@ -13,6 +13,9 @@ const OperationalTimeline = ({ onShowDetails }) => {
   const [showLegend, setShowLegend] = useState(false);
   const [severityFilter, setSeverityFilter] = useState('ALL');
 
+  // Safety check: ensure events is an array
+  const safeEvents = Array.isArray(events) ? events : [];
+
   const eventTypeIcons = {
     STATUS_CHANGE: '📊',
     ASSIGNMENT: '👤',
@@ -66,8 +69,8 @@ const OperationalTimeline = ({ onShowDetails }) => {
    * Filter events by severity
    */
   const filteredEvents = severityFilter === 'ALL'
-    ? events
-    : events.filter((event) => event.severity === severityFilter);
+    ? safeEvents
+    : safeEvents.filter((event) => event?.severity === severityFilter);
 
   return (
     <div className="operational-timeline">
@@ -134,58 +137,63 @@ const OperationalTimeline = ({ onShowDetails }) => {
 
       {filteredEvents.length === 0 ? (
         <p className="no-data">
-          {events.length === 0 ? 'No events recorded' : 'No events match the selected filter'}
+          {safeEvents.length === 0 ? 'No events recorded' : 'No events match the selected filter'}
         </p>
       ) : (
         <div className="timeline-container">
-          {filteredEvents.map((event, idx) => (
-            <div
-              key={idx}
-              className="timeline-event"
-              onClick={() => onShowDetails && onShowDetails(event)}
-            >
-              {/* Timeline Connector */}
-              <div className="timeline-connector">
-                <div
-                  className="timeline-dot"
-                  style={{ backgroundColor: severityColors[event.severity] || '#666' }}
-                  title={event.severity}
-                >
-                  {eventTypeIcons[event.event_type] || '•'}
-                </div>
-                {idx < filteredEvents.length - 1 && <div className="timeline-line"></div>}
-              </div>
+          {filteredEvents.map((event, idx) => {
+            // Safety check: ensure event is an object
+            if (!event || typeof event !== 'object') return null;
 
-              {/* Event Content */}
-              <div className="timeline-content">
-                <div className="event-header">
-                  <h4>{event.title}</h4>
-                  <span
-                    className="severity-badge"
-                    style={{ backgroundColor: severityColors[event.severity] }}
+            return (
+              <div
+                key={event.id || idx}
+                className="timeline-event"
+                onClick={() => onShowDetails && onShowDetails(event)}
+              >
+                {/* Timeline Connector */}
+                <div className="timeline-connector">
+                  <div
+                    className="timeline-dot"
+                    style={{ backgroundColor: severityColors[event.severity] || '#666' }}
+                    title={event.severity || 'Unknown'}
                   >
-                    {event.severity}
-                  </span>
+                    {eventTypeIcons[event.event_type] || '•'}
+                  </div>
+                  {idx < filteredEvents.length - 1 && <div className="timeline-line"></div>}
                 </div>
 
-                <div className="event-metadata">
-                  <span className="event-type">
-                    {event.event_type.replace(/_/g, ' ')}
-                  </span>
-                  <span className="event-time">
-                    {getEventTime(event)}
-                  </span>
-                  {event.created_by && (
-                    <span className="event-creator">by {event.created_by}</span>
+                {/* Event Content */}
+                <div className="timeline-content">
+                  <div className="event-header">
+                    <h4>{event.title || 'Untitled Event'}</h4>
+                    <span
+                      className="severity-badge"
+                      style={{ backgroundColor: severityColors[event.severity] || '#666' }}
+                    >
+                      {event.severity || 'INFO'}
+                    </span>
+                  </div>
+
+                  <div className="event-metadata">
+                    <span className="event-type">
+                      {(event.event_type || 'UPDATE').replace(/_/g, ' ')}
+                    </span>
+                    <span className="event-time">
+                      {getEventTime(event)}
+                    </span>
+                    {event.created_by && (
+                      <span className="event-creator">by {event.created_by}</span>
+                    )}
+                  </div>
+
+                  {event.description && (
+                    <p className="event-description">{event.description}</p>
                   )}
                 </div>
-
-                {event.description && (
-                  <p className="event-description">{event.description}</p>
-                )}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

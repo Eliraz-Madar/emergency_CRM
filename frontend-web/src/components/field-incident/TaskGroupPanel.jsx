@@ -19,6 +19,8 @@ const TaskGroupPanel = () => {
 
   const [expandedTask, setExpandedTask] = useState(null);
 
+  // Safety check: ensure taskGroups is an array
+  const safeTaskGroups = Array.isArray(taskGroups) ? taskGroups : [];
   const filteredTasks = getFilteredTaskGroups();
 
   const categoryColors = {
@@ -46,7 +48,7 @@ const TaskGroupPanel = () => {
     COMPLETED: '✅',
   };
 
-  const categories = Array.from(new Set(taskGroups.map((tg) => tg.category)));
+  const categories = Array.from(new Set(safeTaskGroups.map((tg) => tg?.category).filter(Boolean)));
   const statuses = ['all', 'in-progress', 'completed'];
 
   return (
@@ -91,110 +93,117 @@ const TaskGroupPanel = () => {
           <p className="no-data">No task groups match filters</p>
         ) : (
           <div className="task-groups-list">
-            {filteredTasks.map((taskGroup, idx) => (
-              <div
-                key={idx}
-                className={`task-group-item ${taskGroup.status.toLowerCase()}`}
-                style={{
-                  borderLeft: `4px solid ${categoryColors[taskGroup.category] || '#666'
-                    }`,
-                }}
-              >
-                {/* Header */}
+            {filteredTasks.map((taskGroup, idx) => {
+              // Safety check: ensure taskGroup is an object
+              if (!taskGroup || typeof taskGroup !== 'object') return null;
+
+              const taskKey = taskGroup.id || `task-${idx}`;
+
+              return (
                 <div
-                  className="task-group-header"
-                  onClick={() =>
-                    setExpandedTask(expandedTask === idx ? null : idx)
-                  }
+                  key={taskKey}
+                  className={`task-group-item ${(taskGroup.status || 'planned').toLowerCase()}`}
+                  style={{
+                    borderLeft: `4px solid ${categoryColors[taskGroup.category] || '#666'
+                      }`,
+                  }}
                 >
-                  <div className="task-title-section">
-                    <span className="priority-icon">
-                      {priorityIcons[taskGroup.priority]}
-                    </span>
-                    <h4>{taskGroup.title}</h4>
-                    <span className="status-icon">
-                      {statusIcons[taskGroup.status]}
-                    </span>
-                  </div>
-                  <div className="task-progress">
-                    <span className="progress-percent">
-                      {taskGroup.progress_percent}%
-                    </span>
-                  </div>
-                </div>
-
-                {/* Progress Bar */}
-                <div className="progress-container">
-                  <div className="progress-bar">
-                    <div
-                      className={`progress-fill ${taskGroup.status.toLowerCase()}`}
-                      style={{ width: `${taskGroup.progress_percent}%` }}
-                    ></div>
-                  </div>
-                </div>
-
-                {/* Quick Info */}
-                <div className="task-quick-info">
-                  <span>
-                    {taskGroup.completed_subtasks}/{taskGroup.total_subtasks} subtasks
-                  </span>
-                  <span>{taskGroup.assigned_units_count} units assigned</span>
-                </div>
-
-                {/* Expanded Details */}
-                {expandedTask === idx && (
-                  <div className="task-details">
-                    <div className="detail-section">
-                      <label>Category:</label>
-                      <span>{taskGroup.category.replace(/_/g, ' ')}</span>
+                  {/* Header */}
+                  <div
+                    className="task-group-header"
+                    onClick={() =>
+                      setExpandedTask(expandedTask === idx ? null : idx)
+                    }
+                  >
+                    <div className="task-title-section">
+                      <span className="priority-icon">
+                        {priorityIcons[taskGroup.priority] || '📌'}
+                      </span>
+                      <h4>{taskGroup.title || 'Untitled Task'}</h4>
+                      <span className="status-icon">
+                        {statusIcons[taskGroup.status] || '📅'}
+                      </span>
                     </div>
-
-                    <div className="detail-section">
-                      <label>Description:</label>
-                      <span>{taskGroup.description}</span>
+                    <div className="task-progress">
+                      <span className="progress-percent">
+                        {taskGroup.progress_percent || 0}%
+                      </span>
                     </div>
+                  </div>
 
-                    <div className="detail-section">
-                      <label>Commander:</label>
-                      <span>{taskGroup.commander_name || 'Unassigned'}</span>
+                  {/* Progress Bar */}
+                  <div className="progress-container">
+                    <div className="progress-bar">
+                      <div
+                        className={`progress-fill ${(taskGroup.status || 'planned').toLowerCase()}`}
+                        style={{ width: `${taskGroup.progress_percent || 0}%` }}
+                      ></div>
                     </div>
+                  </div>
 
-                    <div className="detail-section">
-                      <label>Sectors Involved:</label>
-                      <div className="sectors-list">
-                        {taskGroup.sector_ids && taskGroup.sector_ids.length > 0 ? (
-                          taskGroup.sector_ids.map((sectorId) => (
-                            <span key={sectorId} className="sector-tag">
-                              {sectorId}
-                            </span>
-                          ))
-                        ) : (
-                          <span>No specific sectors</span>
-                        )}
+                  {/* Quick Info */}
+                  <div className="task-quick-info">
+                    <span>
+                      {taskGroup.completed_subtasks || 0}/{taskGroup.total_subtasks || 0} subtasks
+                    </span>
+                    <span>{taskGroup.assigned_units_count || 0} units assigned</span>
+                  </div>
+
+                  {/* Expanded Details */}
+                  {expandedTask === idx && (
+                    <div className="task-details">
+                      <div className="detail-section">
+                        <label>Category:</label>
+                        <span>{(taskGroup.category || 'OPERATIONS').replace(/_/g, ' ')}</span>
+                      </div>
+
+                      <div className="detail-section">
+                        <label>Description:</label>
+                        <span>{taskGroup.description || 'No description available'}</span>
+                      </div>
+
+                      <div className="detail-section">
+                        <label>Commander:</label>
+                        <span>{taskGroup.commander_name || 'Unassigned'}</span>
+                      </div>
+
+                      <div className="detail-section">
+                        <label>Sectors Involved:</label>
+                        <div className="sectors-list">
+                          {taskGroup.sector_ids && Array.isArray(taskGroup.sector_ids) && taskGroup.sector_ids.length > 0 ? (
+                            taskGroup.sector_ids.map((sectorId, sidx) => (
+                              <span key={sectorId || `sid-${sidx}`} className="sector-tag">
+                                {sectorId}
+                              </span>
+                            ))
+                          ) : (
+                            <span>No specific sectors</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="detail-section">
+                        <label>Notes:</label>
+                        <span className="notes-text">{taskGroup.notes || 'No additional notes'}</span>
+                      </div>
+
+                      {/* Timeline */}
+                      <div className="detail-section">
+                        <label>Status Timeline:</label>
+                        <div className="timeline-info">
+                          <span>
+                            Status: {(taskGroup.status || 'PLANNED').replace(/_/g, ' ')}
+                          </span>
+                          <span>
+                            Priority: {taskGroup.priority || 'MEDIUM'}
+                          </span>
+                        </div>
                       </div>
                     </div>
-
-                    <div className="detail-section">
-                      <label>Notes:</label>
-                      <span className="notes-text">{taskGroup.notes}</span>
-                    </div>
-
-                    {/* Timeline */}
-                    <div className="detail-section">
-                      <label>Status Timeline:</label>
-                      <div className="timeline-info">
-                        <span>
-                          Status: {taskGroup.status.replace(/_/g, ' ')}
-                        </span>
-                        <span>
-                          Priority: {taskGroup.priority}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
       </div>
@@ -203,7 +212,7 @@ const TaskGroupPanel = () => {
       <div className="task-group-footer">
         <div className="footer-stat">
           <span>Total Groups:</span>
-          <strong>{taskGroups.length}</strong>
+          <strong>{safeTaskGroups.length}</strong>
         </div>
         <div className="footer-stat">
           <span>Displayed:</span>
@@ -212,7 +221,7 @@ const TaskGroupPanel = () => {
         <div className="footer-stat">
           <span>In Progress:</span>
           <strong>
-            {taskGroups.filter((tg) => tg.status === 'IN_PROGRESS').length}
+            {safeTaskGroups.filter((tg) => tg?.status === 'IN_PROGRESS').length}
           </strong>
         </div>
       </div>

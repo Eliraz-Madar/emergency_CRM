@@ -12,7 +12,7 @@
  * - Operational timeline for decision trail
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useFieldIncidentStore } from '../store/fieldIncident';
 import {
   getFieldIncident,
@@ -27,6 +27,7 @@ import '../styles/field-incident-dashboard.css';
 
 const FieldIncidentDashboard = () => {
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState(null);
+  const [selectedScenario, setSelectedScenario] = useState('FIRE');
 
   const setMajorIncident = useFieldIncidentStore((s) => s.setMajorIncident);
   const setSectors = useFieldIncidentStore((s) => s.setSectors);
@@ -42,6 +43,15 @@ const FieldIncidentDashboard = () => {
   const connectionStatus = useFieldIncidentStore((s) => s.connectionStatus);
   const loading = useFieldIncidentStore((s) => s.loading);
   const error = useFieldIncidentStore((s) => s.error);
+
+  // Simulation state and actions
+  const mode = useFieldIncidentStore((s) => s.mode);
+  const simulationType = useFieldIncidentStore((s) => s.simulationType);
+  const startSimulation = useFieldIncidentStore((s) => s.startSimulation);
+  const nextSimulationStep = useFieldIncidentStore((s) => s.nextSimulationStep);
+  const stopSimulation = useFieldIncidentStore((s) => s.stopSimulation);
+
+  const simulationTimerRef = useRef(null);
 
   // Load initial data
   useEffect(() => {
@@ -147,6 +157,11 @@ const FieldIncidentDashboard = () => {
 
   // Simulate updates for demo (remove in production)
   useEffect(() => {
+    // Don't run backend simulation if in simulation mode
+    if (mode === 'SIMULATION') {
+      return;
+    }
+
     const simulationInterval = setInterval(async () => {
       try {
         await simulateFieldIncidentUpdate();
@@ -156,7 +171,38 @@ const FieldIncidentDashboard = () => {
     }, 5000);
 
     return () => clearInterval(simulationInterval);
-  }, []);
+  }, [mode]);
+
+  // Simulation timer - advance simulation every 3 seconds
+  useEffect(() => {
+    if (mode === 'SIMULATION') {
+      simulationTimerRef.current = setInterval(() => {
+        nextSimulationStep();
+      }, 3000);
+
+      return () => {
+        if (simulationTimerRef.current) {
+          clearInterval(simulationTimerRef.current);
+        }
+      };
+    } else {
+      if (simulationTimerRef.current) {
+        clearInterval(simulationTimerRef.current);
+        simulationTimerRef.current = null;
+      }
+    }
+  }, [mode, nextSimulationStep]);
+
+  // Handlers for simulation buttons
+  const handleStartSimulation = () => {
+    if (selectedScenario) {
+      startSimulation(selectedScenario);
+    }
+  };
+
+  const handleStopSimulation = () => {
+    stopSimulation();
+  };
 
   // Loading state
   if (loading) {
@@ -189,19 +235,197 @@ const FieldIncidentDashboard = () => {
 
   return (
     <div className="field-incident-dashboard">
-      {/* Header */}
-      <header className="dashboard-header">
-        <div className="header-content">
-          <h1>🎯 Field Incident Command Dashboard</h1>
-          <div className="header-status">
+      {/* Unified Command Header */}
+      <header className="dashboard-header" style={{
+        backgroundColor: '#1a1a2e',
+        borderBottom: mode === 'SIMULATION' ? '3px solid #dc2626' : '3px solid #475569',
+        padding: '1rem 2rem',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
+      }}>
+        {/* Left: Title */}
+        <div style={{ flex: '0 0 auto' }}>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#e2e8f0' }}>
+            🎯 Field Incident Command Dashboard
+          </h1>
+        </div>
+
+        {/* Center: Simulation Controls */}
+        <div style={{
+          flex: '1 1 auto',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          gap: '1rem',
+          padding: '0 2rem',
+        }}>
+          {mode === 'ROUTINE' ? (
+            <>
+              <span style={{
+                color: '#94a3b8',
+                fontSize: '0.85rem',
+                fontWeight: '600',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+              }}>
+                ⚡ Tactical Simulation:
+              </span>
+              <select
+                value={selectedScenario}
+                onChange={(e) => setSelectedScenario(e.target.value)}
+                style={{
+                  backgroundColor: '#0f172a',
+                  color: '#e2e8f0',
+                  border: '1px solid #475569',
+                  borderRadius: '4px',
+                  padding: '0.5rem 0.8rem',
+                  fontSize: '0.85rem',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  outline: 'none',
+                  minWidth: '180px',
+                }}
+              >
+                <option value="FIRE">🔥 Fire Emergency</option>
+                <option value="TSUNAMI">🌊 Tsunami Event</option>
+                <option value="EARTHQUAKE">🏚️ Earthquake Crisis</option>
+                <option value="MISSILE">🚀 Missile Attack</option>
+              </select>
+
+              <button
+                onClick={handleStartSimulation}
+                style={{
+                  backgroundColor: '#dc2626',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '0.5rem 1.2rem',
+                  fontSize: '0.85rem',
+                  fontWeight: 'bold',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 4px rgba(220, 38, 38, 0.3)',
+                  transition: 'all 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.backgroundColor = '#b91c1c';
+                  e.target.style.transform = 'translateY(-1px)';
+                  e.target.style.boxShadow = '0 4px 6px rgba(220, 38, 38, 0.4)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.backgroundColor = '#dc2626';
+                  e.target.style.transform = 'translateY(0)';
+                  e.target.style.boxShadow = '0 2px 4px rgba(220, 38, 38, 0.3)';
+                }}
+              >
+                ▶ Activate
+              </button>
+            </>
+          ) : (
+            <>
+              <div
+                style={{
+                  backgroundColor: '#7f1d1d',
+                  color: 'white',
+                  padding: '0.5rem 1rem',
+                  borderRadius: '4px',
+                  fontSize: '0.85rem',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  border: '2px solid #dc2626',
+                }}
+              >
+                <span style={{
+                  display: 'inline-block',
+                  width: '8px',
+                  height: '8px',
+                  backgroundColor: '#fca5a5',
+                  borderRadius: '50%',
+                  animation: 'ping 1s cubic-bezier(0, 0, 0.2, 1) infinite',
+                }}></span>
+                🚨 LIVE: {simulationType}
+              </div>
+
+              <button
+                onClick={handleStopSimulation}
+                style={{
+                  backgroundColor: '#991b1b',
+                  color: 'white',
+                  border: '2px solid #ef4444',
+                  borderRadius: '4px',
+                  padding: '0.5rem 1.2rem',
+                  fontSize: '0.85rem',
+                  fontWeight: 'bold',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  cursor: 'pointer',
+                  boxShadow: '0 0 15px rgba(239, 68, 68, 0.4)',
+                  transition: 'all 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.backgroundColor = '#7f1d1d';
+                  e.target.style.boxShadow = '0 0 25px rgba(239, 68, 68, 0.6)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.backgroundColor = '#991b1b';
+                  e.target.style.boxShadow = '0 0 15px rgba(239, 68, 68, 0.4)';
+                }}
+              >
+                ⏹ Terminate
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Right: Server Status */}
+        <div style={{
+          flex: '0 0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-end',
+          gap: '0.25rem',
+        }}>
+          <div style={{
+            color: mode === 'SIMULATION' ? '#fca5a5' : '#10b981',
+            fontSize: '0.75rem',
+            fontWeight: '600',
+            textTransform: 'uppercase',
+            letterSpacing: '0.5px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+          }}>
+            <span style={{
+              display: 'inline-block',
+              width: '8px',
+              height: '8px',
+              backgroundColor: mode === 'SIMULATION' ? '#dc2626' : '#10b981',
+              borderRadius: '50%',
+            }}></span>
+            {mode === 'SIMULATION' ? 'Training Mode' : 'Operational'}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <span
               className={`connection-status ${connectionStatus.toLowerCase()}`}
+              style={{
+                fontSize: '0.75rem',
+                color: connectionStatus === 'CONNECTED' ? '#10b981' : connectionStatus === 'OFFLINE' ? '#ef4444' : '#f59e0b',
+                fontWeight: '600',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+              }}
               title={`Connection: ${connectionStatus}`}
             >
               {connectionStatus === 'CONNECTED' && '🟢'}
               {connectionStatus === 'OFFLINE' && '🔴'}
               {connectionStatus === 'DEGRADED' && '🟡'}
-              {connectionStatus}
+              {' '}{connectionStatus}
             </span>
           </div>
         </div>

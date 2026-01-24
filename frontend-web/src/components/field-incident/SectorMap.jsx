@@ -12,6 +12,9 @@ const SectorMap = () => {
   const selectedSector = useFieldIncidentStore((s) => s.selectedSector);
   const setSelectedSector = useFieldIncidentStore((s) => s.setSelectedSector);
 
+  // Safety check: ensure sectors is an array
+  const safeSectors = Array.isArray(sectors) ? sectors : [];
+
   const hazardColors = {
     LOW: '#10b981',
     MEDIUM: '#f59e0b',
@@ -36,74 +39,79 @@ const SectorMap = () => {
     <div className="sector-map">
       <h3>Operational Sectors</h3>
 
-      {sectors.length === 0 ? (
+      {safeSectors.length === 0 ? (
         <p className="no-data">No sectors data available</p>
       ) : (
         <div className="sectors-grid">
-          {sectors.map((sector) => (
-            <div
-              key={sector.name}
-              className={`sector-card ${
-                selectedSector === sector.name ? 'selected' : ''
-              }`}
-              onClick={() =>
-                setSelectedSector(
-                  selectedSector === sector.name ? null : sector.name
-                )
-              }
-              style={{
-                borderLeft: `4px solid ${hazardColors[sector.hazard_level]}`,
-              }}
-            >
-              {/* Sector Header */}
-              <div className="sector-header">
-                <h4>{sector.name}</h4>
-                <div className="sector-badges">
-                  <span className="hazard-badge">
-                    {hazardIcons[sector.hazard_level]} {sector.hazard_level}
-                  </span>
-                  <span className="status-badge">
-                    {statusIcons[sector.status]} {sector.status}
-                  </span>
-                </div>
-              </div>
+          {safeSectors.map((sector, idx) => {
+            // Safety check: ensure sector is an object
+            if (!sector || typeof sector !== 'object') return null;
 
-              {/* Sector Details */}
-              <div className="sector-details">
-                <div className="detail-row">
-                  <span className="detail-label">Hazard:</span>
-                  <span className="detail-value">{sector.hazard_description}</span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">Access:</span>
-                  <span className="detail-value">{sector.access_status.replace(/_/g, ' ')}</span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">Estimated Survivors:</span>
-                  <span className="detail-value">{sector.estimated_survivors}</span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">Primary Responder:</span>
-                  <span className="detail-value">{sector.primary_responder}</span>
+            const sectorKey = sector.id || sector.name || `sector-${idx}`;
+
+            return (
+              <div
+                key={sectorKey}
+                className={`sector-card ${selectedSector === sector.name ? 'selected' : ''
+                  }`}
+                onClick={() =>
+                  setSelectedSector(
+                    selectedSector === sector.name ? null : sector.name
+                  )
+                }
+                style={{
+                  borderLeft: `4px solid ${hazardColors[sector.hazard_level] || hazardColors.LOW}`,
+                }}
+              >
+                {/* Sector Header */}
+                <div className="sector-header">
+                  <h4>{sector.name || 'Unnamed Sector'}</h4>
+                  <div className="sector-badges">
+                    <span className="hazard-badge">
+                      {hazardIcons[sector.hazard_level] || '✓'} {sector.hazard_level || 'LOW'}
+                    </span>
+                    <span className="status-badge">
+                      {statusIcons[sector.status] || '🟢'} {sector.status || 'ACTIVE'}
+                    </span>
+                  </div>
                 </div>
 
-                {/* Hazard Level Visual */}
-                <div className="hazard-visual">
-                  <div
-                    className="hazard-bar"
-                    style={{
-                      backgroundColor: hazardColors[sector.hazard_level],
-                      width: `${
-                        { LOW: 25, MEDIUM: 50, HIGH: 75, CRITICAL: 100 }[
+                {/* Sector Details */}
+                <div className="sector-details">
+                  <div className="detail-row">
+                    <span className="detail-label">Hazard:</span>
+                    <span className="detail-value">{sector.hazard_description || 'No hazard information'}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Access:</span>
+                    <span className="detail-value">{(sector.access_status || 'UNRESTRICTED').replace(/_/g, ' ')}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Estimated Survivors:</span>
+                    <span className="detail-value">{sector.estimated_survivors ?? 'Unknown'}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Primary Responder:</span>
+                    <span className="detail-value">{sector.primary_responder || 'Incident Command'}</span>
+                  </div>
+
+                  {/* Hazard Level Visual */}
+                  <div className="hazard-visual">
+                    <div
+                      className="hazard-bar"
+                      style={{
+                        backgroundColor: hazardColors[sector.hazard_level] || hazardColors.LOW,
+                        width: `${{ LOW: 25, MEDIUM: 50, HIGH: 75, CRITICAL: 100 }[
                           sector.hazard_level
-                        ]
-                      }%`,
-                    }}
-                  ></div>
+                          ] || 25
+                          }%`,
+                      }}
+                    ></div>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
