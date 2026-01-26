@@ -7,8 +7,9 @@
 
 export const SCENARIOS = {
     FIRE: [
-        // Step 1: Initial Fire Report
+        // Step 1: Initial Fire Report - Units en route
         {
+            incidentLocation: { lat: 31.77, lng: 35.22, name: 'Warehouse District - 1200 Sector Road' },
             timeline: [
                 {
                     title: 'Warehouse Fire Reported',
@@ -24,8 +25,39 @@ export const SCENARIOS = {
                     status: 'ACTIVE',
                     hazard_level: 'CRITICAL',
                     hazard_description: 'Active fire spreading rapidly, chemical storage nearby',
+                    center_lat: 31.77,
+                    center_lng: 35.22,
                     units_deployed: 8,
                     personnel_count: 24,
+                },
+            ],
+            units: [
+                {
+                    id: 'ft-001',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 001',
+                    position: [31.80, 35.25],
+                    status: 'MOVING',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'ft-002',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 002',
+                    position: [31.82, 35.20],
+                    status: 'MOVING',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'ems-001',
+                    type: 'EMS',
+                    name: 'Ambulance 001',
+                    position: [31.75, 35.28],
+                    status: 'MOVING',
+                    icon: '🚑',
+                    color: '#10b981',
                 },
             ],
             tasks: [
@@ -45,8 +77,9 @@ export const SCENARIOS = {
                 displaced_persons: 45,
             },
         },
-        // Step 2: Fire Escalation
+        // Step 2: Fire Escalation - Units arriving
         {
+            incidentLocation: { lat: 31.77, lng: 35.22, name: 'Warehouse District - 1200 Sector Road' },
             timeline: [
                 {
                     title: 'Fire Escalating - Level 3 Response',
@@ -62,8 +95,39 @@ export const SCENARIOS = {
                     status: 'ACTIVE',
                     hazard_level: 'HIGH',
                     hazard_description: 'Secondary fire in adjacent building, evacuating residents',
+                    center_lat: 31.77,
+                    center_lng: 35.22,
                     units_deployed: 6,
                     personnel_count: 18,
+                },
+            ],
+            units: [
+                {
+                    id: 'ft-001',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 001',
+                    position: [31.7875, 35.215],
+                    status: 'ON_SCENE',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'ft-002',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 002',
+                    position: [31.765, 35.22],
+                    status: 'ON_SCENE',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'ems-001',
+                    type: 'EMS',
+                    name: 'Ambulance 001',
+                    position: [31.77, 35.225],
+                    status: 'ON_SCENE',
+                    icon: '🚑',
+                    color: '#10b981',
                 },
             ],
             tasks: [
@@ -92,8 +156,9 @@ export const SCENARIOS = {
                 displaced_persons: 340,
             },
         },
-        // Step 3: Chemical Hazard
+        // Step 3: Chemical Hazard - Units at scene
         {
+            incidentLocation: { lat: 31.77, lng: 35.22, name: 'Warehouse District - 1200 Sector Road' },
             timeline: [
                 {
                     title: 'HAZMAT Alert - Chemical Storage Compromised',
@@ -109,8 +174,48 @@ export const SCENARIOS = {
                     status: 'ACTIVE',
                     hazard_level: 'CRITICAL',
                     hazard_description: 'Toxic smoke and potential chemical release, wind carrying southeast',
+                    center_lat: 31.77,
+                    center_lng: 35.22,
                     units_deployed: 4,
                     personnel_count: 12,
+                },
+            ],
+            units: [
+                {
+                    id: 'ft-001',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 001',
+                    position: [31.77, 35.22],
+                    status: 'ON_SCENE',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'ft-002',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 002',
+                    position: [31.77, 35.22],
+                    status: 'ON_SCENE',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'hazmat-001',
+                    type: 'HAZMAT',
+                    name: 'HAZMAT Unit 001',
+                    position: [31.772, 35.218],
+                    status: 'ON_SCENE',
+                    icon: '⚠️',
+                    color: '#8b5cf6',
+                },
+                {
+                    id: 'ems-001',
+                    type: 'EMS',
+                    name: 'Ambulance 001',
+                    position: [31.768, 35.222],
+                    status: 'ON_SCENE',
+                    icon: '🚑',
+                    color: '#10b981',
                 },
             ],
             tasks: [
@@ -141,6 +246,7 @@ export const SCENARIOS = {
         },
         // Step 4: Fire Under Control
         {
+            incidentLocation: { lat: 31.77, lng: 35.22, name: 'Warehouse District - 1200 Sector Road' },
             timeline: [
                 {
                     title: 'Fire 60% Contained',
@@ -151,6 +257,26 @@ export const SCENARIOS = {
                 },
             ],
             sectors: [],
+            units: [
+                {
+                    id: 'ft-001',
+                    type: 'FIRE_TRUCK',
+                    name: 'Fire Truck 001',
+                    position: [31.77, 35.22],
+                    status: 'ON_SCENE',
+                    icon: '🚒',
+                    color: '#ef4444',
+                },
+                {
+                    id: 'hazmat-001',
+                    type: 'HAZMAT',
+                    name: 'HAZMAT Unit 001',
+                    position: [31.772, 35.218],
+                    status: 'ON_SCENE',
+                    icon: '⚠️',
+                    color: '#8b5cf6',
+                },
+            ],
             tasks: [
                 {
                     title: 'Shelter Coordination',

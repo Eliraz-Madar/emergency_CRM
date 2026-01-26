@@ -1,6 +1,27 @@
 import React, { useState } from 'react';
 import { useDashboardStore } from '../store/dashboard.js';
+import { useFieldIncidentStore } from '../store/fieldIncident.js';
 import * as api from '../api/client.js';
+
+/**
+ * Calculate distance between two coordinates using Haversine formula (in KM)
+ */
+const getDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371; // Earth's radius in km
+  if (![lat1, lon1, lat2, lon2].every((v) => Number.isFinite(v))) {
+    return Infinity;
+  }
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) *
+    Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
 
 /**
  * Incident Details Panel Component
@@ -12,8 +33,14 @@ export function IncidentDetailsPanel() {
     updateIncident,
   } = useDashboardStore();
 
+  const {
+    routineUnits,
+    dispatchUnitsToIncident,
+  } = useFieldIncidentStore();
+
   const [isLoading, setIsLoading] = useState(false);
   const [toast, setToast] = useState(null);
+  const [selectedUnitIds, setSelectedUnitIds] = useState([]);
 
   const incident = getSelectedIncident();
 
@@ -91,13 +118,61 @@ export function IncidentDetailsPanel() {
     }
   };
 
+  const handleDispatchUnits = () => {
+    if (selectedUnitIds.length === 0) {
+      showToast('Select at least one unit', 'error');
+      return;
+    }
+
+    const incidentLat = incident.location_lat ?? 31.77;
+    const incidentLng = incident.location_lng ?? 35.22;
+
+    dispatchUnitsToIncident({
+      incidentId: incident.id,
+      targetPosition: [incidentLat, incidentLng],
+      unitIds: selectedUnitIds,
+    });
+
+    setSelectedUnitIds([]);
+    showToast(`${selectedUnitIds.length} unit(s) dispatched to scene`);
+  };
+
+
+  const toggleUnitSelection = (unitId) => {
+    setSelectedUnitIds((prev) =>
+      prev.includes(unitId) ? prev.filter((id) => id !== unitId) : [...prev, unitId]
+    );
+  };
+
+  const assignedUnitIds = incident.assigned_unit_ids || [];
+  const incidentLat = incident.location_lat ?? 31.77;
+  const incidentLng = incident.location_lng ?? 35.22;
+
+  // Calculate distances and filter to 50km radius, sorted by distance
+  const unitsWithDistance = (Array.isArray(routineUnits) ? routineUnits : [])
+    .filter((unit) => unit.status === 'PATROL' && !assignedUnitIds.includes(unit.id))
+    .map((unit) => ({
+      ...unit,
+      distance: Array.isArray(unit.position) && unit.position.length >= 2
+        ? getDistance(unit.position[0], unit.position[1], incidentLat, incidentLng)
+        : Infinity,
+    }))
+    .filter((unit) => unit.distance <= 50)
+    .sort((a, b) => a.distance - b.distance);
+
+  const availableUnits = unitsWithDistance;
+
+  const policeUnits = availableUnits.filter((u) => u.type === 'POLICE');
+  const fireUnits = availableUnits.filter((u) => u.type === 'FIRE');
+  const medicalUnits = availableUnits.filter((u) => u.type === 'MEDICAL');
+
   const assignedUnits = units.filter((unit) =>
-    incident.assigned_unit_ids.includes(unit.id)
+    assignedUnitIds.includes(unit.id)
   );
 
   const unassignedUnits = units.filter(
     (unit) =>
-      !incident.assigned_unit_ids.includes(unit.id) &&
+      !assignedUnitIds.includes(unit.id) &&
       unit.status === 'Available'
   );
 
@@ -227,6 +302,93 @@ export function IncidentDetailsPanel() {
           </button>
           <button className="action-btn" disabled={isLoading}>
             🔔 Send Alert
+          </button>
+        </div>
+      </div>
+
+      <div className="details-section dispatch-section">
+        <h3 className="section-title">🚨 Dispatch Support</h3>
+        <div className="dispatch-units">
+          {/* Police Forces */}
+          <div className="unit-category">
+            <h4>👮 Police</h4>
+            <div className="units-checklist">
+              {policeUnits.length === 0 ? (
+                <p className="empty-text">No units nearby</p>
+              ) : (
+                policeUnits.map((unit) => (
+                  <label key={unit.id} className="unit-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedUnitIds.includes(unit.id)}
+                      onChange={() => toggleUnitSelection(unit.id)}
+                      disabled={isLoading}
+                    />
+                    <span className="unit-info">
+                      <span className="unit-name">{unit.id} <span className="unit-distance">{unit.distance.toFixed(1)} km</span></span>
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Fire Dept */}
+          <div className="unit-category">
+            <h4>🚒 Fire</h4>
+            <div className="units-checklist">
+              {fireUnits.length === 0 ? (
+                <p className="empty-text">No units nearby</p>
+              ) : (
+                fireUnits.map((unit) => (
+                  <label key={unit.id} className="unit-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedUnitIds.includes(unit.id)}
+                      onChange={() => toggleUnitSelection(unit.id)}
+                      disabled={isLoading}
+                    />
+                    <span className="unit-info">
+                      <span className="unit-name">{unit.id} <span className="unit-distance">{unit.distance.toFixed(1)} km</span></span>
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Medical Teams */}
+          <div className="unit-category">
+            <h4>🚑 Medical</h4>
+            <div className="units-checklist">
+              {medicalUnits.length === 0 ? (
+                <p className="empty-text">No units nearby</p>
+              ) : (
+                medicalUnits.map((unit) => (
+                  <label key={unit.id} className="unit-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedUnitIds.includes(unit.id)}
+                      onChange={() => toggleUnitSelection(unit.id)}
+                      disabled={isLoading}
+                    />
+                    <span className="unit-info">
+                      <span className="unit-name">{unit.id} <span className="unit-distance">{unit.distance.toFixed(1)} km</span></span>
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="dispatch-action">
+          <button
+            className="dispatch-btn"
+            onClick={handleDispatchUnits}
+            disabled={isLoading || selectedUnitIds.length === 0}
+          >
+            🚗 DISPATCH {selectedUnitIds.length > 0 ? `(${selectedUnitIds.length})` : ''} UNITS
           </button>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useDashboardStore } from '../store/dashboard.js';
+import { useFieldIncidentStore } from '../store/fieldIncident.js';
 import { RealtimeService } from '../services/realtime.js';
 import { KPICards } from '../components/KPICards.jsx';
 import { FilterBar } from '../components/FilterBar.jsx';
@@ -10,7 +11,10 @@ import { EventFeed } from '../components/EventFeed.jsx';
 import * as api from '../api/client.js';
 
 /**
- * Dashboard Page - Main operational dashboard
+ * Dashboard Page - Main operational dashboard (War-Room)
+ * 
+ * Syncs with Field Incident Dashboard when simulation is active.
+ * Displays real operational data when in routine mode.
  */
 export default function Dashboard() {
   const {
@@ -27,16 +31,49 @@ export default function Dashboard() {
     lastUpdateTime,
   } = useDashboardStore();
 
+  // Connect to Field Incident simulation store
+  const {
+    mode: fieldMode,
+    simulationType,
+    majorIncident,
+    sectors: fieldSectors,
+    events: fieldTimeline,
+    taskGroups,
+    units: simulationUnits,
+    routineUnits,
+  } = useFieldIncidentStore();
+
   const [isLoading, setIsLoading] = useState(true);
   const [realtimeService, setRealtimeService] = useState(null);
   const [showEventFeed, setShowEventFeed] = useState(false);
+  const [activeFilter, setActiveFilter] = useState('ALL'); // Filter for incident types: 'ALL', 'FIRE', 'POLICE', 'MEDICAL'
+
+  // Simulation override detection
+  const isSimulation = fieldMode === 'SIMULATION';
+
+  // Sync simulation events to war-room when active
+  useEffect(() => {
+    if (isSimulation && fieldTimeline) {
+      // Convert field timeline events to dashboard event format
+      const convertedEvents = fieldTimeline.map((evt, idx) => ({
+        id: evt.id || `sim-${idx}`,
+        timestamp: evt.timestamp || new Date().toISOString(),
+        entity_type: 'simulation',
+        entity_id: majorIncident?.id || 'sim',
+        message: evt.title || evt.message || 'Simulation event',
+        level: evt.severity === 'CRITICAL' ? 'error' :
+          evt.severity === 'HIGH' ? 'warn' : 'info',
+      }));
+      setEvents(convertedEvents);
+    }
+  }, [isSimulation, fieldTimeline, majorIncident, setEvents]);
 
   // Initialize data and realtime connection
   useEffect(() => {
     const initializeData = async () => {
       try {
         setConnectionStatus('CONNECTING');
-        
+
         // Fetch initial data
         const [incidents, units, events] = await Promise.all([
           api.getIncidents(),
@@ -152,10 +189,23 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard">
+      {/* Simulation Mode Banner */}
+      {isSimulation && (
+        <div className="simulation-banner">
+          <div className="banner-content">
+            <span className="banner-icon">⚠️</span>
+            <span className="banner-text">
+              SIMULATION MODE ACTIVE - {simulationType || 'UNKNOWN'} SCENARIO
+            </span>
+            <span className="banner-badge">TRAINING EXERCISE</span>
+          </div>
+        </div>
+      )}
+
       {/* Top Bar */}
       <div className="dashboard-topbar">
         <div className="topbar-left">
-          <h1>🚨 Field War-Room Dashboard</h1>
+          <h1>🎯 Field War-Room Dashboard</h1>
         </div>
         <div className="topbar-center">
           {lastUpdateTime && (
@@ -181,7 +231,14 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div className="dashboard-section">
-        <KPICards />
+        <KPICards
+          simulationData={isSimulation && majorIncident ? {
+            estimated_casualties: majorIncident.estimated_casualties,
+            displaced_persons: majorIncident.displaced_persons,
+            confirmed_deaths: majorIncident.confirmed_deaths,
+            active_sectors: fieldSectors.filter(s => s?.status === 'ACTIVE').length,
+          } : null}
+        />
       </div>
 
       {/* Filter Bar */}
@@ -193,12 +250,28 @@ export default function Dashboard() {
       <div className="dashboard-content">
         {/* Left: Incident List */}
         <div className="content-left">
-          <IncidentList />
+          <IncidentList
+            activeFilter={activeFilter}
+            setActiveFilter={setActiveFilter}
+            isSimulation={isSimulation}
+            simulationEvents={isSimulation ? fieldTimeline : null}
+          />
         </div>
 
         {/* Center: Map */}
         <div className="content-center">
-          <MapView />
+          <MapView
+            simulationSectors={isSimulation ? fieldSectors : null}
+            activeFilter={activeFilter}
+            isSimulation={isSimulation}
+            simulationIncident={isSimulation && majorIncident ? {
+              lat: majorIncident.location_lat || 31.77,
+              lng: majorIncident.location_lng || 35.22,
+              name: majorIncident.title || 'Incident Location'
+            } : null}
+            simulationUnits={isSimulation ? simulationUnits : null}
+            routineUnits={!isSimulation ? routineUnits : null}
+          />
         </div>
 
         {/* Right: Details + Events */}

@@ -23,34 +23,34 @@ const DashboardSelector = () => {
 
         {/* Dashboard Options */}
         <div className="dashboard-options">
-          {/* Regional Dashboard */}
+          {/* Field War-Room Dashboard */}
           <div
             className="dashboard-card regional-card"
             onClick={() => navigate('/regional')}
           >
-            <div className="card-icon">📍</div>
-            <h2>Regional Dashboard</h2>
-            <p className="card-subtitle">Multi-Incident Dispatch</p>
-            
+            <div className="card-icon">🎯</div>
+            <h2>Field War-Room Dashboard</h2>
+            <p className="card-subtitle">Command Center Operations</p>
+
             <div className="card-description">
               <p>
-                Coordinate <strong>multiple incidents</strong> across a geographic region.
+                <strong>High-level command center</strong> for strategic coordination across multiple incidents and scenarios.
               </p>
               <ul className="features-list">
-                <li>Dispatch incident list</li>
-                <li>Unit availability tracking</li>
-                <li>Multi-incident status monitoring</li>
-                <li>Real-time event log</li>
-                <li>Regional map overview</li>
+                <li>Multi-incident command overview</li>
+                <li>Strategic resource allocation</li>
+                <li>Simulation-synchronized display</li>
+                <li>Real-time operational intelligence</li>
+                <li>War-room map with live sectors</li>
               </ul>
             </div>
 
             <div className="card-use-case">
-              <strong>Best For:</strong> Daily operations, disaster response across multiple sites,
-              standard dispatch coordination
+              <strong>Best For:</strong> Executive oversight, strategic planning, simulation training,
+              multi-agency coordination at command level
             </div>
 
-            <button className="card-button">Open Regional Dashboard</button>
+            <button className="card-button">Open War-Room Dashboard</button>
           </div>
 
           {/* Field Incident Dashboard */}
@@ -61,7 +61,7 @@ const DashboardSelector = () => {
             <div className="card-icon">🎖️</div>
             <h2>Field Incident Command</h2>
             <p className="card-subtitle">Single Major Incident</p>
-            
+
             <div className="card-description">
               <p>
                 Command-level management of <strong>large-scale incidents</strong> requiring
@@ -100,13 +100,13 @@ const DashboardSelector = () => {
               <tbody>
                 <tr>
                   <td className="aspect-label">Focus</td>
-                  <td>Multiple incidents</td>
+                  <td>Strategic command center</td>
                   <td>Single major incident</td>
                 </tr>
                 <tr>
                   <td className="aspect-label">View Level</td>
-                  <td>Dispatch coordination</td>
-                  <td>Command decision-making</td>
+                  <td>Executive oversight</td>
+                  <td>Tactical command operations</td>
                 </tr>
                 <tr>
                   <td className="aspect-label">Primary Entity</td>

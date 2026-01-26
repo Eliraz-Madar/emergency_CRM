@@ -8,12 +8,93 @@
 import { create } from 'zustand';
 import { SCENARIOS } from '../data/simulationScenarios';
 
+const LAT_MIN = 29.5;
+const LAT_MAX = 33.3;
+const LNG_MIN = 34.2;
+const LNG_MAX = 35.9;
+const PATROL_STEP_DELTA = 0.003; // Visible patrol speed on country map (~300m per tick)
+
+const clampToIsrael = (lat, lng) => {
+  const safeLat = Number.isFinite(lat) ? Math.min(Math.max(lat, LAT_MIN), LAT_MAX) : LAT_MIN;
+  const safeLng = Number.isFinite(lng) ? Math.min(Math.max(lng, LNG_MIN), LNG_MAX) : LNG_MIN;
+  return [safeLat, safeLng];
+};
+
+export const moveUnitRandomly = (lat, lng) => {
+  const nextLat = lat + (Math.random() - 0.5) * PATROL_STEP_DELTA;
+  const nextLng = lng + (Math.random() - 0.5) * PATROL_STEP_DELTA;
+  return clampToIsrael(nextLat, nextLng);
+};
+
+const landLatMin = 31.0;
+const landLatMax = 32.5;
+const landLngMin = 34.8;
+const landLngMax = 35.5;
+
+const randomLandPoint = () => {
+  const lat = landLatMin + Math.random() * (landLatMax - landLatMin);
+  const lng = landLngMin + Math.random() * (landLngMax - landLngMin);
+  return clampToIsrael(lat, lng);
+};
+
+const generateNationwideUnits = (count = 50) => {
+  const types = ['POLICE', 'FIRE', 'MEDICAL'];
+
+  // Israeli city centers with realistic positions
+  const cities = [
+    { name: 'Tel Aviv', lat: 32.0853, lng: 34.7818 },
+    { name: 'Jerusalem', lat: 31.7683, lng: 35.2137 },
+    { name: 'Haifa', lat: 32.7940, lng: 34.9896 },
+    { name: 'Beer Sheva', lat: 31.2518, lng: 34.7913 },
+    { name: 'Rishon LeZion', lat: 31.9730, lng: 34.7925 },
+    { name: 'Ashdod', lat: 31.8018, lng: 34.6479 },
+  ];
+
+  // Generate ~5km radius offset (0.045° ≈ 5km)
+  const generateCityOffset = () => ({
+    lat: (Math.random() - 0.5) * 0.045,
+    lng: (Math.random() - 0.5) * 0.045,
+  });
+
+  return Array.from({ length: count }).map((_, idx) => {
+    // Distribute units across cities
+    const cityIndex = Math.floor(idx / Math.ceil(count / cities.length)) % cities.length;
+    const city = cities[cityIndex];
+
+    // Add random offset within ~5km radius from city center
+    const offset = generateCityOffset();
+    const [lat, lng] = clampToIsrael(city.lat + offset.lat, city.lng + offset.lng);
+    const targetOffset = generateCityOffset();
+    const [tLat, tLng] = clampToIsrael(
+      city.lat + targetOffset.lat,
+      city.lng + targetOffset.lng
+    );
+
+    return {
+      id: `routine-${idx + 1}`,
+      name: `Unit ${idx + 1}`,
+      type: types[Math.floor(Math.random() * types.length)],
+      status: 'PATROL',
+      position: [lat, lng],
+      targetPosition: [tLat, tLng],
+      missionIncidentId: null, // No incident assigned initially
+      lastUpdated: Date.now() + idx,
+    };
+  });
+};
+
+const createRoutineUnits = () => generateNationwideUnits(50);
+const buildInitialRoutineUnits = () => createRoutineUnits();
+const initialRoutineUnits = buildInitialRoutineUnits();
+
 export const useFieldIncidentStore = create((set, get) => ({
   // Major incident data
   majorIncident: null,
   sectors: [],
   taskGroups: [],
   events: [],
+  routineUnits: initialRoutineUnits,
+  units: initialRoutineUnits.map((u) => ({ ...u })), // Active units (patrol or simulation)
 
   // UI state
   selectedSector: null,
@@ -36,6 +117,7 @@ export const useFieldIncidentStore = create((set, get) => ({
   setSectors: (sectors) => set({ sectors }),
   setTaskGroups: (taskGroups) => set({ taskGroups }),
   setEvents: (events) => set({ events }),
+  setUnits: (units) => set({ units }),
 
   setSelectedSector: (sectorName) => set({ selectedSector: sectorName }),
   setSelectedTaskGroup: (taskGroupId) => set({ selectedTaskGroup: taskGroupId }),
@@ -46,6 +128,89 @@ export const useFieldIncidentStore = create((set, get) => ({
 
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
+
+  dispatchUnitsToIncident: (payload) =>
+    set((state) => {
+      const { unitIds, targetPosition, incidentId } = payload;
+
+      // Validate payload
+      if (!Array.isArray(unitIds) || !Array.isArray(targetPosition) || targetPosition.length < 2) {
+        console.warn('Invalid dispatch payload', payload);
+        return {};
+      }
+
+      const [targetLat, targetLng] = targetPosition;
+
+      const updatedUnits = (Array.isArray(state.routineUnits) ? state.routineUnits : []).map((unit) => {
+        if (unitIds.includes(unit.id)) {
+          return {
+            ...unit,
+            status: 'RESPONDING',
+            targetPosition: [targetLat, targetLng],
+            missionIncidentId: incidentId || null,
+          };
+        }
+        return unit;
+      });
+
+      return {
+        routineUnits: updatedUnits,
+        units: updatedUnits,
+      };
+    }),
+
+  tickRoutinePatrol: () =>
+    set((state) => {
+      if (state.mode !== 'ROUTINE') {
+        return {};
+      }
+
+      const baseUnits =
+        Array.isArray(state.routineUnits) && state.routineUnits.length > 0
+          ? state.routineUnits
+          : createRoutineUnits();
+
+      const speedFactor = 0.005; // visible per tick
+
+      const updatedUnits = baseUnits.map((unit, idx) => {
+        const hasPos = Array.isArray(unit.position) && unit.position.length >= 2;
+        const hasTarget = Array.isArray(unit.targetPosition) && unit.targetPosition.length >= 2;
+
+        const [currentLat, currentLng] = hasPos ? unit.position : randomLandPoint();
+        const [targetLat, targetLng] = hasTarget ? unit.targetPosition : randomLandPoint();
+
+        const dLat = targetLat - currentLat;
+        const dLng = targetLng - currentLng;
+        const dist = Math.sqrt(dLat * dLat + dLng * dLng);
+
+        let nextLat = currentLat;
+        let nextLng = currentLng;
+        let nextTarget = [targetLat, targetLng];
+
+        if (dist < 0.001 || !Number.isFinite(dist)) {
+          // Arrived: pick a new waypoint
+          nextTarget = randomLandPoint();
+        } else {
+          nextLat = currentLat + dLat * speedFactor;
+          nextLng = currentLng + dLng * speedFactor;
+        }
+
+        const [clampedLat, clampedLng] = clampToIsrael(nextLat, nextLng);
+
+        return {
+          ...unit,
+          id: unit.id || `routine-${idx}`,
+          position: [clampedLat, clampedLng],
+          targetPosition: nextTarget,
+          lastUpdated: Date.now(),
+        };
+      });
+
+      return {
+        routineUnits: updatedUnits,
+        units: updatedUnits,
+      };
+    }),
 
   // Update incident data
   updateMajorIncident: (updates) =>
@@ -194,12 +359,15 @@ export const useFieldIncidentStore = create((set, get) => ({
     return alerts;
   },
 
-  reset: () =>
+  reset: () => {
+    const freshUnits = createRoutineUnits();
     set({
       majorIncident: null,
       sectors: [],
       taskGroups: [],
       events: [],
+      routineUnits: freshUnits,
+      units: freshUnits,
       selectedSector: null,
       selectedTaskGroup: null,
       connectionStatus: 'DISCONNECTED',
@@ -210,7 +378,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       mode: 'ROUTINE',
       simulationType: null,
       simulationStep: 0,
-    }),
+    });
+  },
 
   // Helper function to generate routine baseline data
   generateRoutineData: () => {
@@ -223,6 +392,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       confirmed_deaths: 0,
       displaced_persons: 0,
       radius_meters: 5000,
+      location_lat: 31.77,
+      location_lng: 35.22,
     };
 
     const routineSectors = [
@@ -282,11 +453,15 @@ export const useFieldIncidentStore = create((set, get) => ({
       },
     ];
 
+    const resetUnits = createRoutineUnits();
+
     set({
       majorIncident: routineIncident,
       sectors: routineSectors,
       taskGroups: routineTasks,
       events: routineEvents,
+      routineUnits: resetUnits,
+      units: resetUnits,
       mode: 'ROUTINE',
       simulationType: null,
       simulationStep: 0,
@@ -300,6 +475,14 @@ export const useFieldIncidentStore = create((set, get) => ({
       return;
     }
 
+    const scenario = SCENARIOS[type];
+    const firstStep = scenario[0];
+    const routineUnits = Array.isArray(get().routineUnits) && get().routineUnits.length > 0
+      ? get().routineUnits
+      : createRoutineUnits();
+    const simUnits = Array.isArray(firstStep?.units) ? firstStep.units : [];
+    const combinedUnits = [...routineUnits, ...simUnits];
+
     // CRITICAL: Set safe defaults (never null) to prevent crashes
     set({
       mode: 'SIMULATION',
@@ -307,16 +490,20 @@ export const useFieldIncidentStore = create((set, get) => ({
       simulationStep: 0,
       majorIncident: {
         id: 'sim-1',
-        title: 'SIMULATION STARTING...',
+        title: `${type} EMERGENCY`,
         incident_type: type,
         status: 'INITIALIZING',
-        estimated_casualties: 0,
-        confirmed_deaths: 0,
-        displaced_persons: 0,
+        estimated_casualties: firstStep?.stats?.estimated_casualties || 0,
+        confirmed_deaths: firstStep?.stats?.confirmed_deaths || 0,
+        displaced_persons: firstStep?.stats?.displaced_persons || 0,
         radius_meters: 1000,
+        location_lat: firstStep?.incidentLocation?.lat || 31.77,
+        location_lng: firstStep?.incidentLocation?.lng || 35.22,
       },
       sectors: [],
       taskGroups: [],
+      routineUnits,
+      units: combinedUnits,
       events: [{
         title: 'Simulation Started',
         description: `${type} emergency scenario activated`,
@@ -344,6 +531,14 @@ export const useFieldIncidentStore = create((set, get) => ({
     const step = scenario[state.simulationStep];
     if (!step) return; // Safety check
 
+    // Set incident location if available
+    if (step.incidentLocation) {
+      get().updateMajorIncident({
+        location_lat: step.incidentLocation.lat,
+        location_lng: step.incidentLocation.lng,
+      });
+    }
+
     // Append new timeline events with defensive checks
     if (step.timeline && Array.isArray(step.timeline) && step.timeline.length > 0) {
       step.timeline.forEach((event) => {
@@ -357,6 +552,12 @@ export const useFieldIncidentStore = create((set, get) => ({
           get().addEvent(safeEvent);
         }
       });
+    }
+
+    // Set units for this step (merge routine patrols so map stays populated)
+    if (step.units && Array.isArray(step.units)) {
+      const routineUnits = Array.isArray(state.routineUnits) ? state.routineUnits : [];
+      set({ units: [...routineUnits, ...step.units] });
     }
 
     // Add new sectors with defensive checks
@@ -410,6 +611,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       confirmed_deaths: 0,
       displaced_persons: 0,
       radius_meters: 5000,
+      location_lat: 31.77,
+      location_lng: 35.22,
     };
 
     const routineSectors = [
@@ -469,11 +672,22 @@ export const useFieldIncidentStore = create((set, get) => ({
       },
     ];
 
+    const routineUnits = Array.isArray(get().routineUnits) && get().routineUnits.length > 0
+      ? get().routineUnits
+      : createRoutineUnits();
+
+    const patrolUnits = routineUnits.map((unit, idx) => ({
+      ...unit,
+      id: unit.id || `routine-${idx}`,
+    }));
+
     set({
       majorIncident: routineIncident,
       sectors: routineSectors,
       taskGroups: routineTasks,
       events: routineEvents,
+      routineUnits: patrolUnits,
+      units: patrolUnits,
       mode: 'ROUTINE',
       simulationType: null,
       simulationStep: 0,

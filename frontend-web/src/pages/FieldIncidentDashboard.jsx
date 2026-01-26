@@ -49,6 +49,7 @@ const FieldIncidentDashboard = () => {
   const simulationType = useFieldIncidentStore((s) => s.simulationType);
   const startSimulation = useFieldIncidentStore((s) => s.startSimulation);
   const nextSimulationStep = useFieldIncidentStore((s) => s.nextSimulationStep);
+  const tickRoutinePatrol = useFieldIncidentStore((s) => s.tickRoutinePatrol);
   const stopSimulation = useFieldIncidentStore((s) => s.stopSimulation);
 
   const simulationTimerRef = useRef(null);
@@ -173,25 +174,26 @@ const FieldIncidentDashboard = () => {
     return () => clearInterval(simulationInterval);
   }, [mode]);
 
-  // Simulation timer - advance simulation every 3 seconds
+  // Timer - advance simulation or routine patrol every ~2.5 seconds
   useEffect(() => {
-    if (mode === 'SIMULATION') {
-      simulationTimerRef.current = setInterval(() => {
-        nextSimulationStep();
-      }, 3000);
+    if (simulationTimerRef.current) {
+      clearInterval(simulationTimerRef.current);
+    }
 
-      return () => {
-        if (simulationTimerRef.current) {
-          clearInterval(simulationTimerRef.current);
-        }
-      };
-    } else {
+    simulationTimerRef.current = setInterval(() => {
+      if (mode === 'SIMULATION') {
+        nextSimulationStep();
+      } else {
+        tickRoutinePatrol();
+      }
+    }, 2500);
+
+    return () => {
       if (simulationTimerRef.current) {
         clearInterval(simulationTimerRef.current);
-        simulationTimerRef.current = null;
       }
-    }
-  }, [mode, nextSimulationStep]);
+    };
+  }, [mode, nextSimulationStep, tickRoutinePatrol]);
 
   // Handlers for simulation buttons
   const handleStartSimulation = () => {
