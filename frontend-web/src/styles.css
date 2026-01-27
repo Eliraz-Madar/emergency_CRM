@@ -1545,3 +1545,337 @@ input[type="search"] {
   color: #ffffff !important;
   opacity: 0.8;
 }
+
+/* ============================================
+   Compact CRM Control Panel
+   ============================================ */
+
+.cc-panel {
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(circle at 20% 20%, #111827, #0b1220) !important;
+  border-radius: var(--border-radius-lg);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  height: 100%;
+  min-height: 0;
+  color: #e5e7eb;
+  border: 1px solid #1f2937;
+}
+
+/* Header */
+.cc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 12px;
+  border-bottom: 1px solid #1f2937;
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.cc-header-left {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  flex: 1;
+  min-width: 0;
+}
+
+.cc-icon-circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cc-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #f8fafc;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cc-subtitle {
+  display: flex;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cc-header-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.cc-type {
+  padding: 4px 8px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #7dd3fc;
+  white-space: nowrap;
+}
+
+.cc-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+  flex-shrink: 0;
+}
+
+.cc-close:hover {
+  color: #f8fafc;
+}
+
+/* Severity Section */
+.cc-severity-section {
+  padding: 10px 12px;
+  border-bottom: 1px solid #1f2937;
+  flex-shrink: 0;
+}
+
+.cc-section-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+
+.cc-severity-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.cc-severity-btn {
+  flex: 1;
+  padding: 8px;
+  border: 1px solid;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: #f8fafc;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cc-severity-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Main Section (Dispatch Forces) */
+.cc-section {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.cc-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #f8fafc;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Tabs */
+.cc-tabs {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cc-tab {
+  flex: 1;
+  padding: 8px;
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #94a3b8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: all 0.2s;
+}
+
+.cc-tab:hover {
+  border-color: #475569;
+  color: #cbd5e1;
+}
+
+.cc-tab.active {
+  color: #f8fafc;
+  border-color: currentColor;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Scrollable List */
+.cc-list-scrollable {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  /* Modern scrollbar styling */
+  scrollbar-width: thin;
+  scrollbar-color: #475569 #0f172a;
+}
+
+.cc-list-scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+
+.cc-list-scrollable::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+.cc-list-scrollable::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 3px;
+}
+
+.cc-list-scrollable::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+.cc-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 60px;
+  font-size: 0.8rem;
+  color: #64748b;
+  font-style: italic;
+}
+
+/* Compact Unit Card */
+.unit-card-compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.unit-card-compact:hover {
+  border-color: #475569;
+  background: #1a1f35;
+}
+
+.unit-card-compact-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.unit-id-compact {
+  font-weight: 600;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.unit-meta-compact {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.unit-distance-compact {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Sticky Footer */
+.cc-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #1f2937;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.cc-selection {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cc-dispatch {
+  padding: 10px;
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: #ffffff;
+  border: none;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+
+.cc-dispatch:hover:not(:disabled) {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+  transform: translateY(-1px);
+}
+
+.cc-dispatch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

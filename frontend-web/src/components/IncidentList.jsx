@@ -92,7 +92,10 @@ export function IncidentList({
   };
 
   return (
-    <div className="incident-list">
+    <div
+      className="incident-list"
+      style={{ height: 'calc(100vh - 100px)', overflowY: 'auto' }}
+    >
       <div className="incident-list-header">
         <h2>Incidents ({filteredIncidents.length})</h2>
       </div>
@@ -131,17 +134,17 @@ export function IncidentList({
               onClick={() => setSelectedIncident(incident.id)}
             >
               <div className="incident-severity-bar" style={{
-                backgroundColor: getSeverityColor(incident.severity),
+                backgroundColor: getSeverityColor(incident.priority || incident.severity),
               }} />
               <div className="incident-content">
                 <div className="incident-header">
                   <span className="incident-icon">{getStatusIcon(incident.status)}</span>
                   <span className="incident-title">{incident.title}</span>
                   <span className="incident-severity" style={{
-                    backgroundColor: getSeverityColor(incident.severity) + '20',
-                    color: getSeverityColor(incident.severity),
+                    backgroundColor: getSeverityColor(incident.priority || incident.severity) + '20',
+                    color: getSeverityColor(incident.priority || incident.severity),
                   }}>
-                    {incident.severity}
+                    {incident.priority || incident.severity}
                   </span>
                 </div>
                 <div className="incident-meta">

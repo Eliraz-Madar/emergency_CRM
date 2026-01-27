@@ -8,6 +8,36 @@
 import { create } from 'zustand';
 import { SCENARIOS } from '../data/simulationScenarios';
 
+// Major Israeli cities used for unit and event placement (inland-safe centers)
+const ISRAEL_CITIES = [
+  { name: 'Tel Aviv', lat: 32.0853, lng: 34.7818 },
+  { name: 'Jerusalem', lat: 31.7683, lng: 35.2137 },
+  { name: 'Haifa', lat: 32.7940, lng: 34.9896 },
+  { name: 'Beer Sheva', lat: 31.2518, lng: 34.7913 },
+  { name: 'Eilat', lat: 29.5577, lng: 34.9519 },
+  { name: 'Kiryat Shmona', lat: 33.2073, lng: 35.5711 },
+  { name: 'Ashdod', lat: 31.8018, lng: 34.6479 },
+  { name: 'Tiberias', lat: 32.7940, lng: 35.5309 },
+];
+
+// Routine event catalog
+const ROUTINE_EVENT_TYPES = {
+  FIRE: ['Brush Fire', 'Apartment Fire'],
+  PUBLIC_ORDER: ['Shooting Incident', 'Violent Brawl'],
+  ENGINEERING: ['Building Collapse'],
+};
+
+const randomChoice = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// Convert km + angle to degree offsets at given latitude
+const kmOffsetToDeg = (lat, km, angleRad) => {
+  const degPerKmLat = 1 / 111; // ~111 km per degree latitude
+  const degPerKmLng = 1 / (111 * Math.cos((lat * Math.PI) / 180) || 1);
+  const dLat = Math.cos(angleRad) * km * degPerKmLat;
+  const dLng = Math.sin(angleRad) * km * degPerKmLng;
+  return [dLat, dLng];
+};
+
 const LAT_MIN = 29.5;
 const LAT_MAX = 33.3;
 const LNG_MIN = 34.2;
@@ -37,38 +67,59 @@ const randomLandPoint = () => {
   return clampToIsrael(lat, lng);
 };
 
+// Create a routine event with required and compatibility fields
+export const generateRoutineEvent = () => {
+  const type = randomChoice(Object.keys(ROUTINE_EVENT_TYPES));
+  const subtype = randomChoice(ROUTINE_EVENT_TYPES[type]);
+  const city = randomChoice(ISRAEL_CITIES);
+  const rKm = 1 + Math.random() * 2; // 1–3 km offset for event location
+  const theta = Math.random() * 2 * Math.PI;
+  const [dLat, dLng] = kmOffsetToDeg(city.lat, rKm, theta);
+  const [lat, lng] = clampToIsrael(city.lat + dLat, city.lng + dLng);
+
+  // Priority heuristic
+  const priority = (
+    subtype === 'Apartment Fire' || subtype === 'Violent Brawl' ? 'HIGH' :
+      subtype === 'Building Collapse' || subtype === 'Shooting Incident' ? 'CRITICAL' :
+        'MED'
+  );
+
+  const event = {
+    id: `evt-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    type,
+    subtype,
+    priority,
+    status: 'OPEN',
+    location_lat: lat,
+    location_lng: lng,
+    // Compatibility fields for any existing UI expecting these
+    title: `${type.replace('_', ' ')}: ${subtype}`,
+    description: `Routine ${type.toLowerCase().replace('_', ' ')}: ${subtype} reported near ${city.name}.`,
+    event_type: type,
+    severity: priority,
+    created_at: new Date().toISOString(),
+  };
+
+  return event;
+};
+
 const generateNationwideUnits = (count = 50) => {
   const types = ['POLICE', 'FIRE', 'MEDICAL'];
 
-  // Israeli city centers with realistic positions
-  const cities = [
-    { name: 'Tel Aviv', lat: 32.0853, lng: 34.7818 },
-    { name: 'Jerusalem', lat: 31.7683, lng: 35.2137 },
-    { name: 'Haifa', lat: 32.7940, lng: 34.9896 },
-    { name: 'Beer Sheva', lat: 31.2518, lng: 34.7913 },
-    { name: 'Rishon LeZion', lat: 31.9730, lng: 34.7925 },
-    { name: 'Ashdod', lat: 31.8018, lng: 34.6479 },
-  ];
-
-  // Generate ~5km radius offset (0.045° ≈ 5km)
-  const generateCityOffset = () => ({
-    lat: (Math.random() - 0.5) * 0.045,
-    lng: (Math.random() - 0.5) * 0.045,
-  });
-
   return Array.from({ length: count }).map((_, idx) => {
-    // Distribute units across cities
-    const cityIndex = Math.floor(idx / Math.ceil(count / cities.length)) % cities.length;
-    const city = cities[cityIndex];
+    // Pick random city and random 2–5 km offset
+    const city = randomChoice(ISRAEL_CITIES);
+    const rKm = 2 + Math.random() * 3; // 2–5 km
+    const theta = Math.random() * 2 * Math.PI;
+    const [dLat, dLng] = kmOffsetToDeg(city.lat, rKm, theta);
 
-    // Add random offset within ~5km radius from city center
-    const offset = generateCityOffset();
-    const [lat, lng] = clampToIsrael(city.lat + offset.lat, city.lng + offset.lng);
-    const targetOffset = generateCityOffset();
-    const [tLat, tLng] = clampToIsrael(
-      city.lat + targetOffset.lat,
-      city.lng + targetOffset.lng
-    );
+    const [lat, lng] = clampToIsrael(city.lat + dLat, city.lng + dLng);
+
+    // Separate target waypoint near same city
+    const rKmTarget = 2 + Math.random() * 3;
+    const thetaTarget = Math.random() * 2 * Math.PI;
+    const [tLatOff, tLngOff] = kmOffsetToDeg(city.lat, rKmTarget, thetaTarget);
+    const [tLat, tLng] = clampToIsrael(city.lat + tLatOff, city.lng + tLngOff);
 
     return {
       id: `routine-${idx + 1}`,
@@ -77,7 +128,7 @@ const generateNationwideUnits = (count = 50) => {
       status: 'PATROL',
       position: [lat, lng],
       targetPosition: [tLat, tLng],
-      missionIncidentId: null, // No incident assigned initially
+      missionIncidentId: null,
       lastUpdated: Date.now() + idx,
     };
   });
@@ -93,6 +144,7 @@ export const useFieldIncidentStore = create((set, get) => ({
   sectors: [],
   taskGroups: [],
   events: [],
+  incidents: [],
   routineUnits: initialRoutineUnits,
   units: initialRoutineUnits.map((u) => ({ ...u })), // Active units (patrol or simulation)
 
@@ -129,34 +181,46 @@ export const useFieldIncidentStore = create((set, get) => ({
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
 
-  dispatchUnitsToIncident: (payload) =>
+  dispatchUnitsToIncident: (incidentIdOrPayload, unitIdsMaybe) =>
     set((state) => {
-      const { unitIds, targetPosition, incidentId } = payload;
+      const isPayloadObject = incidentIdOrPayload && typeof incidentIdOrPayload === 'object' && !Array.isArray(incidentIdOrPayload);
+      const incidentId = isPayloadObject ? incidentIdOrPayload.incidentId : incidentIdOrPayload;
+      const unitIds = isPayloadObject ? incidentIdOrPayload.unitIds : unitIdsMaybe;
 
-      // Validate payload
-      if (!Array.isArray(unitIds) || !Array.isArray(targetPosition) || targetPosition.length < 2) {
-        console.warn('Invalid dispatch payload', payload);
+      if (!Array.isArray(unitIds) || unitIds.length === 0 || !incidentId) {
+        console.warn('Invalid dispatch payload/signature', incidentIdOrPayload, unitIdsMaybe);
         return {};
       }
 
-      const [targetLat, targetLng] = targetPosition;
+      const updatedUnits = (state.units || []).map((u) =>
+        unitIds.includes(u.id)
+          ? { ...u, status: 'EN_ROUTE', assignedTo: incidentId }
+          : u
+      );
 
-      const updatedUnits = (Array.isArray(state.routineUnits) ? state.routineUnits : []).map((unit) => {
-        if (unitIds.includes(unit.id)) {
-          return {
-            ...unit,
-            status: 'RESPONDING',
-            targetPosition: [targetLat, targetLng],
-            missionIncidentId: incidentId || null,
-          };
-        }
-        return unit;
+      // Also update routineUnits to keep them in sync
+      const updatedRoutineUnits = (state.routineUnits || []).map((u) =>
+        unitIds.includes(u.id)
+          ? { ...u, status: 'EN_ROUTE', assignedTo: incidentId }
+          : u
+      );
+
+      // Add dispatched units to incident.assignedUnits immutably
+      const dispatchedUnits = updatedUnits.filter((u) => unitIds.includes(u.id));
+      const updatedIncidents = (state.incidents || []).map((incident) => {
+        if (incident.id !== incidentId) return incident;
+        const existingAssigned = Array.isArray(incident.assignedUnits) ? incident.assignedUnits : [];
+        const mergedMap = new Map();
+        existingAssigned.forEach((u) => mergedMap.set(u.id, u));
+        dispatchedUnits.forEach((u) => mergedMap.set(u.id, u));
+        return {
+          ...incident,
+          status: 'IN_PROGRESS',
+          assignedUnits: Array.from(mergedMap.values()),
+        };
       });
 
-      return {
-        routineUnits: updatedUnits,
-        units: updatedUnits,
-      };
+      return { units: updatedUnits, routineUnits: updatedRoutineUnits, incidents: updatedIncidents };
     }),
 
   tickRoutinePatrol: () =>
@@ -234,6 +298,13 @@ export const useFieldIncidentStore = create((set, get) => ({
       ),
     })),
 
+  updateIncidentPriority: (incidentId, newPriority) =>
+    set((state) => ({
+      incidents: (state.incidents || []).map((incident) =>
+        incident.id === incidentId ? { ...incident, priority: newPriority } : incident
+      ),
+    })),
+
   addEvent: (newEvent) =>
     set((state) => {
       // Check if event with same title and description already exists
@@ -254,6 +325,52 @@ export const useFieldIncidentStore = create((set, get) => ({
       return {
         events: [eventWithTime, ...state.events].slice(0, 50), // Keep last 50 events
       };
+    }),
+
+  // Movement Engine - called every tick to update unit positions
+  moveUnits: () =>
+    set((state) => {
+      if (!Array.isArray(state.units) || state.units.length === 0) {
+        return {};
+      }
+
+      const updatedUnits = state.units.map((u) => {
+        if (u.status === 'EN_ROUTE' && u.assignedTo) {
+          const target = (state.incidents || []).find((i) => i.id === u.assignedTo);
+          if (!target) return u;
+
+          const currentLat = u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined) ?? 31.77;
+          const currentLng = u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined) ?? 35.22;
+
+          const targetLat = target.latitude ?? target.location_lat ?? target.lat;
+          const targetLng = target.longitude ?? target.location_lng ?? target.lng;
+
+          if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+            return u;
+          }
+
+          const dLat = (targetLat - currentLat) * 0.05;
+          const dLng = (targetLng - currentLng) * 0.05;
+          const nextLat = currentLat + dLat;
+          const nextLng = currentLng + dLng;
+
+          const distance = Math.sqrt((targetLat - nextLat) ** 2 + (targetLng - nextLng) ** 2);
+          const arrived = distance < 0.0005;
+
+          return {
+            ...u,
+            latitude: arrived ? targetLat : nextLat,
+            longitude: arrived ? targetLng : nextLng,
+            position: [arrived ? targetLat : nextLat, arrived ? targetLng : nextLng],
+            status: arrived ? 'ON_SCENE' : 'EN_ROUTE',
+            lastUpdated: Date.now(),
+          };
+        }
+
+        return u;
+      });
+
+      return { units: updatedUnits };
     }),
 
   // Selectors
@@ -436,22 +553,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       },
     ];
 
-    const routineEvents = [
-      {
-        title: 'Shift Change',
-        description: 'Day shift relieving night shift - standard handoff',
-        event_type: 'SHIFT_CHANGE',
-        severity: 'LOW',
-        created_at: new Date().toISOString(),
-      },
-      {
-        title: 'Weather Advisory',
-        description: 'Clear skies expected, temperature 72°F',
-        event_type: 'WEATHER_UPDATE',
-        severity: 'LOW',
-        created_at: new Date().toISOString(),
-      },
-    ];
+    // Generate diverse routine events (compat fields included)
+    const routineEvents = [generateRoutineEvent(), generateRoutineEvent(), generateRoutineEvent()];
 
     const resetUnits = createRoutineUnits();
 

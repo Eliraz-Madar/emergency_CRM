@@ -52,7 +52,7 @@ const TaskGroupPanel = () => {
   const statuses = ['all', 'in-progress', 'completed'];
 
   return (
-    <div className="task-group-panel">
+    <div className="task-group-panel max-h-[calc(100vh-2rem)] overflow-y-auto z-[1000] scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800">
       <h3>Task Group Command</h3>
 
       {/* Filters */}
@@ -88,7 +88,7 @@ const TaskGroupPanel = () => {
       </div>
 
       {/* Task Groups List */}
-      <div className="task-group-container">
+      <div className="task-group-container max-h-[calc(100vh-10rem)] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800">
         {filteredTasks.length === 0 ? (
           <p className="no-data">No task groups match filters</p>
         ) : (

@@ -10,14 +10,14 @@ export const useDashboardStore = create((set, get) => ({
   incidents: [],
   units: [],
   events: [],
-  
+
   // UI State
   selectedIncidentId: null,
   selectedUnitId: null,
   connectionStatus: 'DISCONNECTED', // DISCONNECTED, CONNECTING, CONNECTED, DEGRADED
   lastUpdateTime: null,
   demoMode: true,
-  
+
   // Filters
   filters: {
     severities: ['LOW', 'MED', 'HIGH', 'CRITICAL'],
@@ -25,63 +25,64 @@ export const useDashboardStore = create((set, get) => ({
     channels: ['Police', 'Fire', 'EMS', 'Civil Defense'],
     searchText: '',
   },
-  
+
   sortBy: 'severity', // 'severity', 'time', 'status'
-  
+
   // Actions
   setIncidents: (incidents) => set({ incidents }),
   setUnits: (units) => set({ units }),
   setEvents: (events) => set({ events }),
-  
+
   addIncident: (incident) => set((state) => ({
     incidents: [incident, ...state.incidents],
     lastUpdateTime: new Date(),
   })),
-  
+
   updateIncident: (incidentId, updates) => set((state) => ({
     incidents: state.incidents.map(inc =>
       inc.id === incidentId ? { ...inc, ...updates } : inc
     ),
     lastUpdateTime: new Date(),
   })),
-  
+
   updateUnit: (unitId, updates) => set((state) => ({
     units: state.units.map(unit =>
       unit.id === unitId ? { ...unit, ...updates } : unit
     ),
     lastUpdateTime: new Date(),
   })),
-  
+
   addEvent: (event) => set((state) => ({
     events: [event, ...state.events].slice(0, 100), // Keep last 100 events
     lastUpdateTime: new Date(),
   })),
-  
+
   setSelectedIncident: (incidentId) => set({ selectedIncidentId: incidentId }),
   setSelectedUnit: (unitId) => set({ selectedUnitId: unitId }),
-  
+
   setConnectionStatus: (status) => set({ connectionStatus: status }),
   setDemoMode: (enabled) => set({ demoMode: enabled }),
-  
+
   updateFilters: (newFilters) => set((state) => ({
     filters: { ...state.filters, ...newFilters },
   })),
-  
+
   setSortBy: (sortBy) => set({ sortBy }),
-  
+
   // Get filtered and sorted incidents
   getFilteredIncidents: () => {
     const state = get();
     let incidents = state.incidents.filter(inc => {
-      // Filter by severity
-      if (!state.filters.severities.includes(inc.severity)) return false;
-      
+      const sev = inc.priority || inc.severity;
+      // Filter by severity/priority
+      if (!state.filters.severities.includes(sev)) return false;
+
       // Filter by status
       if (!state.filters.statuses.includes(inc.status)) return false;
-      
+
       // Filter by channel
       if (!state.filters.channels.includes(inc.channel)) return false;
-      
+
       // Filter by search text
       if (state.filters.searchText) {
         const text = state.filters.searchText.toLowerCase();
@@ -91,16 +92,18 @@ export const useDashboardStore = create((set, get) => ({
           inc.location_name?.toLowerCase().includes(text)
         );
       }
-      
+
       return true;
     });
-    
+
     // Sort
     incidents.sort((a, b) => {
       switch (state.sortBy) {
         case 'severity': {
           const severityOrder = { CRITICAL: 0, HIGH: 1, MED: 2, LOW: 3 };
-          return (severityOrder[a.severity] || 999) - (severityOrder[b.severity] || 999);
+          const sa = a.priority || a.severity;
+          const sb = b.priority || b.severity;
+          return (severityOrder[sa] || 999) - (severityOrder[sb] || 999);
         }
         case 'time':
           return new Date(b.created_at) - new Date(a.created_at);
@@ -112,10 +115,10 @@ export const useDashboardStore = create((set, get) => ({
           return 0;
       }
     });
-    
+
     return incidents;
   },
-  
+
   getSelectedIncident: () => {
     const state = get();
     return state.incidents.find(inc => inc.id === state.selectedIncidentId);

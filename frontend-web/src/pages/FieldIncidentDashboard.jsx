@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useState, useRef } from 'react';
-import { useFieldIncidentStore } from '../store/fieldIncident';
+import { useFieldIncidentStore, generateRoutineEvent } from '../store/fieldIncident';
 import {
   getFieldIncident,
   connectToFieldIncidentStream,
@@ -51,8 +51,12 @@ const FieldIncidentDashboard = () => {
   const nextSimulationStep = useFieldIncidentStore((s) => s.nextSimulationStep);
   const tickRoutinePatrol = useFieldIncidentStore((s) => s.tickRoutinePatrol);
   const stopSimulation = useFieldIncidentStore((s) => s.stopSimulation);
+  const addIncidentEvent = useFieldIncidentStore((s) => s.addEvent);
+  const moveUnits = useFieldIncidentStore((s) => s.moveUnits);
 
   const simulationTimerRef = useRef(null);
+  const routineEventTimerRef = useRef(null);
+  const movementTimerRef = useRef(null);
 
   // Load initial data
   useEffect(() => {
@@ -174,6 +178,28 @@ const FieldIncidentDashboard = () => {
     return () => clearInterval(simulationInterval);
   }, [mode]);
 
+  // Routine mode event generator (nationwide routine events)
+  useEffect(() => {
+    if (routineEventTimerRef.current) {
+      clearInterval(routineEventTimerRef.current);
+    }
+
+    if (mode !== 'ROUTINE') {
+      return undefined;
+    }
+
+    routineEventTimerRef.current = setInterval(() => {
+      const evt = generateRoutineEvent();
+      addIncidentEvent(evt);
+    }, 12000); // ~12s cadence; adjust as needed within 10-15s range
+
+    return () => {
+      if (routineEventTimerRef.current) {
+        clearInterval(routineEventTimerRef.current);
+      }
+    };
+  }, [mode, addIncidentEvent]);
+
   // Timer - advance simulation or routine patrol every ~2.5 seconds
   useEffect(() => {
     if (simulationTimerRef.current) {
@@ -194,6 +220,25 @@ const FieldIncidentDashboard = () => {
       }
     };
   }, [mode, nextSimulationStep, tickRoutinePatrol]);
+
+  // Movement simulation loop - runs every 100ms for smooth animation
+  // Uses ref to avoid dependency issues while allowing access to latest moveUnits
+  useEffect(() => {
+    if (movementTimerRef.current) {
+      clearInterval(movementTimerRef.current);
+    }
+
+    movementTimerRef.current = setInterval(() => {
+      const { moveUnits: getMoveUnits } = useFieldIncidentStore.getState();
+      getMoveUnits();
+    }, 100); // 100ms interval for smooth 10 FPS animation
+
+    return () => {
+      if (movementTimerRef.current) {
+        clearInterval(movementTimerRef.current);
+      }
+    };
+  }, []); // Empty dependency array - getState() gets latest function
 
   // Handlers for simulation buttons
   const handleStartSimulation = () => {

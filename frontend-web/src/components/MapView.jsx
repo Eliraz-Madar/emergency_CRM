@@ -1,7 +1,9 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import { useDashboardStore } from '../store/dashboard.js';
+import { useFieldIncidentStore } from '../store/fieldIncident.js';
 
 /**
  * Map View Component - displays incidents and units on map
@@ -47,12 +49,35 @@ export function MapView({
     iconAnchor: [30, 60],
   });
 
-  const {
-    incidents,
-    units,
-    selectedIncidentId,
-    setSelectedIncident,
-  } = useDashboardStore();
+  // Helper to determine pin color based on priority/severity
+  const getPinColor = (priority) => {
+    const priorityUpper = (priority || '').toUpperCase();
+    if (priorityUpper === 'LOW') return '#10b981'; // Green
+    if (priorityUpper === 'MED' || priorityUpper === 'MEDIUM') return '#f59e0b'; // Orange
+    if (priorityUpper === 'HIGH' || priorityUpper === 'CRITICAL') return '#ef4444'; // Red
+    return '#6b7280'; // Gray default
+  };
+
+  const { selectedIncidentId, setSelectedIncident, incidents: dashboardIncidents } = useDashboardStore();
+
+  // Subscribe directly to the field incident store for strict reactivity
+  const fieldIncidents = useFieldIncidentStore((s) => s.incidents || []);
+  const units = useFieldIncidentStore((s) => s.units || []);
+
+  // Combine incidents from both stores for display
+  const incidents = React.useMemo(() => {
+    const dashboard = Array.isArray(dashboardIncidents) ? dashboardIncidents : [];
+    const field = Array.isArray(fieldIncidents) ? fieldIncidents : [];
+    // Combine and deduplicate by id
+    const combined = [...dashboard, ...field];
+    const uniqueMap = new Map();
+    combined.forEach(inc => {
+      if (inc && inc.id) {
+        uniqueMap.set(inc.id, inc);
+      }
+    });
+    return Array.from(uniqueMap.values());
+  }, [dashboardIncidents, fieldIncidents]);
 
   // Initialize map
   useEffect(() => {
@@ -141,11 +166,19 @@ export function MapView({
             }
           ).addTo(map);
 
+          // Determine status color for popup text in simulation mode
+          const simStatusValue = unit.status || 'MOVING';
+          const simStatusTextColor =
+            simStatusValue === 'AVAILABLE' || simStatusValue === 'PATROL' ? '#10b981' :
+              simStatusValue === 'DISPATCHED' || simStatusValue === 'EN_ROUTE' ? '#f59e0b' :
+                simStatusValue === 'ON_SCENE' || simStatusValue === 'BUSY' ? '#ef4444' :
+                  '#6b7280';
+
           unitMarker.bindPopup(`
             <div class="map-popup">
               <strong>${unit.name || 'Unit'}</strong>
               <p>Type: ${unit.type || 'UNKNOWN'}</p>
-              <p>Status: ${unit.status || 'MOVING'}</p>
+              <p style="margin: 6px 0; color: ${simStatusTextColor}; font-weight: 600;">Status: ${simStatusValue}</p>
               <small>Position: ${unit.position[0].toFixed(3)}, ${unit.position[1].toFixed(3)}</small>
             </div>
           `);
@@ -228,42 +261,45 @@ export function MapView({
         return channel.includes(activeFilter);
       });
 
-    filteredIncidents.forEach((incident) => {
-      const severityColor = {
-        CRITICAL: '#ef4444',
-        HIGH: '#f59e0b',
-        MED: '#eab308',
-        LOW: '#3b82f6',
-      }[incident.severity] || '#6b7280';
+    const setSelectedIncidentId = setSelectedIncident; // alias for clarity
 
-      const html = `
-        <div class="map-marker-incident" style="background-color: ${severityColor}">
-          📍
-        </div>
-      `;
+    filteredIncidents.forEach((incident) => {
+      const lat = incident.latitude ?? incident.location_lat ?? incident.lat;
+      const lng = incident.longitude ?? incident.location_lng ?? incident.lng;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+      const pinColor = getPinColor(incident.priority || incident.severity);
 
       const marker = L.marker(
-        [incident.location_lat, incident.location_lng],
+        [lat, lng],
         {
           icon: L.divIcon({
-            html,
-            className: `marker-incident ${selectedIncidentId === incident.id ? 'selected' : ''
-              }`,
-            iconSize: [40, 40],
-            iconAnchor: [20, 40],
+            html: `
+              <div style="background-color: ${pinColor}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: all 0.3s ease;"></div>
+            `,
+            className: `marker-incident ${selectedIncidentId === incident.id ? 'selected' : ''}`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 24],
           }),
         }
       ).addTo(map);
 
+      const priorityClass =
+        incident.priority === 'HIGH' || incident.priority === 'CRITICAL'
+          ? 'text-red-500 font-bold'
+          : incident.priority === 'MEDIUM' || incident.priority === 'MED'
+            ? 'text-orange-500 font-semibold'
+            : 'text-green-500';
+
       marker.on('click', () => {
-        setSelectedIncident(incident.id);
+        setSelectedIncidentId(incident.id);
       });
 
       marker.bindPopup(`
         <div class="map-popup">
-          <strong>${incident.title}</strong>
-          <p>${incident.location_name}</p>
-          <small>Severity: ${incident.severity}</small>
+          <strong>${incident.subtype || incident.title || 'Incident'}</strong>
+          <p class="${priorityClass}" style="margin: 4px 0;">Priority: ${incident.priority || 'UNKNOWN'}</p>
+          <p>Status: ${incident.status || 'UNKNOWN'}</p>
         </div>
       `);
 
@@ -287,18 +323,35 @@ export function MapView({
         {
           icon: chosenIcon || L.divIcon({
             html: unitHtml('📍'),
-            className: 'marker-unit',
+            className: 'marker-unit marker-unit-smooth',
             iconSize: [60, 60],
             iconAnchor: [30, 60],
           }),
         }
       ).addTo(map);
 
+      const targetIncident = unit.assignedTo ? (incidents || []).find((i) => i.id === unit.assignedTo) : null;
+      const unitStatus = unit.status || 'PATROL';
+
+      let statusDisplay = 'Status: PATROL';
+      let statusTextColor = '#10b981';
+
+      if (unitStatus === 'EN_ROUTE') {
+        statusDisplay = `En Route to: ${targetIncident?.subtype || targetIncident?.type || 'Incident'}`;
+        statusTextColor = '#f59e0b';
+      } else if (unitStatus === 'ON_SCENE') {
+        statusDisplay = 'On Scene';
+        statusTextColor = '#ef4444';
+      } else if (unitStatus === 'AVAILABLE' || unitStatus === 'PATROL') {
+        statusDisplay = 'Patrol';
+        statusTextColor = '#10b981';
+      }
+
       marker.bindPopup(`
         <div class="map-popup">
           <strong>${unit.name || `Unit ${idx + 1}`}</strong>
           <p>${unit.type || 'Unknown'}</p>
-          <small>Status: ${unit.status || 'PATROL'}</small>
+          <p style="margin: 6px 0; color: ${statusTextColor}; font-weight: 600;">${statusDisplay}</p>
         </div>
       `);
 
@@ -327,6 +380,60 @@ export function MapView({
 
   return (
     <div className="map-container">
+      {/* React-leaflet render to force reactive marker updates */}
+      <MapContainer center={[31.77, 35.22]} zoom={11} style={{ height: '0px', width: '0px', position: 'absolute', opacity: 0, pointerEvents: 'none' }}>
+        <TileLayer
+          attribution="© OpenStreetMap contributors"
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+        {incidents.map((incident) => {
+          const lat = incident.latitude ?? incident.location_lat ?? incident.lat;
+          const lng = incident.longitude ?? incident.location_lng ?? incident.lng;
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+          const priorityClass =
+            incident.priority === 'HIGH' || incident.priority === 'CRITICAL'
+              ? 'text-red-500'
+              : incident.priority === 'MEDIUM' || incident.priority === 'MED'
+                ? 'text-orange-500'
+                : 'text-green-500';
+
+          // Dynamic color based on priority
+          const color = getPinColor(incident.priority);
+          const pinHtml = `<div style='background-color: ${color}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px ${color};'></div>`;
+          const customIcon = L.divIcon({ html: pinHtml, className: 'marker-pin', iconSize: [24, 24], iconAnchor: [12, 12] });
+
+          return (
+            <Marker
+              key={`inc-${incident.id}`}
+              position={[lat, lng]}
+              icon={customIcon}
+              eventHandlers={{ click: () => setSelectedIncident(incident.id) }}
+            >
+              <Popup>
+                <h3>{incident.subtype || incident.title || 'Incident'}</h3>
+                <p className={priorityClass}>Priority: {incident.priority || 'UNKNOWN'}</p>
+                <p>Status: {incident.status || 'UNKNOWN'}</p>
+              </Popup>
+            </Marker>
+          );
+        })}
+
+        {units.map((unit, idx) => {
+          const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
+          const unitLat = hasPosition ? unit.position[0] : unit.latitude;
+          const unitLng = hasPosition ? unit.position[1] : unit.longitude;
+          if (!Number.isFinite(unitLat) || !Number.isFinite(unitLng)) return null;
+          return (
+            <Marker
+              key={`unit-rfl-${unit.id || idx}`}
+              position={[unitLat, unitLng]}
+              icon={policeIcon}
+            />
+          );
+        })}
+      </MapContainer>
+
+      {/* Existing Leaflet map (visible) */}
       <div ref={mapRef} className="map-view" />
       <div className="map-legend">
         <div className="legend-item">

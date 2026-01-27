@@ -8,17 +8,19 @@ class User(AbstractUser):
         DISPATCHER = "dispatcher", "Dispatcher"
         FIELD = "fieldunit", "Field Unit"
 
-    role = models.CharField(max_length=32, choices=Roles.choices, default=Roles.DISPATCHER)
+    role = models.CharField(
+        max_length=32, choices=Roles.choices, default=Roles.DISPATCHER)
 
     def __str__(self):
         return f"{self.username} ({self.role})"
 
 
 class Incident(models.Model):
-    class Severity(models.TextChoices):
+    class Priority(models.TextChoices):
         LOW = "LOW", "Low"
         MED = "MED", "Medium"
         HIGH = "HIGH", "High"
+        CRITICAL = "CRITICAL", "Critical"
 
     class Status(models.TextChoices):
         OPEN = "OPEN", "Open"
@@ -29,8 +31,10 @@ class Incident(models.Model):
     description = models.TextField(blank=True)
     location_lat = models.FloatField()
     location_lng = models.FloatField()
-    severity = models.CharField(max_length=10, choices=Severity.choices, default=Severity.LOW)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
+    priority = models.CharField(
+        max_length=10, choices=Priority.choices, default=Priority.LOW)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.OPEN)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -60,10 +64,13 @@ class Task(models.Model):
         IN_PROGRESS = "IN_PROGRESS", "In Progress"
         DONE = "DONE", "Done"
 
-    incident = models.ForeignKey(Incident, related_name="tasks", on_delete=models.CASCADE)
-    assigned_unit = models.ForeignKey(Unit, related_name="tasks", on_delete=models.SET_NULL, null=True, blank=True)
+    incident = models.ForeignKey(
+        Incident, related_name="tasks", on_delete=models.CASCADE)
+    assigned_unit = models.ForeignKey(
+        Unit, related_name="tasks", on_delete=models.SET_NULL, null=True, blank=True)
     title = models.CharField(max_length=200)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING)
     timestamp = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -96,14 +103,17 @@ class MajorIncident(models.Model):
 
     # Basic info
     title = models.CharField(max_length=300)
-    incident_type = models.CharField(max_length=50, choices=IncidentType.choices)
+    incident_type = models.CharField(
+        max_length=50, choices=IncidentType.choices)
     description = models.TextField()
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.ACTIVE)
 
     # Location
     location_lat = models.FloatField()
     location_lng = models.FloatField()
-    radius_meters = models.IntegerField(default=5000, help_text="Estimated affected area radius")
+    radius_meters = models.IntegerField(
+        default=5000, help_text="Estimated affected area radius")
 
     # Situational data
     estimated_casualties = models.IntegerField(default=0)
@@ -140,7 +150,8 @@ class Sector(models.Model):
         CONTAINED = "CONTAINED", "Contained"
         CLEARED = "CLEARED", "Cleared"
 
-    major_incident = models.ForeignKey(MajorIncident, related_name="sectors", on_delete=models.CASCADE)
+    major_incident = models.ForeignKey(
+        MajorIncident, related_name="sectors", on_delete=models.CASCADE)
 
     # Identity
     name = models.CharField(max_length=100)  # e.g., "North Zone", "Sector A"
@@ -148,14 +159,19 @@ class Sector(models.Model):
     location_lng = models.FloatField()
 
     # Assessment
-    hazard_level = models.CharField(max_length=20, choices=HazardLevel.choices, default=HazardLevel.MEDIUM)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    hazard_level = models.CharField(
+        max_length=20, choices=HazardLevel.choices, default=HazardLevel.MEDIUM)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.ACTIVE)
     hazard_description = models.CharField(max_length=300, blank=True)
 
     # Operational data
     estimated_survivors = models.IntegerField(default=0)
-    access_status = models.CharField(max_length=100, default="PARTIALLY_ACCESSIBLE")  # ACCESSIBLE, PARTIALLY, BLOCKED
-    primary_responder = models.CharField(max_length=100, blank=True)  # e.g., "Fire Department"
+    # ACCESSIBLE, PARTIALLY, BLOCKED
+    access_status = models.CharField(
+        max_length=100, default="PARTIALLY_ACCESSIBLE")
+    primary_responder = models.CharField(
+        max_length=100, blank=True)  # e.g., "Fire Department"
 
     # Timeline
     created_at = models.DateTimeField(auto_now_add=True)
@@ -196,7 +212,8 @@ class TaskGroup(models.Model):
         PAUSED = "PAUSED", "Paused"
         COMPLETED = "COMPLETED", "Completed"
 
-    major_incident = models.ForeignKey(MajorIncident, related_name="task_groups", on_delete=models.CASCADE)
+    major_incident = models.ForeignKey(
+        MajorIncident, related_name="task_groups", on_delete=models.CASCADE)
     sectors = models.ManyToManyField(Sector, related_name="task_groups")
 
     # Identity
@@ -205,8 +222,10 @@ class TaskGroup(models.Model):
     description = models.TextField(blank=True)
 
     # Status & Priority
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PLANNED)
-    priority = models.CharField(max_length=20, choices=Priority.choices, default=Priority.MEDIUM)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PLANNED)
+    priority = models.CharField(
+        max_length=20, choices=Priority.choices, default=Priority.MEDIUM)
 
     # Progress tracking
     progress_percent = models.IntegerField(default=0, help_text="0-100%")
@@ -253,12 +272,15 @@ class IncidentEvent(models.Model):
         CRITICAL = "CRITICAL", "Critical"
 
     # Context
-    incident = models.ForeignKey(Incident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
-    major_incident = models.ForeignKey(MajorIncident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
+    incident = models.ForeignKey(
+        Incident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
+    major_incident = models.ForeignKey(
+        MajorIncident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
 
     # Event info
     event_type = models.CharField(max_length=50, choices=EventType.choices)
-    severity = models.CharField(max_length=20, choices=Severity.choices, default=Severity.INFO)
+    severity = models.CharField(
+        max_length=20, choices=Severity.choices, default=Severity.INFO)
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
 

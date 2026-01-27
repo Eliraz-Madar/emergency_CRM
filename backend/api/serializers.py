@@ -5,7 +5,8 @@ from .models import Incident, Task, Unit
 class TaskSerializer(serializers.ModelSerializer):
     class Meta:
         model = Task
-        fields = ["id", "incident", "assigned_unit", "title", "status", "timestamp"]
+        fields = ["id", "incident", "assigned_unit",
+                  "title", "status", "timestamp"]
 
 
 class IncidentSerializer(serializers.ModelSerializer):
@@ -19,7 +20,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             "description",
             "location_lat",
             "location_lng",
-            "severity",
+            "priority",
             "status",
             "created_at",
             "tasks",

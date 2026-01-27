@@ -43,7 +43,7 @@ export default function MapView({ incidents = [], units = [], includeUnits = fal
           <Marker
             key={`incident-${inc.id}`}
             position={[inc.location_lat, inc.location_lng]}
-            icon={createIcon(severityColors[inc.severity.toLowerCase()] || "gray")}
+            icon={createIcon(severityColors[(inc.priority || inc.severity || "").toLowerCase()] || "gray")}
           >
             <Popup>
               <strong>{inc.title}</strong>

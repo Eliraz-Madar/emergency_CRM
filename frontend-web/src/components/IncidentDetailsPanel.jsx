@@ -1,420 +1,290 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
-import * as api from '../api/client.js';
 
-/**
- * Calculate distance between two coordinates using Haversine formula (in KM)
- */
-const getDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371; // Earth's radius in km
-  if (![lat1, lon1, lat2, lon2].every((v) => Number.isFinite(v))) {
-    return Infinity;
-  }
+const getDistanceKm = (lat1, lon1, lat2, lon2) => {
+  const R = 6371;
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Infinity;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-    Math.cos((lat2 * Math.PI) / 180) *
-    Math.sin(dLon / 2) *
-    Math.sin(dLon / 2);
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 };
 
-/**
- * Incident Details Panel Component
- */
-export function IncidentDetailsPanel() {
-  const {
-    getSelectedIncident,
-    units,
-    updateIncident,
-  } = useDashboardStore();
+const TYPE_META = {
+  POLICE: { label: 'Police', color: '#3b82f6', Icon: Shield },
+  FIRE: { label: 'Fire', color: '#ef4444', Icon: Flame },
+  MEDICAL: { label: 'Medical', color: '#f8fafc', Icon: Ambulance },
+};
 
+const TYPE_ORDER = ['POLICE', 'FIRE', 'MEDICAL'];
+
+export function IncidentDetailsPanel() {
+  const { incidents: dashboardIncidents, selectedIncidentId, setSelectedIncident, updateIncident } = useDashboardStore();
+
+  // מושכים את המידע החי מה-Store המבצעי
   const {
-    routineUnits,
+    incidents: fieldIncidents,
+    units,
     dispatchUnitsToIncident,
+    updateIncidentPriority
   } = useFieldIncidentStore();
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [toast, setToast] = useState(null);
+  // --- תיקון לוגי: בחירת מקור האמת ---
+  // אנחנו מחפשים את האירוע קודם ב-Store החי (Field). אם הוא לא שם, לוקחים מהדאשבורד.
+  // זה מבטיח שכשמעדכנים עדיפות, הרכיב יתעדכן מיד.
+  const incident = useMemo(() => {
+    if (!selectedIncidentId) return null;
+    const liveIncident = Array.isArray(fieldIncidents) ? fieldIncidents.find(i => i.id === selectedIncidentId) : null;
+    const staticIncident = Array.isArray(dashboardIncidents) ? dashboardIncidents.find(i => i.id === selectedIncidentId) : null;
+    return liveIncident || staticIncident;
+  }, [selectedIncidentId, fieldIncidents, dashboardIncidents]);
+
+  const [selectedType, setSelectedType] = useState('POLICE');
   const [selectedUnitIds, setSelectedUnitIds] = useState([]);
 
-  const incident = getSelectedIncident();
-
-  if (!incident) {
-    return (
-      <div className="incident-details-panel empty">
-        <div className="empty-state">
-          <div className="empty-icon">👈</div>
-          <p>Select an incident to view details</p>
-        </div>
-      </div>
-    );
-  }
-
-  const showToast = (message, type = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  const handleStatusChange = async (newStatus) => {
-    try {
-      setIsLoading(true);
-      const updated = await api.updateIncidentStatus(incident.id, newStatus);
-      updateIncident(incident.id, { status: updated.status });
-      showToast(`Status updated to ${newStatus}`);
-    } catch (error) {
-      showToast('Failed to update status', 'error');
-      console.error(error);
-    } finally {
-      setIsLoading(false);
+  // פונקציית העדכון - משתמשת ב-Store החי
+  const handlePriorityChange = (newPriority) => {
+    if (incident && incident.id) {
+      // עדכן גם בשני ה-stores כדי שהמפה תתעדכן
+      updateIncidentPriority(incident.id, newPriority);
+      updateIncident(incident.id, { priority: newPriority });
     }
   };
 
-  const handleSeverityChange = async (newSeverity) => {
-    try {
-      setIsLoading(true);
-      const updated = await api.updateIncidentSeverity(incident.id, newSeverity);
-      updateIncident(incident.id, { severity: updated.severity });
-      showToast(`Severity updated to ${newSeverity}`);
-    } catch (error) {
-      showToast('Failed to update severity', 'error');
-      console.error(error);
-    } finally {
-      setIsLoading(false);
-    }
+  const incidentLat = incident?.location_lat ?? 31.77;
+  const incidentLng = incident?.location_lng ?? 35.22;
+
+  const availableUnits = useMemo(() => {
+    const base = Array.isArray(units) ? units : [];
+    return base
+      .filter((u) => u.status === 'PATROL' || u.status === 'AVAILABLE')
+      .map((u) => ({
+        ...u,
+        distance: Array.isArray(u.position) && u.position.length >= 2
+          ? getDistanceKm(u.position[0], u.position[1], incidentLat, incidentLng)
+          : Infinity,
+      }))
+      .filter((u) => u.distance !== Infinity)
+      .sort((a, b) => a.distance - b.distance);
+  }, [units, incidentLat, incidentLng]);
+
+  const filteredUnits = availableUnits.filter((u) => u.type === selectedType);
+
+  const toggleUnit = (id) => {
+    setSelectedUnitIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
-  const handleAssignUnit = async (unitId) => {
-    try {
-      setIsLoading(true);
-      const updated = await api.assignUnitToIncident(incident.id, unitId);
-      updateIncident(incident.id, { assigned_unit_ids: updated.assigned_unit_ids });
-      showToast('Unit assigned');
-    } catch (error) {
-      showToast('Failed to assign unit', 'error');
-      console.error(error);
-    } finally {
-      setIsLoading(false);
-    }
+  const handleClose = () => {
+    setSelectedIncident && setSelectedIncident(null);
   };
 
-  const handleAddNote = async () => {
-    const note = prompt('Add a note to this incident:');
-    if (note && note.trim()) {
-      try {
-        setIsLoading(true);
-        await api.addIncidentNote(incident.id, note);
-        showToast('Note added');
-      } catch (error) {
-        showToast('Failed to add note', 'error');
-        console.error(error);
-      } finally {
-        setIsLoading(false);
-      }
-    }
-  };
-
-  const handleDispatchUnits = () => {
-    if (selectedUnitIds.length === 0) {
-      showToast('Select at least one unit', 'error');
-      return;
-    }
-
-    const incidentLat = incident.location_lat ?? 31.77;
-    const incidentLng = incident.location_lng ?? 35.22;
-
+  const handleDispatch = () => {
+    if (!incident || selectedUnitIds.length === 0) return;
     dispatchUnitsToIncident({
       incidentId: incident.id,
-      targetPosition: [incidentLat, incidentLng],
       unitIds: selectedUnitIds,
+      targetPosition: [incidentLat, incidentLng],
     });
-
+    // Mark incident as in-progress in dashboard store as well
+    updateIncident(incident.id, { status: 'IN_PROGRESS' });
     setSelectedUnitIds([]);
-    showToast(`${selectedUnitIds.length} unit(s) dispatched to scene`);
+    handleClose();
   };
 
-
-  const toggleUnitSelection = (unitId) => {
-    setSelectedUnitIds((prev) =>
-      prev.includes(unitId) ? prev.filter((id) => id !== unitId) : [...prev, unitId]
+  const renderUnitCard = (unit) => {
+    const meta = TYPE_META[unit.type] || TYPE_META.POLICE;
+    const isSelected = selectedUnitIds.includes(unit.id);
+    return (
+      <div
+        key={unit.id}
+        className="unit-card-compact"
+        onClick={() => toggleUnit(unit.id)}
+        style={{
+          borderColor: isSelected ? meta.color : '#1f2937',
+          background: isSelected ? 'rgba(59,130,246,0.08)' : '#0f172a',
+          cursor: 'pointer',
+          marginBottom: '8px',
+          padding: '8px',
+          borderRadius: '6px',
+          borderWidth: '1px',
+          borderStyle: 'solid',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}
+      >
+        <div className="unit-card-compact-content">
+          <div className="unit-id-compact" style={{ color: meta.color, fontWeight: 'bold' }}>
+            {unit.name || unit.id}
+          </div>
+          <div className="unit-meta-compact" style={{ fontSize: '0.8rem', color: '#9ca3af' }}>{meta.label}</div>
+        </div>
+        <div className="unit-distance-compact" style={{ fontSize: '0.9rem' }}>{unit.distance.toFixed(1)} km</div>
+      </div>
     );
   };
 
-  const assignedUnitIds = incident.assigned_unit_ids || [];
-  const incidentLat = incident.location_lat ?? 31.77;
-  const incidentLng = incident.location_lng ?? 35.22;
+  const headerIcon = (() => {
+    const type = (incident?.incident_type || '').toUpperCase();
+    if (type.includes('FIRE')) return <Flame size={20} color="#ef4444" />;
+    if (type.includes('MED')) return <Ambulance size={20} color="#f8fafc" />;
+    return <Shield size={20} color="#3b82f6" />;
+  })();
 
-  // Calculate distances and filter to 50km radius, sorted by distance
-  const unitsWithDistance = (Array.isArray(routineUnits) ? routineUnits : [])
-    .filter((unit) => unit.status === 'PATROL' && !assignedUnitIds.includes(unit.id))
-    .map((unit) => ({
-      ...unit,
-      distance: Array.isArray(unit.position) && unit.position.length >= 2
-        ? getDistance(unit.position[0], unit.position[1], incidentLat, incidentLng)
-        : Infinity,
-    }))
-    .filter((unit) => unit.distance <= 50)
-    .sort((a, b) => a.distance - b.distance);
+  if (!incident) return null;
 
-  const availableUnits = unitsWithDistance;
-
-  const policeUnits = availableUnits.filter((u) => u.type === 'POLICE');
-  const fireUnits = availableUnits.filter((u) => u.type === 'FIRE');
-  const medicalUnits = availableUnits.filter((u) => u.type === 'MEDICAL');
-
-  const assignedUnits = units.filter((unit) =>
-    assignedUnitIds.includes(unit.id)
-  );
-
-  const unassignedUnits = units.filter(
-    (unit) =>
-      !assignedUnitIds.includes(unit.id) &&
-      unit.status === 'Available'
-  );
-
-  const statusWorkflow = ['OPEN', 'IN_PROGRESS', 'CLOSED'];
-  const severityLevels = ['LOW', 'MED', 'HIGH', 'CRITICAL'];
-
+  // --- Layout Fix ---
+  // 1. h-[calc(100vh-2rem)]: קובע גובה קשיח.
+  // 2. flex flex-col: מסדר את הילדים בטור.
   return (
-    <div className="incident-details-panel">
-      <div className="details-header">
-        <h2>Incident #{incident.id}</h2>
-      </div>
-
-      {toast && (
-        <div className={`toast toast-${toast.type}`}>
-          {toast.message}
-        </div>
-      )}
-
-      <div className="details-section">
-        <h3 className="section-title">Overview</h3>
-        <div className="details-grid">
-          <div className="detail-field">
-            <label>Title</label>
-            <p>{incident.title}</p>
-          </div>
-          <div className="detail-field">
-            <label>Channel</label>
-            <p>{incident.channel}</p>
-          </div>
-          <div className="detail-field">
-            <label>Location</label>
-            <p>{incident.location_name}</p>
-          </div>
-          <div className="detail-field">
-            <label>Reporter</label>
-            <p>{incident.reporter}</p>
-          </div>
-        </div>
-        <div className="detail-field">
-          <label>Description</label>
-          <p>{incident.description}</p>
-        </div>
-      </div>
-
-      <div className="details-section">
-        <h3 className="section-title">Workflow</h3>
-        <div className="workflow-section">
-          <div className="workflow-item">
-            <label>Status</label>
-            <div className="workflow-buttons">
-              {statusWorkflow.map((status) => (
-                <button
-                  key={status}
-                  className={`workflow-btn ${incident.status === status ? 'active' : ''}`}
-                  onClick={() => handleStatusChange(status)}
-                  disabled={isLoading}
-                >
-                  {status}
-                </button>
-              ))}
+    <div
+      style={{
+        position: 'fixed',
+        right: '1rem',
+        top: '1rem',
+        bottom: '1rem',
+        width: '24rem',
+        height: 'calc(100vh - 2rem)',
+        background: 'radial-gradient(circle at 20% 20%, #111827, #0b1220)',
+        color: '#e5e7eb',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        zIndex: 2000,
+        borderRadius: '0.5rem',
+        boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
+        border: '1px solid #334155'
+      }}
+    >
+      {/* Header - Fixed Height (shrink-0) */}
+      <div className="cc-header p-4 border-b border-slate-700 flex justify-between items-start" style={{ flexShrink: 0 }}>
+        <div className="cc-header-left flex gap-3">
+          <div className="cc-icon-circle p-2 bg-slate-800 rounded-full">{headerIcon}</div>
+          <div>
+            <div className="cc-title font-bold text-lg">{incident.title || 'Incident'}</div>
+            <div className="cc-subtitle text-sm text-slate-400 flex items-center">
+              <MapPin size={14} style={{ marginRight: 6 }} />
+              {incident.location_name || 'Unknown location'}
             </div>
           </div>
+        </div>
+        <div className="cc-header-right flex items-center gap-2">
+          <button className="cc-close hover:bg-slate-800 p-1 rounded" onClick={handleClose} aria-label="Close panel">
+            <X size={16} />
+          </button>
+        </div>
+      </div>
 
-          <div className="workflow-item">
-            <label>Severity</label>
-            <div className="workflow-buttons">
-              {severityLevels.map((level) => (
+      {/* --- Scrollable Content Wrapper --- */}
+      {/* flex-1: תופס את כל המקום שנשאר. overflow-y-auto: גולל אם צריך. min-h-0: מונע באג ב-flex שמבטל גלילה. */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '1rem', minHeight: 0 }}>
+
+        {/* Incident Severity Control */}
+        <div className="cc-severity-section mb-6">
+          <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Incident Severity</div>
+          <div className="cc-severity-buttons grid grid-cols-3 gap-2">
+            {['LOW', 'MEDIUM', 'HIGH'].map((level) => {
+              const normalizedPriority = incident.priority === 'CRITICAL' ? 'HIGH' : incident.priority;
+              const currentPriority = normalizedPriority === 'MED' ? 'MEDIUM' : normalizedPriority;
+              const isActive = currentPriority === level;
+
+              const colors = { LOW: '#10b981', MEDIUM: '#f59e0b', HIGH: '#ef4444' };
+              const color = colors[level];
+
+              return (
                 <button
                   key={level}
-                  className={`workflow-btn severity ${incident.severity === level ? 'active' : ''}`}
-                  onClick={() => handleSeverityChange(level)}
-                  disabled={isLoading}
+                  onClick={() => handlePriorityChange(level === 'MEDIUM' ? 'MED' : level)}
+                  style={{
+                    background: isActive ? color : 'transparent',
+                    borderColor: color,
+                    color: isActive ? 'white' : color,
+                    borderWidth: '1px',
+                    borderStyle: 'solid',
+                    padding: '8px',
+                    borderRadius: '4px',
+                    fontWeight: isActive ? 'bold' : 'normal',
+                    opacity: isActive ? 1 : 0.6,
+                    transform: isActive ? 'scale(1.02)' : 'scale(1)',
+                    transition: 'all 0.2s ease'
+                  }}
                 >
                   {level}
                 </button>
-              ))}
-            </div>
+              )
+            })}
           </div>
         </div>
-      </div>
 
-      <div className="details-section">
-        <h3 className="section-title">Assigned Units ({assignedUnits.length})</h3>
-        {assignedUnits.length === 0 ? (
-          <p className="empty-text">No units assigned</p>
-        ) : (
-          <ul className="units-list">
-            {assignedUnits.map((unit) => (
-              <li key={unit.id} className="unit-item">
-                <span className="unit-icon">🚑</span>
-                <span className="unit-name">{unit.name}</span>
-                <span className={`unit-status ${unit.status.toLowerCase()}`}>
-                  {unit.status}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+        {/* Dispatch Forces Section */}
+        <div className="cc-section flex flex-col">
+          <div className="cc-section-header flex items-center gap-2 mb-3 text-slate-300">
+            <SirenIcon />
+            <span className="font-semibold">Dispatch Forces</span>
+          </div>
 
-        {unassignedUnits.length > 0 && (
-          <div className="assign-unit-section">
-            <label>Assign Available Unit</label>
-            <div className="assign-buttons">
-              {unassignedUnits.slice(0, 5).map((unit) => (
+          <div className="cc-tabs flex gap-2 mb-3">
+            {TYPE_ORDER.map((type) => {
+              const { label, color, Icon } = TYPE_META[type];
+              const isActive = selectedType === type;
+              return (
                 <button
-                  key={unit.id}
-                  className="assign-btn"
-                  onClick={() => handleAssignUnit(unit.id)}
-                  disabled={isLoading}
+                  key={type}
+                  onClick={() => setSelectedType(type)}
+                  style={{
+                    borderColor: isActive ? color : '#374151',
+                    background: isActive ? `${color}20` : 'transparent',
+                    color: isActive ? color : '#9ca3af',
+                    borderWidth: '1px',
+                    borderStyle: 'solid',
+                    padding: '6px 12px',
+                    borderRadius: '16px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '0.85rem',
+                    cursor: 'pointer'
+                  }}
                 >
-                  {unit.name}
+                  <Icon size={14} />
+                  {label}
                 </button>
-              ))}
-            </div>
+              );
+            })}
           </div>
-        )}
-      </div>
 
-      <div className="details-section">
-        <h3 className="section-title">Quick Actions</h3>
-        <div className="actions">
-          <button className="action-btn" onClick={handleAddNote} disabled={isLoading}>
-            💬 Add Note
-          </button>
-          <button className="action-btn" disabled={isLoading}>
-            📎 Attach File
-          </button>
-          <button className="action-btn" disabled={isLoading}>
-            🔔 Send Alert
-          </button>
+          {/* Unit List */}
+          <div className="cc-list-content flex flex-col gap-1">
+            {filteredUnits.length === 0 ? (
+              <div className="cc-empty text-center py-8 text-slate-500 italic">No available units of this type</div>
+            ) : (
+              filteredUnits.map(renderUnitCard)
+            )}
+          </div>
         </div>
       </div>
 
-      <div className="details-section dispatch-section">
-        <h3 className="section-title">🚨 Dispatch Support</h3>
-        <div className="dispatch-units">
-          {/* Police Forces */}
-          <div className="unit-category">
-            <h4>👮 Police</h4>
-            <div className="units-checklist">
-              {policeUnits.length === 0 ? (
-                <p className="empty-text">No units nearby</p>
-              ) : (
-                policeUnits.map((unit) => (
-                  <label key={unit.id} className="unit-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedUnitIds.includes(unit.id)}
-                      onChange={() => toggleUnitSelection(unit.id)}
-                      disabled={isLoading}
-                    />
-                    <span className="unit-info">
-                      <span className="unit-name">{unit.id} <span className="unit-distance">{unit.distance.toFixed(1)} km</span></span>
-                    </span>
-                  </label>
-                ))
-              )}
-            </div>
-          </div>
-
-          {/* Fire Dept */}
-          <div className="unit-category">
-            <h4>🚒 Fire</h4>
-            <div className="units-checklist">
-              {fireUnits.length === 0 ? (
-                <p className="empty-text">No units nearby</p>
-              ) : (
-                fireUnits.map((unit) => (
-                  <label key={unit.id} className="unit-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedUnitIds.includes(unit.id)}
-                      onChange={() => toggleUnitSelection(unit.id)}
-                      disabled={isLoading}
-                    />
-                    <span className="unit-info">
-                      <span className="unit-name">{unit.id} <span className="unit-distance">{unit.distance.toFixed(1)} km</span></span>
-                    </span>
-                  </label>
-                ))
-              )}
-            </div>
-          </div>
-
-          {/* Medical Teams */}
-          <div className="unit-category">
-            <h4>🚑 Medical</h4>
-            <div className="units-checklist">
-              {medicalUnits.length === 0 ? (
-                <p className="empty-text">No units nearby</p>
-              ) : (
-                medicalUnits.map((unit) => (
-                  <label key={unit.id} className="unit-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedUnitIds.includes(unit.id)}
-                      onChange={() => toggleUnitSelection(unit.id)}
-                      disabled={isLoading}
-                    />
-                    <span className="unit-info">
-                      <span className="unit-name">{unit.id} <span className="unit-distance">{unit.distance.toFixed(1)} km</span></span>
-                    </span>
-                  </label>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="dispatch-action">
+      {/* Footer - Fixed Height (shrink-0) */}
+      <div className="cc-footer p-4 border-t border-slate-700 bg-slate-900 z-10" style={{ flexShrink: 0 }}>
+        <div className="flex justify-between items-center">
+          <div className="cc-selection text-sm text-slate-400">Selected: <span className="text-white font-bold">{selectedUnitIds.length}</span></div>
           <button
-            className="dispatch-btn"
-            onClick={handleDispatchUnits}
-            disabled={isLoading || selectedUnitIds.length === 0}
+            className="cc-dispatch bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            disabled={selectedUnitIds.length === 0}
+            onClick={handleDispatch}
           >
-            🚗 DISPATCH {selectedUnitIds.length > 0 ? `(${selectedUnitIds.length})` : ''} UNITS
+            Dispatch Units
+            <ChevronRight size={16} style={{ marginLeft: 8 }} />
           </button>
         </div>
-      </div>
-
-      <div className="details-footer">
-        <small>
-          Created: {
-            incident.created_at
-              ? (() => {
-                const date = new Date(incident.created_at);
-                return !isNaN(date.getTime()) ? date.toLocaleString() : 'Unknown';
-              })()
-              : 'Unknown'
-          }
-        </small>
-        <small>
-          Updated: {
-            incident.updated_at
-              ? (() => {
-                const date = new Date(incident.updated_at);
-                return !isNaN(date.getTime()) ? date.toLocaleString() : 'Unknown';
-              })()
-              : 'Unknown'
-          }
-        </small>
       </div>
     </div>
   );
 }
+
+const SirenIcon = () => <AlertTriangle size={16} color="#f87171" />;

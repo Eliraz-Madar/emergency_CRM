@@ -37,8 +37,8 @@ export const updateIncidentStatus = async (id, status) => {
   return res.data;
 };
 
-export const updateIncidentSeverity = async (id, severity) => {
-  const res = await api.patch(`/mock/incidents/${id}/severity/`, { severity });
+export const updateIncidentPriority = async (id, priority) => {
+  const res = await api.patch(`/mock/incidents/${id}/priority/`, { priority });
   return res.data;
 };
 
