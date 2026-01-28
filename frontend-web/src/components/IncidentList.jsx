@@ -3,7 +3,7 @@ import { useDashboardStore } from '../store/dashboard.js';
 
 /**
  * Incident List Component - Dynamic and Interactive
- * Supports both routine mode (real incidents) and simulation mode (timeline events)
+ * Supports both routine mode (real incidents) and simulation mode (single simulation incident)
  */
 export function IncidentList({
   activeFilter = 'ALL',
@@ -20,13 +20,13 @@ export function IncidentList({
   // Get incidents based on mode
   const routineIncidents = getFilteredIncidents();
 
-  // Convert simulation events to incident-like format for display
-  const simulationIncidents = isSimulation && simulationEvents ?
-    simulationEvents.map((evt, idx) => ({
+  // In simulation mode, show only the active simulation incident (first one)
+  const simulationIncidents = isSimulation && simulationEvents && simulationEvents.length > 0 ?
+    [simulationEvents[0]].map((evt, idx) => ({
       id: evt.id || `sim-${idx}`,
       title: evt.title || evt.message || 'Event',
-      severity: evt.severity || 'MED',
-      status: 'IN_PROGRESS',
+      priority: evt.priority || 'MED',
+      status: evt.status || 'IN_PROGRESS',
       channel: getEventChannel(evt),
       location_name: evt.location || 'Field',
       created_at: evt.timestamp || evt.created_at || new Date().toISOString(),
@@ -100,24 +100,26 @@ export function IncidentList({
         <h2>Incidents ({filteredIncidents.length})</h2>
       </div>
 
-      {/* Filter Buttons */}
-      <div className="incident-filter-bar">
-        {filterCategories.map((filter) => (
-          <button
-            key={filter.id}
-            className={`filter-button ${activeFilter === filter.id ? 'active' : ''}`}
-            onClick={() => setActiveFilter && setActiveFilter(filter.id)}
-            style={{
-              borderColor: activeFilter === filter.id ? filter.color : 'transparent',
-              backgroundColor: activeFilter === filter.id ? filter.color + '20' : 'transparent',
-              color: activeFilter === filter.id ? filter.color : '#94a3b8',
-            }}
-          >
-            <span className="filter-icon">{filter.icon}</span>
-            <span className="filter-label">{filter.label}</span>
-          </button>
-        ))}
-      </div>
+      {/* Filter Buttons - hidden in simulation mode */}
+      {!isSimulation && (
+        <div className="incident-filter-bar">
+          {filterCategories.map((filter) => (
+            <button
+              key={filter.id}
+              className={`filter-button ${activeFilter === filter.id ? 'active' : ''}`}
+              onClick={() => setActiveFilter && setActiveFilter(filter.id)}
+              style={{
+                borderColor: activeFilter === filter.id ? filter.color : 'transparent',
+                backgroundColor: activeFilter === filter.id ? filter.color + '20' : 'transparent',
+                color: activeFilter === filter.id ? filter.color : '#94a3b8',
+              }}
+            >
+              <span className="filter-icon">{filter.icon}</span>
+              <span className="filter-label">{filter.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {filteredIncidents.length === 0 ? (
         <div className="empty-state">

@@ -11,12 +11,15 @@ export function KPICards({ simulationData = null }) {
   // Live units from field incident store (real-time)
   const routineUnits = useFieldIncidentStore((s) => s.routineUnits);
   const fieldUnits = useFieldIncidentStore((s) => s.units);
+  const fieldMode = useFieldIncidentStore((s) => s.mode);
 
-  const liveUnits = Array.isArray(routineUnits) && routineUnits.length > 0
-    ? routineUnits
-    : (Array.isArray(fieldUnits) ? fieldUnits : []);
+  // Use the correct units based on mode
+  const liveUnits = fieldMode === 'SIMULATION'
+    ? (Array.isArray(fieldUnits) ? fieldUnits : [])
+    : (Array.isArray(routineUnits) && routineUnits.length > 0 ? routineUnits : (Array.isArray(fieldUnits) ? fieldUnits : []));
 
-  const availableLiveUnits = liveUnits.filter((u) => u.status === 'PATROL');
+  // Count available units (status === 'PATROL' or 'AVAILABLE')
+  const availableLiveUnits = liveUnits.filter((u) => u.status === 'PATROL' || u.status === 'AVAILABLE');
   const totalAvailable = availableLiveUnits.length;
   const policeCount = availableLiveUnits.filter((u) => u.type === 'POLICE').length;
   const fireCount = availableLiveUnits.filter((u) => u.type === 'FIRE').length;

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle } from 'react-leaflet';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
 
@@ -16,35 +16,87 @@ export function MapView({
   simulationIncident = null,
   simulationUnits = null,
   routineUnits = null,
-  isSimulation = false
+  isSimulation = false,
+  selectedUnitIds = []
 }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef({});
 
-  const unitHtml = (emoji) => `
-    <div style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; border-radius: 50%; background: white; border: 3px solid #1f2937; font-size: 35px; line-height: 60px; text-align: center;">
-      ${emoji}
+  const unitHtml = (emoji, isSelected = false, color = '#3b82f6') => `
+    <div style="
+      width: 100%; 
+      height: 100%; 
+      display: flex; 
+      justify-content: center; 
+      align-items: center; 
+      position: relative;
+    ">
+      ${isSelected ? `
+        <div style="
+          position: absolute;
+          width: 80px;
+          height: 80px;
+          border: 4px solid ${color};
+          border-radius: 50%;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          animation: pulse 2s ease-in-out infinite;
+          pointer-events: none;
+        "></div>
+      ` : ''}
+      <div style="
+        width: 60px;
+        height: 60px;
+        display: flex; 
+        justify-content: center; 
+        align-items: center; 
+        border-radius: 50%; 
+        background: white; 
+        border: 3px solid ${isSelected ? color : '#1f2937'}; 
+        font-size: 35px; 
+        line-height: 60px; 
+        text-align: center;
+        box-shadow: ${isSelected ? `0 0 20px ${color}` : '0 2px 8px rgba(0,0,0,0.3)'};
+      ">
+        ${emoji}
+      </div>
     </div>
   `;
 
+  const createUnitIcon = (type, isSelected = false) => {
+    const icons = {
+      POLICE: { emoji: '🚓', color: '#3b82f6' },
+      FIRE: { emoji: '🚒', color: '#ef4444' },
+      MEDICAL: { emoji: '🚑', color: '#10b981' }
+    };
+    const config = icons[type] || icons.POLICE;
+    return L.divIcon({
+      className: `marker-unit-${type?.toLowerCase() || 'police'}`,
+      html: unitHtml(config.emoji, isSelected, config.color),
+      iconSize: isSelected ? [90, 90] : [60, 60],
+      iconAnchor: isSelected ? [45, 90] : [30, 60],
+    });
+  };
+
   const policeIcon = L.divIcon({
     className: 'marker-unit-police',
-    html: unitHtml('🚓'),
+    html: unitHtml('🚓', false, '#3b82f6'),
     iconSize: [60, 60],
     iconAnchor: [30, 60],
   });
 
   const fireIcon = L.divIcon({
     className: 'marker-unit-fire',
-    html: unitHtml('🚒'),
+    html: unitHtml('🚒', false, '#ef4444'),
     iconSize: [60, 60],
     iconAnchor: [30, 60],
   });
 
   const medicalIcon = L.divIcon({
     className: 'marker-unit-medical',
-    html: unitHtml('🚑'),
+    html: unitHtml('🚑', false, '#10b981'),
     iconSize: [60, 60],
     iconAnchor: [30, 60],
   });
@@ -64,8 +116,20 @@ export function MapView({
   const fieldIncidents = useFieldIncidentStore((s) => s.incidents || []);
   const units = useFieldIncidentStore((s) => s.units || []);
 
-  // Combine incidents from both stores for display
+  // Combine incidents for display; in simulation show only the active simulation incident
   const incidents = React.useMemo(() => {
+    if (isSimulation && simulationIncident) {
+      return [{
+        id: simulationIncident.id || 'sim-incident',
+        title: simulationIncident.name || 'Simulation Incident',
+        priority: simulationIncident.priority || 'HIGH',
+        status: simulationIncident.status || 'IN_PROGRESS',
+        channel: simulationIncident.channel || 'SIMULATION',
+        location_lat: simulationIncident.lat ?? 31.77,
+        location_lng: simulationIncident.lng ?? 35.22,
+      }];
+    }
+
     const dashboard = Array.isArray(dashboardIncidents) ? dashboardIncidents : [];
     const field = Array.isArray(fieldIncidents) ? fieldIncidents : [];
     // Combine and deduplicate by id
@@ -77,7 +141,7 @@ export function MapView({
       }
     });
     return Array.from(uniqueMap.values());
-  }, [dashboardIncidents, fieldIncidents]);
+  }, [dashboardIncidents, fieldIncidents, isSimulation, simulationIncident]);
 
   // Initialize map
   useEffect(() => {
@@ -105,6 +169,14 @@ export function MapView({
     const map = mapInstanceRef.current;
     if (!map) return;
 
+    // Save which popups are currently open before clearing markers
+    const openPopups = new Set();
+    Object.entries(markersRef.current).forEach(([key, marker]) => {
+      if (marker.isPopupOpen && marker.isPopupOpen()) {
+        openPopups.add(key);
+      }
+    });
+
     // Clear existing markers
     Object.values(markersRef.current).forEach((marker) => {
       map.removeLayer(marker);
@@ -115,143 +187,8 @@ export function MapView({
       ? simulationUnits
       : (routineUnits || units);
 
-    // SIMULATION MODE: Display incident and moving units
-    if (isSimulation && simulationIncident) {
-      const incLat = simulationIncident.lat || 31.77;
-      const incLng = simulationIncident.lng || 35.22;
-
-      const incidentHtml = `
-        <div class="map-marker-incident" style="background-color: #ef4444; font-size: 1.5em;">
-          🔥
-        </div>
-      `;
-
-      const incidentMarker = L.marker(
-        [incLat, incLng],
-        {
-          icon: L.divIcon({
-            html: incidentHtml,
-            className: 'marker-incident-simulation',
-            iconSize: [50, 50],
-            iconAnchor: [25, 50],
-          }),
-        }
-      ).addTo(map);
-
-      incidentMarker.bindPopup(`
-        <div class="map-popup">
-          <strong>${simulationIncident.name || 'Incident Location'}</strong>
-          <p>Type: Fire</p>
-          <small>Coordinates: ${incLat.toFixed(3)}, ${incLng.toFixed(3)}</small>
-        </div>
-      `);
-
-      markersRef.current[`incident-${simulationIncident.name}`] = incidentMarker;
-
-      if (activeUnits && Array.isArray(activeUnits)) {
-        activeUnits.forEach((unit) => {
-          if (!unit || !unit.position || unit.position.length < 2) return;
-
-          const type = (unit.type || '').toUpperCase();
-          const chosenIcon = type === 'POLICE' ? policeIcon : type === 'FIRE' ? fireIcon : type === 'MEDICAL' ? medicalIcon : null;
-          const unitMarker = L.marker(
-            [unit.position[0], unit.position[1]],
-            {
-              icon: chosenIcon || L.divIcon({
-                html: unitHtml('📍'),
-                className: `marker-unit-simulation ${unit.status?.toLowerCase() || 'moving'}`,
-                iconSize: [60, 60],
-                iconAnchor: [30, 60],
-              }),
-            }
-          ).addTo(map);
-
-          // Determine status color for popup text in simulation mode
-          const simStatusValue = unit.status || 'MOVING';
-          const simStatusTextColor =
-            simStatusValue === 'AVAILABLE' || simStatusValue === 'PATROL' ? '#10b981' :
-              simStatusValue === 'DISPATCHED' || simStatusValue === 'EN_ROUTE' ? '#f59e0b' :
-                simStatusValue === 'ON_SCENE' || simStatusValue === 'BUSY' ? '#ef4444' :
-                  '#6b7280';
-
-          unitMarker.bindPopup(`
-            <div class="map-popup">
-              <strong>${unit.name || 'Unit'}</strong>
-              <p>Type: ${unit.type || 'UNKNOWN'}</p>
-              <p style="margin: 6px 0; color: ${simStatusTextColor}; font-weight: 600;">Status: ${simStatusValue}</p>
-              <small>Position: ${unit.position[0].toFixed(3)}, ${unit.position[1].toFixed(3)}</small>
-            </div>
-          `);
-
-          markersRef.current[`unit-${unit.id}`] = unitMarker;
-
-          const pathLine = L.polyline(
-            [
-              [unit.position[0], unit.position[1]],
-              [incLat, incLng],
-            ],
-            {
-              color: type === 'FIRE' ? '#ef4444' : type === 'POLICE' ? '#3b82f6' : '#10b981',
-              weight: 2,
-              opacity: 0.4,
-              dashArray: '5, 5',
-            }
-          ).addTo(map);
-
-          markersRef.current[`path-${unit.id}`] = pathLine;
-        });
-      }
-
-      map.setView([incLat, incLng], 14);
-      return;
-    }
-
-    // SIMULATION MODE (sectors): Display sectors
-    if (simulationSectors && Array.isArray(simulationSectors)) {
-      simulationSectors.forEach((sector) => {
-        const hazardColor = {
-          CRITICAL: '#ef4444',
-          HIGH: '#f59e0b',
-          MODERATE: '#eab308',
-          LOW: '#3b82f6',
-        }[sector.hazard_level] || '#6b7280';
-
-        const html = `
-          <div class="map-marker-sector" style="background-color: ${hazardColor}">
-            🏢
-          </div>
-        `;
-
-        const marker = L.marker(
-          [sector.center_lat || 31.77, sector.center_lng || 35.22],
-          {
-            icon: L.divIcon({
-              html,
-              className: 'marker-sector',
-              iconSize: [40, 40],
-              iconAnchor: [20, 40],
-            }),
-          }
-        ).addTo(map);
-
-        marker.bindPopup(`
-          <div class="map-popup">
-            <strong>${sector.name || 'Unknown Sector'}</strong>
-            <p>Hazard: ${sector.hazard_level || 'UNKNOWN'}</p>
-            <p>Status: ${sector.status || 'UNKNOWN'}</p>
-            <small>Access: ${sector.access_status || 'UNKNOWN'}</small>
-          </div>
-        `);
-
-        markersRef.current[`sector-${sector.name}`] = marker;
-      });
-
-      if (simulationSectors.length > 0 && simulationSectors[0].center_lat) {
-        map.setView([simulationSectors[0].center_lat, simulationSectors[0].center_lng], 13);
-      }
-
-      return;
-    }
+    // ROUTINE or SIMULATION (single incident) - render using unified logic
+    // Simulation mode now relies on incidents array containing only the simulated incident
 
     // ROUTINE MODE: Add incident markers (with filtering)
     const filteredIncidents = activeFilter === 'ALL'
@@ -308,26 +245,54 @@ export function MapView({
 
     const renderedUnits = activeUnits && Array.isArray(activeUnits) ? activeUnits : units;
 
+    // Draw routes for units that have them
+    renderedUnits.forEach((unit) => {
+      if (unit.status === 'EN_ROUTE' && unit.route && Array.isArray(unit.route) && unit.route.length > 0) {
+        console.log(`📍 Drawing route for unit ${unit.id}: ${unit.route.length} waypoints`);
+        const routeColor = unit.type === 'POLICE' ? '#3b82f6' : unit.type === 'FIRE' ? '#ef4444' : '#10b981';
+
+        // Draw a thick glow/shadow first for better visibility
+        const shadowLine = L.polyline(unit.route, {
+          color: '#000000',
+          weight: 8,
+          opacity: 0.2,
+          dashArray: '10, 10',
+          lineCap: 'round',
+          lineJoin: 'round',
+        }).addTo(map);
+        markersRef.current[`route-shadow-${unit.id}`] = shadowLine;
+
+        // Draw the main route line
+        const routeLine = L.polyline(unit.route, {
+          color: routeColor,
+          weight: 5,
+          opacity: 0.9,
+          dashArray: '8, 8',
+          lineCap: 'round',
+          lineJoin: 'round',
+        }).addTo(map);
+        markersRef.current[`route-${unit.id}`] = routeLine;
+      } else if (unit.status === 'EN_ROUTE' && !unit.route) {
+        console.warn(`⚠️ Unit ${unit.id} is EN_ROUTE but has no route!`);
+      }
+    });
+
     renderedUnits.forEach((unit, idx) => {
       const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
       const unitLat = hasPosition ? unit.position[0] : unit.location_lat;
-      const unitLng = hasPosition ? unit.position[1] : unit.location_lng;
+      const unitLng = hasPosition ? unit.position[1] : unit.longitude;
 
       if (unitLat === undefined || unitLng === undefined) return;
 
       const type = (unit.type || '').toUpperCase();
-      const chosenIcon = type === 'POLICE' ? policeIcon : type === 'FIRE' ? fireIcon : type === 'MEDICAL' ? medicalIcon : null;
+      const isSelected = selectedUnitIds.includes(unit.id);
+
+      // Use createUnitIcon with selection status
+      const unitIcon = createUnitIcon(type, isSelected);
 
       const marker = L.marker(
         [unitLat, unitLng],
-        {
-          icon: chosenIcon || L.divIcon({
-            html: unitHtml('📍'),
-            className: 'marker-unit marker-unit-smooth',
-            iconSize: [60, 60],
-            iconAnchor: [30, 60],
-          }),
-        }
+        { icon: unitIcon }
       ).addTo(map);
 
       const targetIncident = unit.assignedTo ? (incidents || []).find((i) => i.id === unit.assignedTo) : null;
@@ -347,7 +312,11 @@ export function MapView({
         statusTextColor = '#10b981';
       }
 
-      marker.bindPopup(`
+      const popup = L.popup({
+        autoPan: false, // Don't auto-pan when unit moves
+        closeOnClick: true, // Close when clicking elsewhere on map
+        autoClose: false, // Don't close when another popup opens
+      }).setContent(`
         <div class="map-popup">
           <strong>${unit.name || `Unit ${idx + 1}`}</strong>
           <p>${unit.type || 'Unknown'}</p>
@@ -355,9 +324,17 @@ export function MapView({
         </div>
       `);
 
+      marker.bindPopup(popup);
+
       markersRef.current[`unit-${unit.id || idx}`] = marker;
+
+      // Reopen popup if it was open before
+      const markerKey = `unit-${unit.id || idx}`;
+      if (openPopups.has(markerKey)) {
+        marker.openPopup();
+      }
     });
-  }, [incidents, units, routineUnits, selectedIncidentId, setSelectedIncident, simulationSectors, simulationIncident, simulationUnits, activeFilter, isSimulation]);
+  }, [incidents, units, routineUnits, selectedIncidentId, setSelectedIncident, simulationSectors, simulationIncident, simulationUnits, activeFilter, isSimulation, selectedUnitIds]);
 
   // Fly to selected incident when changed from list selection
   useEffect(() => {

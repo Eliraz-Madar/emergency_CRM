@@ -29,6 +29,7 @@ export default function Dashboard() {
     connectionStatus,
     demoMode,
     lastUpdateTime,
+    incidents,
   } = useDashboardStore();
 
   // Connect to Field Incident simulation store
@@ -41,7 +42,12 @@ export default function Dashboard() {
     taskGroups,
     units: simulationUnits,
     routineUnits,
+    moveUnits,
+    tickRoutinePatrol,
+    setIncidents: setFieldIncidents,
   } = useFieldIncidentStore();
+
+  const { selectedUnitIds } = useDashboardStore();
 
   const [isLoading, setIsLoading] = useState(true);
   const [realtimeService, setRealtimeService] = useState(null);
@@ -50,6 +56,14 @@ export default function Dashboard() {
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
+
+  // Sync dashboard incidents to field incident store
+  useEffect(() => {
+    if (Array.isArray(incidents) && incidents.length > 0) {
+      console.log('📍 Syncing', incidents.length, 'incidents to fieldIncident store');
+      setFieldIncidents(incidents);
+    }
+  }, [incidents, setFieldIncidents]);
 
   // Sync simulation events to war-room when active
   useEffect(() => {
@@ -155,6 +169,25 @@ export default function Dashboard() {
 
     return () => clearInterval(interval);
   }, [connectionStatus]);
+
+  // Unit movement loop - runs continuously to move units along their routes
+  useEffect(() => {
+    const movementInterval = setInterval(() => {
+      const { moveUnits: latestMoveUnits, tickRoutinePatrol: latestTickPatrol, mode } = useFieldIncidentStore.getState();
+
+      // First tick routine patrol (for patrol units)
+      if (mode === 'ROUTINE' && latestTickPatrol) {
+        latestTickPatrol();
+      }
+
+      // Then move units along routes (for dispatched units)
+      if (latestMoveUnits) {
+        latestMoveUnits();
+      }
+    }, 1000); // Run every second for smooth movement
+
+    return () => clearInterval(movementInterval);
+  }, []);
 
   const getConnectionStatusColor = () => {
     const colors = {
@@ -265,12 +298,18 @@ export default function Dashboard() {
             activeFilter={activeFilter}
             isSimulation={isSimulation}
             simulationIncident={isSimulation && majorIncident ? {
+              id: majorIncident.id || 'sim-incident',
               lat: majorIncident.location_lat || 31.77,
               lng: majorIncident.location_lng || 35.22,
-              name: majorIncident.title || 'Incident Location'
+              name: majorIncident.title || 'Incident Location',
+              priority: majorIncident.priority || 'HIGH',
+              status: majorIncident.status || 'IN_PROGRESS',
+              title: majorIncident.title || 'Incident',
+              location_name: majorIncident.location_name || 'Field Location'
             } : null}
             simulationUnits={isSimulation ? simulationUnits : null}
             routineUnits={!isSimulation ? routineUnits : null}
+            selectedUnitIds={selectedUnitIds}
           />
         </div>
 

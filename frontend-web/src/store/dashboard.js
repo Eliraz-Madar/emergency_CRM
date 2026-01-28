@@ -14,6 +14,7 @@ export const useDashboardStore = create((set, get) => ({
   // UI State
   selectedIncidentId: null,
   selectedUnitId: null,
+  selectedUnitIds: [], // Array of selected unit IDs for multi-dispatch
   connectionStatus: 'DISCONNECTED', // DISCONNECTED, CONNECTING, CONNECTED, DEGRADED
   lastUpdateTime: null,
   demoMode: true,
@@ -59,6 +60,13 @@ export const useDashboardStore = create((set, get) => ({
 
   setSelectedIncident: (incidentId) => set({ selectedIncidentId: incidentId }),
   setSelectedUnit: (unitId) => set({ selectedUnitId: unitId }),
+  setSelectedUnitIds: (unitIds) => set({ selectedUnitIds: unitIds }),
+  toggleSelectedUnit: (unitId) => set((state) => ({
+    selectedUnitIds: state.selectedUnitIds.includes(unitId)
+      ? state.selectedUnitIds.filter(id => id !== unitId)
+      : [...state.selectedUnitIds, unitId]
+  })),
+  clearSelectedUnits: () => set({ selectedUnitIds: [] }),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
   setDemoMode: (enabled) => set({ demoMode: enabled }),

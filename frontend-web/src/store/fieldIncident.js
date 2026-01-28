@@ -7,17 +7,32 @@
 
 import { create } from 'zustand';
 import { SCENARIOS } from '../data/simulationScenarios';
+import { calculateRoute, getNextPositionOnRoute } from '../services/routingService';
 
 // Major Israeli cities used for unit and event placement (inland-safe centers)
 const ISRAEL_CITIES = [
+  // מרכז
   { name: 'Tel Aviv', lat: 32.0853, lng: 34.7818 },
+  { name: 'Ramat Gan', lat: 32.0853, lng: 34.8103 },
+  { name: 'Petah Tikva', lat: 32.0878, lng: 34.8879 },
+  { name: 'Rishon LeZion', lat: 31.9730, lng: 34.7925 },
+  { name: 'Holon', lat: 32.0167, lng: 34.7667 },
+  { name: 'Rehovot', lat: 31.8944, lng: 34.8081 },
+  // ירושלים והסביבה
   { name: 'Jerusalem', lat: 31.7683, lng: 35.2137 },
+  { name: 'Beit Shemesh', lat: 31.7522, lng: 34.9897 },
+  { name: 'Modi\'in', lat: 31.8969, lng: 35.0106 },
+  // צפון
   { name: 'Haifa', lat: 32.7940, lng: 34.9896 },
-  { name: 'Beer Sheva', lat: 31.2518, lng: 34.7913 },
-  { name: 'Eilat', lat: 29.5577, lng: 34.9519 },
-  { name: 'Kiryat Shmona', lat: 33.2073, lng: 35.5711 },
-  { name: 'Ashdod', lat: 31.8018, lng: 34.6479 },
+  { name: 'Nazareth', lat: 32.7028, lng: 35.2978 },
   { name: 'Tiberias', lat: 32.7940, lng: 35.5309 },
+  { name: 'Kiryat Shmona', lat: 33.2073, lng: 35.5711 },
+  { name: 'Safed', lat: 32.9658, lng: 35.4983 },
+  // דרום
+  { name: 'Beer Sheva', lat: 31.2518, lng: 34.7913 },
+  { name: 'Ashdod', lat: 31.8018, lng: 34.6479 },
+  { name: 'Ashkelon', lat: 31.6688, lng: 34.5742 },
+  { name: 'Netivot', lat: 31.4203, lng: 34.5952 },
 ];
 
 // Routine event catalog
@@ -38,9 +53,10 @@ const kmOffsetToDeg = (lat, km, angleRad) => {
   return [dLat, dLng];
 };
 
+// Israel land boundaries - avoiding sea areas
 const LAT_MIN = 29.5;
 const LAT_MAX = 33.3;
-const LNG_MIN = 34.2;
+const LNG_MIN = 34.3;  // Moved east to avoid Mediterranean
 const LNG_MAX = 35.9;
 const PATROL_STEP_DELTA = 0.003; // Visible patrol speed on country map (~300m per tick)
 
@@ -56,15 +72,19 @@ export const moveUnitRandomly = (lat, lng) => {
   return clampToIsrael(nextLat, nextLng);
 };
 
-const landLatMin = 31.0;
-const landLatMax = 32.5;
-const landLngMin = 34.8;
-const landLngMax = 35.5;
+// Land-safe boundaries for unit spawning (avoiding coastlines)
+const landLatMin = 29.5;
+const landLatMax = 33.2;
+const landLngMin = 34.4;  // Further from coast
+const landLngMax = 35.8;
 
 const randomLandPoint = () => {
-  const lat = landLatMin + Math.random() * (landLatMax - landLatMin);
-  const lng = landLngMin + Math.random() * (landLngMax - landLngMin);
-  return clampToIsrael(lat, lng);
+  // Pick a random city and offset from it to ensure land placement
+  const city = randomChoice(ISRAEL_CITIES);
+  const offsetKm = 0.5 + Math.random() * 2; // 0.5-2.5 km from city center
+  const theta = Math.random() * 2 * Math.PI;
+  const [dLat, dLng] = kmOffsetToDeg(city.lat, offsetKm, theta);
+  return clampToIsrael(city.lat + dLat, city.lng + dLng);
 };
 
 // Create a routine event with required and compatibility fields
@@ -107,19 +127,20 @@ const generateNationwideUnits = (count = 50) => {
   const types = ['POLICE', 'FIRE', 'MEDICAL'];
 
   return Array.from({ length: count }).map((_, idx) => {
-    // Pick random city and random 2–5 km offset
+    // Pick random city - guaranteed on land
     const city = randomChoice(ISRAEL_CITIES);
-    const rKm = 2 + Math.random() * 3; // 2–5 km
+    const rKm = 1 + Math.random() * 3; // 1–4 km from city center
     const theta = Math.random() * 2 * Math.PI;
     const [dLat, dLng] = kmOffsetToDeg(city.lat, rKm, theta);
 
     const [lat, lng] = clampToIsrael(city.lat + dLat, city.lng + dLng);
 
-    // Separate target waypoint near same city
-    const rKmTarget = 2 + Math.random() * 3;
+    // Separate target waypoint near same or nearby city
+    const targetCity = Math.random() > 0.7 ? randomChoice(ISRAEL_CITIES) : city;
+    const rKmTarget = 1 + Math.random() * 3;
     const thetaTarget = Math.random() * 2 * Math.PI;
-    const [tLatOff, tLngOff] = kmOffsetToDeg(city.lat, rKmTarget, thetaTarget);
-    const [tLat, tLng] = clampToIsrael(city.lat + tLatOff, city.lng + tLngOff);
+    const [tLatOff, tLngOff] = kmOffsetToDeg(targetCity.lat, rKmTarget, thetaTarget);
+    const [tLat, tLng] = clampToIsrael(targetCity.lat + tLatOff, targetCity.lng + tLngOff);
 
     return {
       id: `routine-${idx + 1}`,
@@ -127,6 +148,8 @@ const generateNationwideUnits = (count = 50) => {
       type: types[Math.floor(Math.random() * types.length)],
       status: 'PATROL',
       position: [lat, lng],
+      latitude: lat,
+      longitude: lng,
       targetPosition: [tLat, tLng],
       missionIncidentId: null,
       lastUpdated: Date.now() + idx,
@@ -165,11 +188,25 @@ export const useFieldIncidentStore = create((set, get) => ({
   simulationStep: 0, // Current step index in the simulation
 
   // Actions
-  setMajorIncident: (incident) => set({ majorIncident: incident }),
+  setMajorIncident: (incident) => set((state) => {
+    if (!incident) return { majorIncident: null };
+    // Also add/update the incident in the incidents array so IncidentDetailsPanel can find it
+    const existingIncidents = state.incidents || [];
+    const incidentIndex = existingIncidents.findIndex(i => i.id === incident.id);
+    let updatedIncidents;
+    if (incidentIndex >= 0) {
+      updatedIncidents = [...existingIncidents];
+      updatedIncidents[incidentIndex] = { ...incident };
+    } else {
+      updatedIncidents = [{ ...incident }, ...existingIncidents];
+    }
+    return { majorIncident: incident, incidents: updatedIncidents };
+  }),
   setSectors: (sectors) => set({ sectors }),
   setTaskGroups: (taskGroups) => set({ taskGroups }),
   setEvents: (events) => set({ events }),
   setUnits: (units) => set({ units }),
+  setIncidents: (incidents) => set({ incidents }),
 
   setSelectedSector: (sectorName) => set({ selectedSector: sectorName }),
   setSelectedTaskGroup: (taskGroupId) => set({ selectedTaskGroup: taskGroupId }),
@@ -181,29 +218,103 @@ export const useFieldIncidentStore = create((set, get) => ({
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
 
-  dispatchUnitsToIncident: (incidentIdOrPayload, unitIdsMaybe) =>
-    set((state) => {
-      const isPayloadObject = incidentIdOrPayload && typeof incidentIdOrPayload === 'object' && !Array.isArray(incidentIdOrPayload);
-      const incidentId = isPayloadObject ? incidentIdOrPayload.incidentId : incidentIdOrPayload;
-      const unitIds = isPayloadObject ? incidentIdOrPayload.unitIds : unitIdsMaybe;
+  dispatchUnitsToIncident: async (incidentIdOrPayload, unitIdsMaybe) => {
+    const state = get();
+    const isPayloadObject = incidentIdOrPayload && typeof incidentIdOrPayload === 'object' && !Array.isArray(incidentIdOrPayload);
+    const incidentId = isPayloadObject ? incidentIdOrPayload.incidentId : incidentIdOrPayload;
+    const unitIds = isPayloadObject ? incidentIdOrPayload.unitIds : unitIdsMaybe;
 
-      if (!Array.isArray(unitIds) || unitIds.length === 0 || !incidentId) {
-        console.warn('Invalid dispatch payload/signature', incidentIdOrPayload, unitIdsMaybe);
-        return {};
+    console.log('🚨 Dispatching units:', unitIds, 'to incident:', incidentId);
+
+    if (!Array.isArray(unitIds) || unitIds.length === 0 || !incidentId) {
+      console.warn('Invalid dispatch payload/signature', incidentIdOrPayload, unitIdsMaybe);
+      return;
+    }
+
+    // Find target incident
+    const target = (state.incidents || []).find((i) => i.id === incidentId);
+    if (!target) {
+      console.warn('Target incident not found:', incidentId);
+      return;
+    }
+
+    const targetLat = target.latitude ?? target.location_lat ?? target.lat;
+    const targetLng = target.longitude ?? target.location_lng ?? target.lng;
+
+    console.log('🎯 Target location:', targetLat, targetLng);
+
+    // Calculate routes for all dispatched units
+    const routePromises = unitIds.map(async (unitId) => {
+      const unit = (state.units || []).find((u) => u.id === unitId);
+      if (!unit) return { unitId, route: null };
+
+      const unitLat = unit.latitude ?? (Array.isArray(unit.position) ? unit.position[0] : undefined) ?? 31.77;
+      const unitLng = unit.longitude ?? (Array.isArray(unit.position) ? unit.position[1] : undefined) ?? 35.22;
+
+      console.log(`🚗 Unit ${unitId} starting from:`, unitLat, unitLng);
+
+      try {
+        const apiRoute = await calculateRoute(unitLat, unitLng, targetLat, targetLng);
+
+        // Ensure route starts EXACTLY where unit is now
+        // Always prepend current position to ensure route starts from unit
+        let route = apiRoute;
+        if (apiRoute && apiRoute.length > 0) {
+          // Always add current position as first waypoint
+          route = [[unitLat, unitLng], ...apiRoute];
+          console.log(`📍 Prepended current position to route for ${unitId}`);
+        }
+
+        console.log(`✅ Route calculated for unit ${unitId}:`, route?.length, 'waypoints');
+        return { unitId, route };
+      } catch (error) {
+        console.warn(`Failed to calculate route for unit ${unitId}:`, error);
+        return { unitId, route: null };
       }
+    });
 
-      const updatedUnits = (state.units || []).map((u) =>
-        unitIds.includes(u.id)
-          ? { ...u, status: 'EN_ROUTE', assignedTo: incidentId }
-          : u
-      );
+    const routes = await Promise.all(routePromises);
+    console.log('✅ All routes calculated:', routes.length);
+
+    set((state) => {
+      const updatedUnits = (state.units || []).map((u) => {
+        if (!unitIds.includes(u.id)) return u;
+
+        const routeData = routes.find((r) => r.unitId === u.id);
+        const hasRoute = routeData?.route && Array.isArray(routeData.route) && routeData.route.length > 0;
+
+        console.log(`📍 Unit ${u.id} assigned route with ${routeData?.route?.length ?? 0} waypoints`);
+        console.log(`📍 Unit ${u.id} staying at current position: [${u.latitude}, ${u.longitude}]`);
+        if (hasRoute) {
+          console.log(`📍 Route starts at: [${routeData.route[0][0]}, ${routeData.route[0][1]}]`);
+          console.log(`📍 Route ends at: [${routeData.route[routeData.route.length - 1][0]}, ${routeData.route[routeData.route.length - 1][1]}]`);
+        }
+
+        return {
+          ...u,
+          status: 'EN_ROUTE',
+          assignedTo: incidentId,
+          route: routeData?.route || null,
+          routeIndex: 0,
+          // DON'T update position - keep unit where it is!
+        };
+      });
 
       // Also update routineUnits to keep them in sync
-      const updatedRoutineUnits = (state.routineUnits || []).map((u) =>
-        unitIds.includes(u.id)
-          ? { ...u, status: 'EN_ROUTE', assignedTo: incidentId }
-          : u
-      );
+      const updatedRoutineUnits = (state.routineUnits || []).map((u) => {
+        if (!unitIds.includes(u.id)) return u;
+
+        const routeData = routes.find((r) => r.unitId === u.id);
+
+        return {
+          ...u,
+          status: 'EN_ROUTE',
+          assignedTo: incidentId,
+          route: routeData?.route || null,
+          routeIndex: 0,
+          // DON'T update position - keep unit where it is!
+        };
+      });
 
       // Add dispatched units to incident.assignedUnits immutably
       const dispatchedUnits = updatedUnits.filter((u) => unitIds.includes(u.id));
@@ -220,8 +331,20 @@ export const useFieldIncidentStore = create((set, get) => ({
         };
       });
 
-      return { units: updatedUnits, routineUnits: updatedRoutineUnits, incidents: updatedIncidents };
-    }),
+      // Update majorIncident if it matches the incident being dispatched to
+      const updatedMajorIncident = state.majorIncident && state.majorIncident.id === incidentId
+        ? {
+          ...state.majorIncident,
+          status: 'IN_PROGRESS',
+          assignedUnits: Array.isArray(state.majorIncident.assignedUnits)
+            ? state.majorIncident.assignedUnits
+            : []
+        }
+        : state.majorIncident;
+
+      return { units: updatedUnits, routineUnits: updatedRoutineUnits, incidents: updatedIncidents, majorIncident: updatedMajorIncident };
+    });
+  },
 
   tickRoutinePatrol: () =>
     set((state) => {
@@ -234,9 +357,15 @@ export const useFieldIncidentStore = create((set, get) => ({
           ? state.routineUnits
           : createRoutineUnits();
 
-      const speedFactor = 0.005; // visible per tick
+      // Use same speed as dispatched units for consistency
+      const PATROL_SPEED = 0.0005; // Same as route movement speed
 
       const updatedUnits = baseUnits.map((unit, idx) => {
+        // Skip units that are EN_ROUTE or ON_SCENE - they should be handled by moveUnits
+        if (unit.status === 'EN_ROUTE' || unit.status === 'ON_SCENE') {
+          return unit;
+        }
+
         const hasPos = Array.isArray(unit.position) && unit.position.length >= 2;
         const hasTarget = Array.isArray(unit.targetPosition) && unit.targetPosition.length >= 2;
 
@@ -251,12 +380,14 @@ export const useFieldIncidentStore = create((set, get) => ({
         let nextLng = currentLng;
         let nextTarget = [targetLat, targetLng];
 
-        if (dist < 0.001 || !Number.isFinite(dist)) {
+        if (dist < PATROL_SPEED * 2 || !Number.isFinite(dist)) {
           // Arrived: pick a new waypoint
           nextTarget = randomLandPoint();
         } else {
-          nextLat = currentLat + dLat * speedFactor;
-          nextLng = currentLng + dLng * speedFactor;
+          // Move at constant speed towards target
+          const ratio = PATROL_SPEED / dist;
+          nextLat = currentLat + dLat * ratio;
+          nextLng = currentLng + dLng * ratio;
         }
 
         const [clampedLat, clampedLng] = clampToIsrael(nextLat, nextLng);
@@ -270,19 +401,47 @@ export const useFieldIncidentStore = create((set, get) => ({
         };
       });
 
+      // Merge: keep EN_ROUTE/ON_SCENE units from current state, update patrol units
+      const currentUnits = state.units || [];
+      const mergedUnits = currentUnits.map(u => {
+        // If unit is dispatched, keep it as-is (it's updated by moveUnits)
+        if (u.status === 'EN_ROUTE' || u.status === 'ON_SCENE') {
+          return u;
+        }
+        // Otherwise use the updated patrol version
+        const updated = updatedUnits.find(upd => upd.id === u.id);
+        return updated || u;
+      });
+
       return {
         routineUnits: updatedUnits,
-        units: updatedUnits,
+        units: mergedUnits,
       };
     }),
 
   // Update incident data
   updateMajorIncident: (updates) =>
-    set((state) => ({
-      majorIncident: state.majorIncident
+    set((state) => {
+      const updatedMajor = state.majorIncident
         ? { ...state.majorIncident, ...updates }
-        : updates,
-    })),
+        : updates;
+
+      // Also update in incidents array
+      const incidents = state.incidents || [];
+      const incidentIndex = incidents.findIndex(i => i.id === updatedMajor.id);
+      let updatedIncidents;
+      if (incidentIndex >= 0) {
+        updatedIncidents = [...incidents];
+        updatedIncidents[incidentIndex] = updatedMajor;
+      } else {
+        updatedIncidents = [updatedMajor, ...incidents];
+      }
+
+      return {
+        majorIncident: updatedMajor,
+        incidents: updatedIncidents
+      };
+    }),
 
   updateSector: (sectorName, updates) =>
     set((state) => ({
@@ -303,6 +462,9 @@ export const useFieldIncidentStore = create((set, get) => ({
       incidents: (state.incidents || []).map((incident) =>
         incident.id === incidentId ? { ...incident, priority: newPriority } : incident
       ),
+      majorIncident: state.majorIncident && state.majorIncident.id === incidentId
+        ? { ...state.majorIncident, priority: newPriority }
+        : state.majorIncident,
     })),
 
   addEvent: (newEvent) =>
@@ -334,10 +496,20 @@ export const useFieldIncidentStore = create((set, get) => ({
         return {};
       }
 
+      let movedCount = 0;
       const updatedUnits = state.units.map((u) => {
         if (u.status === 'EN_ROUTE' && u.assignedTo) {
           const target = (state.incidents || []).find((i) => i.id === u.assignedTo);
-          if (!target) return u;
+          if (!target) {
+            console.warn(`Unit ${u.id} assigned to non-existent incident ${u.assignedTo}`);
+            return u;
+          }
+
+          // Check if unit has a route before trying to move it
+          if (!u.route || !Array.isArray(u.route) || u.route.length === 0) {
+            console.warn(`🚨 Unit ${u.id} is EN_ROUTE but has NO ROUTE! Route value:`, u.route);
+            return u;
+          }
 
           const currentLat = u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined) ?? 31.77;
           const currentLng = u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined) ?? 35.22;
@@ -349,26 +521,83 @@ export const useFieldIncidentStore = create((set, get) => ({
             return u;
           }
 
-          const dLat = (targetLat - currentLat) * 0.05;
-          const dLng = (targetLng - currentLng) * 0.05;
-          const nextLat = currentLat + dLat;
-          const nextLng = currentLng + dLng;
+          // If unit has a route, follow it
+          if (u.route && Array.isArray(u.route) && u.route.length > 0) {
+            const currentIndex = u.routeIndex ?? 0;
+            const targetWaypoint = u.route[Math.min(currentIndex + 5, u.route.length - 1)];
+            console.log(`🚀 Moving ${u.id}: index=${currentIndex}/${u.route.length}, from [${currentLat.toFixed(4)}, ${currentLng.toFixed(4)}]`);
+            console.log(`   Target waypoint ahead: [${targetWaypoint[0].toFixed(4)}, ${targetWaypoint[1].toFixed(4)}]`);
 
-          const distance = Math.sqrt((targetLat - nextLat) ** 2 + (targetLng - nextLng) ** 2);
-          const arrived = distance < 0.0005;
+            const nextPos = getNextPositionOnRoute(
+              u.route,
+              currentLat,
+              currentLng,
+              currentIndex,
+              0.0005 // Increased speed slightly for smoother movement
+            );
 
+            if (nextPos.lat !== null && nextPos.lng !== null) {
+              const movedDist = Math.sqrt(
+                Math.pow(nextPos.lat - currentLat, 2) + Math.pow(nextPos.lng - currentLng, 2)
+              );
+              console.log(`✅ ${u.id} moved to [${nextPos.lat.toFixed(4)}, ${nextPos.lng.toFixed(4)}], index=${nextPos.index}, moved=${movedDist.toFixed(6)}, arrived=${nextPos.arrived}`);
+              movedCount++;
+              return {
+                ...u,
+                latitude: nextPos.lat,
+                longitude: nextPos.lng,
+                position: [nextPos.lat, nextPos.lng],
+                routeIndex: nextPos.index,
+                status: nextPos.arrived ? 'ON_SCENE' : 'EN_ROUTE',
+                lastUpdated: Date.now(),
+              };
+            }
+          } else {
+            console.warn(`Unit ${u.id} is EN_ROUTE but has no route!`);
+          }
+
+          // Fallback to straight line movement if no route
+          // Use same speed as route-based movement for consistency
+          const FALLBACK_SPEED = 0.0005; // Same as route movement speed
+          const dLat = targetLat - currentLat;
+          const dLng = targetLng - currentLng;
+          const distanceToTarget = Math.sqrt(dLat * dLat + dLng * dLng);
+
+          // If very close to target, snap to it
+          if (distanceToTarget < FALLBACK_SPEED * 2) {
+            movedCount++;
+            return {
+              ...u,
+              latitude: targetLat,
+              longitude: targetLng,
+              position: [targetLat, targetLng],
+              status: 'ON_SCENE',
+              lastUpdated: Date.now(),
+            };
+          }
+
+          // Move at constant speed towards target
+          const ratio = FALLBACK_SPEED / distanceToTarget;
+          const nextLat = currentLat + dLat * ratio;
+          const nextLng = currentLng + dLng * ratio;
+
+          movedCount++;
           return {
             ...u,
-            latitude: arrived ? targetLat : nextLat,
-            longitude: arrived ? targetLng : nextLng,
-            position: [arrived ? targetLat : nextLat, arrived ? targetLng : nextLng],
-            status: arrived ? 'ON_SCENE' : 'EN_ROUTE',
+            latitude: nextLat,
+            longitude: nextLng,
+            position: [nextLat, nextLng],
+            status: 'EN_ROUTE',
             lastUpdated: Date.now(),
           };
         }
 
         return u;
       });
+
+      if (movedCount > 0) {
+        console.log(`🚗 Moved ${movedCount} units this tick`);
+      }
 
       return { units: updatedUnits };
     }),

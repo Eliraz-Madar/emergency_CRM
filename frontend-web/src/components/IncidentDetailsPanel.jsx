@@ -24,28 +24,40 @@ const TYPE_META = {
 const TYPE_ORDER = ['POLICE', 'FIRE', 'MEDICAL'];
 
 export function IncidentDetailsPanel() {
-  const { incidents: dashboardIncidents, selectedIncidentId, setSelectedIncident, updateIncident } = useDashboardStore();
+  const {
+    incidents: dashboardIncidents,
+    selectedIncidentId,
+    setSelectedIncident,
+    updateIncident,
+    selectedUnitIds,
+    setSelectedUnitIds,
+  } = useDashboardStore();
 
   // מושכים את המידע החי מה-Store המבצעי
   const {
     incidents: fieldIncidents,
     units,
     dispatchUnitsToIncident,
-    updateIncidentPriority
+    updateIncidentPriority,
+    mode: fieldMode,
+    majorIncident,
   } = useFieldIncidentStore();
 
-  // --- תיקון לוגי: בחירת מקור האמת ---
-  // אנחנו מחפשים את האירוע קודם ב-Store החי (Field). אם הוא לא שם, לוקחים מהדאשבורד.
-  // זה מבטיח שכשמעדכנים עדיפות, הרכיב יתעדכן מיד.
+  // בסימולציה: השתמש ב-majorIncident אם אין selectedIncidentId
+  // בשגרה: חפש ב-field store ואחרי זה בdashboard
   const incident = useMemo(() => {
+    if (!selectedIncidentId && fieldMode === 'SIMULATION' && majorIncident) {
+      return majorIncident;
+    }
+
     if (!selectedIncidentId) return null;
+
     const liveIncident = Array.isArray(fieldIncidents) ? fieldIncidents.find(i => i.id === selectedIncidentId) : null;
     const staticIncident = Array.isArray(dashboardIncidents) ? dashboardIncidents.find(i => i.id === selectedIncidentId) : null;
     return liveIncident || staticIncident;
-  }, [selectedIncidentId, fieldIncidents, dashboardIncidents]);
+  }, [selectedIncidentId, fieldIncidents, dashboardIncidents, fieldMode, majorIncident]);
 
   const [selectedType, setSelectedType] = useState('POLICE');
-  const [selectedUnitIds, setSelectedUnitIds] = useState([]);
 
   // פונקציית העדכון - משתמשת ב-Store החי
   const handlePriorityChange = (newPriority) => {
@@ -76,20 +88,31 @@ export function IncidentDetailsPanel() {
   const filteredUnits = availableUnits.filter((u) => u.type === selectedType);
 
   const toggleUnit = (id) => {
-    setSelectedUnitIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setSelectedUnitIds(
+      selectedUnitIds.includes(id)
+        ? selectedUnitIds.filter(x => x !== id)
+        : [...selectedUnitIds, id]
+    );
   };
 
   const handleClose = () => {
     setSelectedIncident && setSelectedIncident(null);
   };
 
-  const handleDispatch = () => {
+  const handleDispatch = async () => {
     if (!incident || selectedUnitIds.length === 0) return;
-    dispatchUnitsToIncident({
+
+    console.log('🚨 Dispatching from IncidentDetailsPanel:', selectedUnitIds, 'to', incident.id);
+
+    // Await the dispatch to ensure routes are calculated
+    await dispatchUnitsToIncident({
       incidentId: incident.id,
       unitIds: selectedUnitIds,
       targetPosition: [incidentLat, incidentLng],
     });
+
+    console.log('✅ Dispatch completed');
+
     // Mark incident as in-progress in dashboard store as well
     updateIncident(incident.id, { status: 'IN_PROGRESS' });
     setSelectedUnitIds([]);
