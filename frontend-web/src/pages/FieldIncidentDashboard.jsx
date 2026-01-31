@@ -231,7 +231,7 @@ const FieldIncidentDashboard = () => {
     movementTimerRef.current = setInterval(() => {
       const { moveUnits: getMoveUnits } = useFieldIncidentStore.getState();
       getMoveUnits();
-    }, 100); // 100ms interval for smooth 10 FPS animation
+    }, 500); // 500ms interval for realistic movement speed
 
     return () => {
       if (movementTimerRef.current) {

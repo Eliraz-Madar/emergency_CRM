@@ -115,6 +115,7 @@ export function MapView({
   // Subscribe directly to the field incident store for strict reactivity
   const fieldIncidents = useFieldIncidentStore((s) => s.incidents || []);
   const units = useFieldIncidentStore((s) => s.units || []);
+  const storeRoutineUnits = useFieldIncidentStore((s) => s.routineUnits || []);
 
   // Combine incidents for display; in simulation show only the active simulation incident
   const incidents = React.useMemo(() => {
@@ -169,6 +170,12 @@ export function MapView({
     const map = mapInstanceRef.current;
     if (!map) return;
 
+    // Get fresh data from field incident store to ensure we have latest positions
+    // This is critical for EN_ROUTE units that may have been updated by moveUnits
+    const storeState = useFieldIncidentStore.getState();
+    const storeUnits = storeState.units || [];
+    const storeRoutineUnits = storeState.routineUnits || [];
+
     // Save which popups are currently open before clearing markers
     const openPopups = new Set();
     Object.entries(markersRef.current).forEach(([key, marker]) => {
@@ -177,17 +184,17 @@ export function MapView({
       }
     });
 
-    // Clear existing markers
-    Object.values(markersRef.current).forEach((marker) => {
-      map.removeLayer(marker);
+    // Clear ONLY incident and route markers - keep unit markers for updates
+    Object.keys(markersRef.current).forEach((key) => {
+      if (key.startsWith('incident-') || key.startsWith('route-')) {
+        map.removeLayer(markersRef.current[key]);
+        delete markersRef.current[key];
+      }
     });
-    markersRef.current = {};
 
     const activeUnits = isSimulation
       ? simulationUnits
-      : (routineUnits || units);
-
-    // ROUTINE or SIMULATION (single incident) - render using unified logic
+      : (storeRoutineUnits.length > 0 ? storeRoutineUnits : storeUnits);
     // Simulation mode now relies on incidents array containing only the simulated incident
 
     // ROUTINE MODE: Add incident markers (with filtering)
@@ -248,7 +255,6 @@ export function MapView({
     // Draw routes for units that have them
     renderedUnits.forEach((unit) => {
       if (unit.status === 'EN_ROUTE' && unit.route && Array.isArray(unit.route) && unit.route.length > 0) {
-        console.log(`📍 Drawing route for unit ${unit.id}: ${unit.route.length} waypoints`);
         const routeColor = unit.type === 'POLICE' ? '#3b82f6' : unit.type === 'FIRE' ? '#ef4444' : '#10b981';
 
         // Draw a thick glow/shadow first for better visibility
@@ -279,21 +285,33 @@ export function MapView({
 
     renderedUnits.forEach((unit, idx) => {
       const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
-      const unitLat = hasPosition ? unit.position[0] : unit.location_lat;
-      const unitLng = hasPosition ? unit.position[1] : unit.longitude;
+      const unitLat = hasPosition ? unit.position[0] : (unit.latitude ?? unit.location_lat);
+      const unitLng = hasPosition ? unit.position[1] : (unit.longitude ?? unit.location_lng);
 
-      if (unitLat === undefined || unitLng === undefined) return;
+      if (unit.status === 'EN_ROUTE') {
+        console.log(`🎯 Effect 1 creating unit marker for EN_ROUTE ${unit.id} at [${unitLat}, ${unitLng}]`);
+      }
 
+      if (!Number.isFinite(unitLat) || !Number.isFinite(unitLng)) return;
+
+      const markerKey = `unit-${unit.id || idx}`;
       const type = (unit.type || '').toUpperCase();
       const isSelected = selectedUnitIds.includes(unit.id);
-
-      // Use createUnitIcon with selection status
       const unitIcon = createUnitIcon(type, isSelected);
 
-      const marker = L.marker(
-        [unitLat, unitLng],
-        { icon: unitIcon }
-      ).addTo(map);
+      // UPDATE existing unit marker OR create new one
+      let marker = markersRef.current[markerKey];
+      if (marker && map.hasLayer(marker)) {
+        // ONLY update icon, NOT position (Effect 2 handles positions)
+        marker.setIcon(unitIcon);
+      } else {
+        // Create new marker (or recreate if it was removed from map)
+        marker = L.marker(
+          [unitLat, unitLng],
+          { icon: unitIcon }
+        ).addTo(map);
+        markersRef.current[markerKey] = marker;
+      }
 
       const targetIncident = unit.assignedTo ? (incidents || []).find((i) => i.id === unit.assignedTo) : null;
       const unitStatus = unit.status || 'PATROL';
@@ -326,15 +344,50 @@ export function MapView({
 
       marker.bindPopup(popup);
 
-      markersRef.current[`unit-${unit.id || idx}`] = marker;
-
       // Reopen popup if it was open before
-      const markerKey = `unit-${unit.id || idx}`;
       if (openPopups.has(markerKey)) {
         marker.openPopup();
       }
     });
-  }, [incidents, units, routineUnits, selectedIncidentId, setSelectedIncident, simulationSectors, simulationIncident, simulationUnits, activeFilter, isSimulation, selectedUnitIds]);
+  }, [incidents, selectedIncidentId, simulationSectors, simulationIncident, activeFilter, isSimulation]);
+
+  // Separate effect ONLY for frequent unit position updates
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !units) return;
+
+    const activeUnits = isSimulation
+      ? simulationUnits
+      : (storeRoutineUnits.length > 0 ? storeRoutineUnits : units);
+    const renderedUnits = activeUnits && Array.isArray(activeUnits) ? activeUnits : units;
+
+    // Update positions AND icons (to preserve selection circles)
+    renderedUnits.forEach((unit, idx) => {
+      const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
+      const unitLat = hasPosition ? unit.position[0] : (unit.latitude ?? unit.location_lat);
+      const unitLng = hasPosition ? unit.position[1] : (unit.longitude ?? unit.location_lng);
+
+      if (!Number.isFinite(unitLat) || !Number.isFinite(unitLng)) {
+        console.warn(`⚠️ Unit ${unit.id} has invalid coords: [${unitLat}, ${unitLng}]`);
+        return;
+      }
+
+      const markerKey = `unit-${unit.id || idx}`;
+      const marker = markersRef.current[markerKey];
+
+      if (marker && map.hasLayer(marker)) {
+        if (Math.abs(marker.getLatLng().lat - unitLat) > 0.00001 || Math.abs(marker.getLatLng().lng - unitLng) > 0.00001) {
+          marker.setLatLng([unitLat, unitLng]);
+        }
+
+        // ALWAYS update icon to preserve selection state
+        const type = (unit.type || '').toUpperCase();
+        const isSelected = selectedUnitIds.includes(unit.id);
+        const unitIcon = createUnitIcon(type, isSelected);
+        marker.setIcon(unitIcon);
+      }
+    });
+  }, [units, storeRoutineUnits, isSimulation, simulationUnits, selectedUnitIds]);
 
   // Fly to selected incident when changed from list selection
   useEffect(() => {

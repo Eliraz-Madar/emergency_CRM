@@ -45,6 +45,7 @@ export default function Dashboard() {
     moveUnits,
     tickRoutinePatrol,
     setIncidents: setFieldIncidents,
+    incidents: fieldIncidents, // Add this to get incidents from fieldIncidentStore
   } = useFieldIncidentStore();
 
   const { selectedUnitIds } = useDashboardStore();
@@ -52,18 +53,28 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [realtimeService, setRealtimeService] = useState(null);
   const [showEventFeed, setShowEventFeed] = useState(false);
-  const [activeFilter, setActiveFilter] = useState('ALL'); // Filter for incident types: 'ALL', 'FIRE', 'POLICE', 'MEDICAL'
+  const [activeFilter, setActiveFilter] = useState('ALL');
+  const [lastSyncedFieldIncidentsCount, setLastSyncedFieldIncidentsCount] = useState(0);
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
 
-  // Sync dashboard incidents to field incident store
+  // Sync dashboard incidents to field incident store (one-time on load)
   useEffect(() => {
-    if (Array.isArray(incidents) && incidents.length > 0) {
-      console.log('📍 Syncing', incidents.length, 'incidents to fieldIncident store');
+    if (Array.isArray(incidents) && incidents.length > 0 && fieldIncidents.length === 0) {
+      console.log('📍 Initial sync of', incidents.length, 'incidents to fieldIncident store');
       setFieldIncidents(incidents);
     }
-  }, [incidents, setFieldIncidents]);
+  }, [incidents, setFieldIncidents, fieldIncidents.length]);
+
+  // Sync NEW field incidents back to dashboard (for routine events)
+  useEffect(() => {
+    if (Array.isArray(fieldIncidents) && fieldIncidents.length > lastSyncedFieldIncidentsCount) {
+      console.log('🔄 New field incidents detected:', fieldIncidents.length, 'vs', lastSyncedFieldIncidentsCount);
+      setIncidents(fieldIncidents);
+      setLastSyncedFieldIncidentsCount(fieldIncidents.length);
+    }
+  }, [fieldIncidents, setIncidents, lastSyncedFieldIncidentsCount]);
 
   // Sync simulation events to war-room when active
   useEffect(() => {
@@ -184,9 +195,11 @@ export default function Dashboard() {
       if (latestMoveUnits) {
         latestMoveUnits();
       }
-    }, 1000); // Run every second for smooth movement
+    }, 500); // Run every 500ms for realistic movement speed
 
-    return () => clearInterval(movementInterval);
+    return () => {
+      clearInterval(movementInterval);
+    };
   }, []);
 
   const getConnectionStatusColor = () => {

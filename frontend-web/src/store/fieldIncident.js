@@ -243,30 +243,64 @@ export const useFieldIncidentStore = create((set, get) => ({
 
     console.log('🎯 Target location:', targetLat, targetLng);
 
+    const findClosestRouteIndex = (routePoints, lat, lng) => {
+      let bestIndex = 0;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < routePoints.length; i += 1) {
+        const p = routePoints[i];
+        if (!p || p.length < 2) continue;
+        const dLat = p[0] - lat;
+        const dLng = p[1] - lng;
+        const dist = dLat * dLat + dLng * dLng;
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIndex = i;
+        }
+      }
+      return bestIndex;
+    };
+
     // Calculate routes for all dispatched units
     const routePromises = unitIds.map(async (unitId) => {
-      const unit = (state.units || []).find((u) => u.id === unitId);
+      // Get FRESH state to ensure we have the latest unit position
+      const currentState = get();
+      const unit = (currentState.units || []).find((u) => u.id === unitId);
       if (!unit) return { unitId, route: null };
 
-      const unitLat = unit.latitude ?? (Array.isArray(unit.position) ? unit.position[0] : undefined) ?? 31.77;
-      const unitLng = unit.longitude ?? (Array.isArray(unit.position) ? unit.position[1] : undefined) ?? 35.22;
+      // Get CURRENT unit position - must be precise!
+      // Prefer position array (updated by patrol), then fallback to lat/lng fields
+      const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
+      const unitLat = hasPosition && Number.isFinite(unit.position[0])
+        ? unit.position[0]
+        : (Number.isFinite(unit.latitude) ? unit.latitude : unit.location_lat);
+      const unitLng = hasPosition && Number.isFinite(unit.position[1])
+        ? unit.position[1]
+        : (Number.isFinite(unit.longitude) ? unit.longitude : unit.location_lng);
 
-      console.log(`🚗 Unit ${unitId} starting from:`, unitLat, unitLng);
+      console.log(`🚗 Dispatching unit ${unitId} - position: [${unitLat}, ${unitLng}] (hasPosition=${hasPosition})`);
+
+      // Validate coordinates exist and are finite
+      if (!Number.isFinite(unitLat) || !Number.isFinite(unitLng)) {
+        console.warn(`🚗 Unit ${unitId} has invalid coordinates:`, { lat: unitLat, lng: unitLng, unit });
+        return { unitId, route: null };
+      }
+
+      console.log(`🚗 Unit ${unitId} starting from CURRENT position: [${unitLat.toFixed(6)}, ${unitLng.toFixed(6)}]`);
 
       try {
         const apiRoute = await calculateRoute(unitLat, unitLng, targetLat, targetLng);
 
-        // Ensure route starts EXACTLY where unit is now
-        // Always prepend current position to ensure route starts from unit
+        // Ensure route starts from the CLOSEST point to current position
         let route = apiRoute;
         if (apiRoute && apiRoute.length > 0) {
-          // Always add current position as first waypoint
-          route = [[unitLat, unitLng], ...apiRoute];
-          console.log(`📍 Prepended current position to route for ${unitId}`);
+          const closestIndex = findClosestRouteIndex(apiRoute, unitLat, unitLng);
+          const closestPoint = apiRoute[closestIndex];
+          route = apiRoute.slice(closestIndex);
+          console.log(`📍 Route for ${unitId} snapped to closest index ${closestIndex} at [${closestPoint[0].toFixed(6)}, ${closestPoint[1].toFixed(6)}]`);
         }
 
         console.log(`✅ Route calculated for unit ${unitId}:`, route?.length, 'waypoints');
-        return { unitId, route };
+        return { unitId, route, startLat: unitLat, startLng: unitLng };
       } catch (error) {
         console.warn(`Failed to calculate route for unit ${unitId}:`, error);
         return { unitId, route: null };
@@ -283,28 +317,50 @@ export const useFieldIncidentStore = create((set, get) => ({
         const routeData = routes.find((r) => r.unitId === u.id);
         const hasRoute = routeData?.route && Array.isArray(routeData.route) && routeData.route.length > 0;
 
+        // Use the exact dispatch-time position if available (prevents jumping back to stale state)
+        const unitLat = Number.isFinite(routeData?.startLat)
+          ? routeData.startLat
+          : (u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined));
+        const unitLng = Number.isFinite(routeData?.startLng)
+          ? routeData.startLng
+          : (u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined));
+
         console.log(`📍 Unit ${u.id} assigned route with ${routeData?.route?.length ?? 0} waypoints`);
-        console.log(`📍 Unit ${u.id} staying at current position: [${u.latitude}, ${u.longitude}]`);
+        console.log(`📍 Unit ${u.id} KEEPING current position: [${unitLat}, ${unitLng}]`);
         if (hasRoute) {
-          console.log(`📍 Route starts at: [${routeData.route[0][0]}, ${routeData.route[0][1]}]`);
-          console.log(`📍 Route ends at: [${routeData.route[routeData.route.length - 1][0]}, ${routeData.route[routeData.route.length - 1][1]}]`);
+          console.log(`📍 Route starts at: [${routeData.route[0][0].toFixed(6)}, ${routeData.route[0][1].toFixed(6)}]`);
+          console.log(`📍 Route ends at: [${routeData.route[routeData.route.length - 1][0].toFixed(6)}, ${routeData.route[routeData.route.length - 1][1].toFixed(6)}]`);
         }
 
+        // CRITICAL: Only update the dispatch-related fields
+        // Do NOT spread ...u which would overwrite the current position
+        // Instead, explicitly preserve all current fields
         return {
-          ...u,
+          ...u, // Keep current fields
           status: 'EN_ROUTE',
           assignedTo: incidentId,
           route: routeData?.route || null,
           routeIndex: 0,
-          // DON'T update position - keep unit where it is!
+          // Normalize position to the freshest lat/lng so MapView doesn't jump to stale position
+          latitude: Number.isFinite(unitLat) ? unitLat : u.latitude,
+          longitude: Number.isFinite(unitLng) ? unitLng : u.longitude,
+          position: (Number.isFinite(unitLat) && Number.isFinite(unitLng)) ? [unitLat, unitLng] : u.position,
         };
       });
 
       // Also update routineUnits to keep them in sync
-      const updatedRoutineUnits = (state.routineUnits || []).map((u) => {
+      // CRITICAL: Use units as source of truth if routineUnits missing
+      const routineUnitsSource = (state.routineUnits && state.routineUnits.length > 0) ? state.routineUnits : state.units;
+      const updatedRoutineUnits = (routineUnitsSource || []).map((u) => {
         if (!unitIds.includes(u.id)) return u;
 
         const routeData = routes.find((r) => r.unitId === u.id);
+        const unitLat = Number.isFinite(routeData?.startLat)
+          ? routeData.startLat
+          : (u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined));
+        const unitLng = Number.isFinite(routeData?.startLng)
+          ? routeData.startLng
+          : (u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined));
 
         return {
           ...u,
@@ -312,12 +368,19 @@ export const useFieldIncidentStore = create((set, get) => ({
           assignedTo: incidentId,
           route: routeData?.route || null,
           routeIndex: 0,
-          // DON'T update position - keep unit where it is!
+          // Keep unit where it is, but normalize position to freshest lat/lng if available
+          latitude: Number.isFinite(unitLat) ? unitLat : u.latitude,
+          longitude: Number.isFinite(unitLng) ? unitLng : u.longitude,
+          position: (Number.isFinite(unitLat) && Number.isFinite(unitLng)) ? [unitLat, unitLng] : u.position,
         };
       });
 
       // Add dispatched units to incident.assignedUnits immutably
       const dispatchedUnits = updatedUnits.filter((u) => unitIds.includes(u.id));
+
+      console.log(`✅ After dispatch - EN_ROUTE units:`, dispatchedUnits.map(u => `${u.id}@[${u.position[0]},${u.position[1]}]`));
+      console.log(`✅ updatedRoutineUnits EN_ROUTE:`, updatedRoutineUnits.filter(u => unitIds.includes(u.id)).map(u => `${u.id}@[${u.position[0]},${u.position[1]}]`));
+
       const updatedIncidents = (state.incidents || []).map((incident) => {
         if (incident.id !== incidentId) return incident;
         const existingAssigned = Array.isArray(incident.assignedUnits) ? incident.assignedUnits : [];
@@ -352,9 +415,10 @@ export const useFieldIncidentStore = create((set, get) => ({
         return {};
       }
 
-      const baseUnits =
-        Array.isArray(state.routineUnits) && state.routineUnits.length > 0
-          ? state.routineUnits
+      const baseUnits = (Array.isArray(state.routineUnits) && state.routineUnits.length > 0)
+        ? state.routineUnits
+        : (Array.isArray(state.units) && state.units.length > 0)
+          ? state.units
           : createRoutineUnits();
 
       // Use same speed as dispatched units for consistency
@@ -396,6 +460,8 @@ export const useFieldIncidentStore = create((set, get) => ({
           ...unit,
           id: unit.id || `routine-${idx}`,
           position: [clampedLat, clampedLng],
+          latitude: clampedLat,
+          longitude: clampedLng,
           targetPosition: nextTarget,
           lastUpdated: Date.now(),
         };
@@ -413,8 +479,21 @@ export const useFieldIncidentStore = create((set, get) => ({
         return updated || u;
       });
 
+      // CRITICAL: Also merge routineUnits the same way!
+      // Don't overwrite EN_ROUTE units in routineUnits with patrol versions
+      const currentRoutineUnits = state.routineUnits || [];
+      const mergedRoutineUnits = currentRoutineUnits.map(u => {
+        // If unit is dispatched, keep it from current routineUnits (updated by moveUnits)
+        if (u.status === 'EN_ROUTE' || u.status === 'ON_SCENE') {
+          return u;
+        }
+        // Otherwise use the updated patrol version
+        const updated = updatedUnits.find(upd => upd.id === u.id);
+        return updated || u;
+      });
+
       return {
-        routineUnits: updatedUnits,
+        routineUnits: mergedRoutineUnits,
         units: mergedUnits,
       };
     }),
@@ -475,17 +554,55 @@ export const useFieldIncidentStore = create((set, get) => ({
       );
 
       if (isDuplicate) {
+        console.log('⚠️ Duplicate event detected, skipping:', newEvent.title);
         return {}; // Do nothing if duplicate
       }
+
+      console.log('📋 addEvent called with:', { title: newEvent.title, type: newEvent.type, subtype: newEvent.subtype, lat: newEvent.location_lat, lng: newEvent.location_lng });
 
       // Ensure event has a timestamp
       const eventWithTime = {
         ...newEvent,
+        id: newEvent.id || `evt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         created_at: newEvent.created_at || new Date().toISOString(),
       };
 
+      // If this is a routine event (has type and subtype), also add to incidents array
+      let updatedIncidents = state.incidents || [];
+
+      if (newEvent.type && newEvent.subtype) {
+        // This is a routine event - convert it to incident format for map display
+        const newIncident = {
+          id: eventWithTime.id,
+          title: newEvent.title || `${newEvent.type}: ${newEvent.subtype}`,
+          description: newEvent.description,
+          event_type: newEvent.event_type || newEvent.type,
+          status: newEvent.status || 'OPEN',
+          priority: newEvent.priority || 'MED',
+          severity: newEvent.severity || newEvent.priority || 'MED',
+          location_lat: newEvent.location_lat,
+          location_lng: newEvent.location_lng,
+          latitude: newEvent.location_lat, // Alias for compatibility
+          longitude: newEvent.location_lng, // Alias for compatibility
+          created_at: eventWithTime.created_at,
+          assignedUnits: [],
+        };
+
+        // Add to incidents if doesn't already exist
+        if (!updatedIncidents.find(i => i.id === newIncident.id)) {
+          updatedIncidents = [newIncident, ...updatedIncidents].slice(0, 100); // Keep last 100 incidents
+          console.log(`✅ Added routine event to incidents array: ${newIncident.title} at [${newEvent.location_lat}, ${newEvent.location_lng}]`);
+          console.log(`📊 Total incidents now: ${updatedIncidents.length}`);
+        } else {
+          console.log('⚠️ Incident with this ID already exists:', newIncident.id);
+        }
+      } else {
+        console.log('ℹ️ Event has no type/subtype, not adding to incidents');
+      }
+
       return {
         events: [eventWithTime, ...state.events].slice(0, 50), // Keep last 50 events
+        incidents: updatedIncidents,
       };
     }),
 
@@ -495,6 +612,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       if (!Array.isArray(state.units) || state.units.length === 0) {
         return {};
       }
+
+      // moveUnits: Update positions of EN_ROUTE units
 
       let movedCount = 0;
       const updatedUnits = state.units.map((u) => {
@@ -508,39 +627,56 @@ export const useFieldIncidentStore = create((set, get) => ({
           // Check if unit has a route before trying to move it
           if (!u.route || !Array.isArray(u.route) || u.route.length === 0) {
             console.warn(`🚨 Unit ${u.id} is EN_ROUTE but has NO ROUTE! Route value:`, u.route);
+            // Return unit as-is without trying to move
             return u;
           }
 
-          const currentLat = u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined) ?? 31.77;
-          const currentLng = u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined) ?? 35.22;
+          const hasPosition = Array.isArray(u.position) && u.position.length >= 2;
+          const currentLat = hasPosition && Number.isFinite(u.position[0])
+            ? u.position[0]
+            : u.latitude;
+          const currentLng = hasPosition && Number.isFinite(u.position[1])
+            ? u.position[1]
+            : u.longitude;
+
+          // Validate current position
+          if (!Number.isFinite(currentLat) || !Number.isFinite(currentLng)) {
+            console.warn(`Unit ${u.id} has invalid current position: [${currentLat}, ${currentLng}]`);
+            return u;
+          }
 
           const targetLat = target.latitude ?? target.location_lat ?? target.lat;
           const targetLng = target.longitude ?? target.location_lng ?? target.lng;
 
           if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+            console.warn(`Unit ${u.id} target has invalid position: [${targetLat}, ${targetLng}]`);
             return u;
           }
 
           // If unit has a route, follow it
           if (u.route && Array.isArray(u.route) && u.route.length > 0) {
             const currentIndex = u.routeIndex ?? 0;
-            const targetWaypoint = u.route[Math.min(currentIndex + 5, u.route.length - 1)];
-            console.log(`🚀 Moving ${u.id}: index=${currentIndex}/${u.route.length}, from [${currentLat.toFixed(4)}, ${currentLng.toFixed(4)}]`);
-            console.log(`   Target waypoint ahead: [${targetWaypoint[0].toFixed(4)}, ${targetWaypoint[1].toFixed(4)}]`);
+
+            // Log current position in route
+            const currentWaypoint = u.route[Math.min(currentIndex, u.route.length - 1)];
+            const nextWaypoint = u.route[Math.min(currentIndex + 1, u.route.length - 1)];
+
+            console.log(`🚀 Moving ${u.id}: waypoint ${currentIndex}/${u.route.length}`);
+            console.log(`   Current: [${currentWaypoint[0].toFixed(4)}, ${currentWaypoint[1].toFixed(4)}], Next: [${nextWaypoint[0].toFixed(4)}, ${nextWaypoint[1].toFixed(4)}]`);
 
             const nextPos = getNextPositionOnRoute(
               u.route,
               currentLat,
               currentLng,
               currentIndex,
-              0.0005 // Increased speed slightly for smoother movement
+              0.0005 // Movement speed in degrees per tick
             );
 
-            if (nextPos.lat !== null && nextPos.lng !== null) {
+            if (nextPos.lat !== null && nextPos.lng !== null && Number.isFinite(nextPos.lat) && Number.isFinite(nextPos.lng)) {
               const movedDist = Math.sqrt(
                 Math.pow(nextPos.lat - currentLat, 2) + Math.pow(nextPos.lng - currentLng, 2)
               );
-              console.log(`✅ ${u.id} moved to [${nextPos.lat.toFixed(4)}, ${nextPos.lng.toFixed(4)}], index=${nextPos.index}, moved=${movedDist.toFixed(6)}, arrived=${nextPos.arrived}`);
+              console.log(`✅ ${u.id} moved to [${nextPos.lat.toFixed(6)}, ${nextPos.lng.toFixed(6)}], index=${nextPos.index}, moved=${movedDist.toFixed(6)}, arrived=${nextPos.arrived}`);
               movedCount++;
               return {
                 ...u,
@@ -551,55 +687,54 @@ export const useFieldIncidentStore = create((set, get) => ({
                 status: nextPos.arrived ? 'ON_SCENE' : 'EN_ROUTE',
                 lastUpdated: Date.now(),
               };
+            } else {
+              console.warn(`getNextPositionOnRoute returned invalid position for ${u.id}:`, nextPos);
+              // Don't move unit if position is invalid
+              return u;
             }
           } else {
             console.warn(`Unit ${u.id} is EN_ROUTE but has no route!`);
-          }
+            // Fallback to straight line movement if no route
+            const FALLBACK_SPEED = 0.0005;
+            const dLat = targetLat - currentLat;
+            const dLng = targetLng - currentLng;
+            const distanceToTarget = Math.sqrt(dLat * dLat + dLng * dLng);
 
-          // Fallback to straight line movement if no route
-          // Use same speed as route-based movement for consistency
-          const FALLBACK_SPEED = 0.0005; // Same as route movement speed
-          const dLat = targetLat - currentLat;
-          const dLng = targetLng - currentLng;
-          const distanceToTarget = Math.sqrt(dLat * dLat + dLng * dLng);
+            // If very close to target, snap to it
+            if (distanceToTarget < FALLBACK_SPEED * 2) {
+              movedCount++;
+              return {
+                ...u,
+                latitude: targetLat,
+                longitude: targetLng,
+                position: [targetLat, targetLng],
+                status: 'ON_SCENE',
+                lastUpdated: Date.now(),
+              };
+            }
 
-          // If very close to target, snap to it
-          if (distanceToTarget < FALLBACK_SPEED * 2) {
+            // Move at constant speed towards target
+            const ratio = FALLBACK_SPEED / distanceToTarget;
+            const nextLat = currentLat + dLat * ratio;
+            const nextLng = currentLng + dLng * ratio;
+
             movedCount++;
             return {
               ...u,
-              latitude: targetLat,
-              longitude: targetLng,
-              position: [targetLat, targetLng],
-              status: 'ON_SCENE',
+              latitude: nextLat,
+              longitude: nextLng,
+              position: [nextLat, nextLng],
+              status: 'EN_ROUTE',
               lastUpdated: Date.now(),
             };
           }
-
-          // Move at constant speed towards target
-          const ratio = FALLBACK_SPEED / distanceToTarget;
-          const nextLat = currentLat + dLat * ratio;
-          const nextLng = currentLng + dLng * ratio;
-
-          movedCount++;
-          return {
-            ...u,
-            latitude: nextLat,
-            longitude: nextLng,
-            position: [nextLat, nextLng],
-            status: 'EN_ROUTE',
-            lastUpdated: Date.now(),
-          };
         }
 
         return u;
       });
 
-      if (movedCount > 0) {
-        console.log(`🚗 Moved ${movedCount} units this tick`);
-      }
-
-      return { units: updatedUnits };
+      // Update BOTH units and routineUnits to keep them in sync
+      return { units: updatedUnits, routineUnits: updatedUnits };
     }),
 
   // Selectors
