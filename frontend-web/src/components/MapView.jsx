@@ -22,6 +22,8 @@ export function MapView({
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef({});
+  const prevStatusRef = useRef(new Map());
+  const arrivalAnnouncedRef = useRef(new Set());
 
   const unitHtml = (emoji, isSelected = false, color = '#3b82f6') => `
     <div style="
@@ -385,6 +387,46 @@ export function MapView({
         const isSelected = selectedUnitIds.includes(unit.id);
         const unitIcon = createUnitIcon(type, isSelected);
         marker.setIcon(unitIcon);
+      }
+
+      // Arrival notification when unit reaches ON_SCENE
+      if (unit.id) {
+        const prevStatus = prevStatusRef.current.get(unit.id);
+        if (unit.status === 'ON_SCENE' && prevStatus !== 'ON_SCENE') {
+          if (!arrivalAnnouncedRef.current.has(unit.id)) {
+            arrivalAnnouncedRef.current.add(unit.id);
+
+            const unitLabel = unit.name || `Unit ${unit.id}`;
+            const message = `${unitLabel} has arrived at the incident and is beginning operations.`;
+
+            // Popup near the unit
+            if (Number.isFinite(unitLat) && Number.isFinite(unitLng)) {
+              const popup = L.popup({
+                autoPan: false,
+                closeButton: false,
+                className: 'unit-arrival-popup',
+              })
+                .setLatLng([unitLat, unitLng])
+                .setContent(`<div style="font-weight:600; padding:4px 6px;">${message}</div>`);
+              popup.openOn(map);
+              setTimeout(() => {
+                if (map && map.closePopup) {
+                  map.closePopup(popup);
+                }
+              }, 3000);
+            }
+
+            // Voice notification
+            if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+              const utterance = new SpeechSynthesisUtterance(message);
+              utterance.lang = 'en-US';
+              window.speechSynthesis.speak(utterance);
+            }
+          }
+        } else if (unit.status !== 'ON_SCENE') {
+          arrivalAnnouncedRef.current.delete(unit.id);
+        }
+        prevStatusRef.current.set(unit.id, unit.status);
       }
     });
   }, [units, storeRoutineUnits, isSimulation, simulationUnits, selectedUnitIds]);

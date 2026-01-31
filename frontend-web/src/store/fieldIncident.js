@@ -231,6 +231,18 @@ export const useFieldIncidentStore = create((set, get) => ({
       return;
     }
 
+    // Voice notification on dispatch
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      const isPlural = unitIds.length > 1;
+      const friendlyUnitId = (id) => (typeof id === 'string' ? id.replace(/^routine-/, '') : id);
+      const unitLabel = isPlural
+        ? 'Units are en route to the incident.'
+        : `Unit ${friendlyUnitId(unitIds[0])} is en route to the incident.`;
+      const utterance = new SpeechSynthesisUtterance(unitLabel);
+      utterance.lang = 'en-US';
+      window.speechSynthesis.speak(utterance);
+    }
+
     // Find target incident
     const target = (state.incidents || []).find((i) => i.id === incidentId);
     if (!target) {
