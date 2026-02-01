@@ -86,7 +86,7 @@ const DashboardSelector = () => {
         </div>
 
         {/* Info Section */}
-        <div className="selector-info">
+        {/* <div className="selector-info">
           <div className="info-card">
             <h3>Architectural Differences</h3>
             <table className="comparison-table">
@@ -134,7 +134,7 @@ const DashboardSelector = () => {
               </tbody>
             </table>
           </div>
-        </div>
+        </div> */}
 
         {/* Footer */}
         <footer className="selector-footer">

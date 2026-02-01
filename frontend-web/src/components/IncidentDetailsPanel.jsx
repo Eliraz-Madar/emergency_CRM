@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
