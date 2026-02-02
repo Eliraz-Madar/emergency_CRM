@@ -7,10 +7,12 @@ The dashboard is built with a modern frontend-backend architecture optimized for
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Frontend (React + Zustand + Vite)                              │
-│  - Dashboard.jsx (main page)                                    │
+│  - Dashboard.jsx (regional)                                     │
+│  - FieldIncidentDashboard.jsx (field)                           │
 │  - Components (KPI, Filter, List, Map, Details, Events)        │
 │  - Real-time SSE client                                         │
 │  - State management (incidents, units, filters, connection)     │
+│  - Cross-tab sync (BroadcastChannel)                            │
 └─────────────────────────────────────────────────────────────────┘
             ▲
             │ HTTP REST + Server-Sent Events
@@ -39,12 +41,20 @@ Benefits:
 - ✅ Easy to persist/restore if needed
 - ✅ Type-friendly with JSDoc
 
+Field incident state lives in `src/store/fieldIncident.js` and adds:
+- **Mode**: ROUTINE/SIMULATION/LIVE
+- **Field context**: `fieldId` for access scoping
+- **Unit routing**: road routes, on-scene behavior, station parking
+- **Cross-tab sync**: BroadcastChannel updates to keep Field/Regional views aligned
+
 ### Real-Time Connection
 Located in `src/services/realtime.js`:
 - Uses Server-Sent Events (SSE) via EventSource API
 - Auto-reconnects with exponential backoff
 - Handles errors gracefully
 - Falls back to polling if SSE unavailable
+
+Cross-tab sync uses `BroadcastChannel('field-incident-sync')` to push Field state to other tabs.
 
 ### Component Structure
 ```
@@ -81,6 +91,9 @@ Dashboard.jsx (page)
 └── Footer
     └── Attribution + version info
 ```
+
+  ### Routing (Units)
+  Units use OSRM public routing for road paths and nearest-road snapping. The public endpoint can rate-limit or time out; for production, use a private OSRM or another routing provider.
 
 ### Styling
 Located in `src/styles.css` with:
@@ -366,6 +379,7 @@ if not user.can_modify_incident(incident):
 Issues to address for production:
 - ❌ No authentication (anyone can access)
 - ❌ No authorization (anyone can modify any incident)
+- ❌ Field access uses localStorage role stub (demo only)
 - ❌ No rate limiting (vulnerable to DOS)
 - ❌ No HTTPS/TLS
 - ❌ CORS allows all origins

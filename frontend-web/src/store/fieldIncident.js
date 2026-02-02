@@ -7,7 +7,7 @@
 
 import { create } from 'zustand';
 import { SCENARIOS } from '../data/simulationScenarios';
-import { calculateRoute, getNextPositionOnRoute } from '../services/routingService';
+import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
 
 // Major Israeli cities used for unit and event placement (inland-safe centers)
 const ISRAEL_CITIES = [
@@ -35,6 +35,28 @@ const ISRAEL_CITIES = [
   { name: 'Netivot', lat: 31.4203, lng: 34.5952 },
 ];
 
+// Station locations (approximate) for realistic parking
+const STATIONS = {
+  POLICE: [
+    { name: 'Tel Aviv Police HQ', lat: 32.0752, lng: 34.7818 },
+    { name: 'Jerusalem Police HQ', lat: 31.7775, lng: 35.2057 },
+    { name: 'Haifa Police HQ', lat: 32.7947, lng: 34.9893 },
+    { name: 'Beer Sheva Police HQ', lat: 31.2527, lng: 34.7917 },
+  ],
+  FIRE: [
+    { name: 'Tel Aviv Fire Station', lat: 32.0655, lng: 34.7824 },
+    { name: 'Jerusalem Fire Station', lat: 31.7712, lng: 35.2132 },
+    { name: 'Haifa Fire Station', lat: 32.8070, lng: 34.9966 },
+    { name: 'Beer Sheva Fire Station', lat: 31.2439, lng: 34.7970 },
+  ],
+  MEDICAL: [
+    { name: 'Tel Aviv MDA', lat: 32.0692, lng: 34.7841 },
+    { name: 'Jerusalem MDA', lat: 31.7758, lng: 35.2192 },
+    { name: 'Haifa MDA', lat: 32.8033, lng: 34.9878 },
+    { name: 'Beer Sheva MDA', lat: 31.2581, lng: 34.8036 },
+  ],
+};
+
 // Routine event catalog
 const ROUTINE_EVENT_TYPES = {
   FIRE: ['Brush Fire', 'Apartment Fire'],
@@ -43,6 +65,19 @@ const ROUTINE_EVENT_TYPES = {
 };
 
 const randomChoice = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const randomStationForType = (type) => {
+  const list = STATIONS[type] || ISRAEL_CITIES;
+  return randomChoice(list);
+};
+
+const getStoredFieldId = () => {
+  if (typeof window === 'undefined') return 'field-1';
+  try {
+    return localStorage.getItem('fieldId') || 'field-1';
+  } catch {
+    return 'field-1';
+  }
+};
 
 // Convert km + angle to degree offsets at given latitude
 const kmOffsetToDeg = (lat, km, angleRad) => {
@@ -59,11 +94,25 @@ const LAT_MAX = 33.3;
 const LNG_MIN = 34.3;  // Moved east to avoid Mediterranean
 const LNG_MAX = 35.9;
 const PATROL_STEP_DELTA = 0.003; // Visible patrol speed on country map (~300m per tick)
+const PATROL_SPEED = 0.0005; // Same as route movement speed
+const RED_LIGHT_STOP_MS = [3000, 8000];
+const RANDOM_STOP_MS = [8000, 20000];
+const RED_LIGHT_STOP_CHANCE = 0.02; // 2% chance per tick to pause briefly
+const AUTO_RELEASE_MS = [45000, 120000]; // Ambulance waits 45s–120s before release
+const ROUTE_RETRY_MS = [8000, 20000];
+const MAX_ROUTE_REQUESTS_PER_TICK = 5;
+const NEAREST_RETRY_MS = [20000, 45000];
+const MAX_NEAREST_REQUESTS_PER_TICK = 2;
 
 const clampToIsrael = (lat, lng) => {
   const safeLat = Number.isFinite(lat) ? Math.min(Math.max(lat, LAT_MIN), LAT_MAX) : LAT_MIN;
   const safeLng = Number.isFinite(lng) ? Math.min(Math.max(lng, LNG_MIN), LNG_MAX) : LNG_MIN;
   return [safeLat, safeLng];
+};
+
+const randomMsBetween = (minMax) => {
+  const [min, max] = minMax;
+  return Math.floor(min + Math.random() * (max - min));
 };
 
 export const moveUnitRandomly = (lat, lng) => {
@@ -135,6 +184,10 @@ const generateNationwideUnits = (count = 50) => {
 
     const [lat, lng] = clampToIsrael(city.lat + dLat, city.lng + dLng);
 
+    const type = types[Math.floor(Math.random() * types.length)];
+    const station = randomStationForType(type);
+    const isParked = Math.random() < 0.35;
+
     // Separate target waypoint near same or nearby city
     const targetCity = Math.random() > 0.7 ? randomChoice(ISRAEL_CITIES) : city;
     const rKmTarget = 1 + Math.random() * 3;
@@ -145,12 +198,27 @@ const generateNationwideUnits = (count = 50) => {
     return {
       id: `routine-${idx + 1}`,
       name: `Unit ${idx + 1}`,
-      type: types[Math.floor(Math.random() * types.length)],
-      status: 'PATROL',
-      position: [lat, lng],
-      latitude: lat,
-      longitude: lng,
-      targetPosition: [tLat, tLng],
+      type,
+      status: isParked ? 'AVAILABLE' : 'PATROL',
+      homeStation: station,
+      isParked,
+      position: isParked ? [station.lat, station.lng] : [lat, lng],
+      latitude: isParked ? station.lat : lat,
+      longitude: isParked ? station.lng : lng,
+      targetPosition: isParked ? [station.lat, station.lng] : [tLat, tLng],
+      patrolRoute: null,
+      patrolIndex: 0,
+      patrolRoutePending: false,
+      routePending: false,
+      patrolRetryAt: 0,
+      routeRetryAt: 0,
+      onRoad: false,
+      onRoadPending: false,
+      roadRetryAt: 0,
+      homeStationSnap: null,
+      stopUntil: null,
+      onSceneAt: null,
+      autoReleaseAt: null,
       missionIncidentId: null,
       lastUpdated: Date.now() + idx,
     };
@@ -183,9 +251,10 @@ export const useFieldIncidentStore = create((set, get) => ({
   taskStatusFilter: 'all', // all, in-progress, completed
 
   // Simulation state
-  mode: 'ROUTINE', // 'ROUTINE' or 'SIMULATION'
+  mode: 'ROUTINE', // 'ROUTINE', 'SIMULATION', or 'LIVE'
   simulationType: null, // 'FIRE', 'TSUNAMI', 'EARTHQUAKE', 'MISSILE', or null
   simulationStep: 0, // Current step index in the simulation
+  fieldId: getStoredFieldId(), // TODO(auth): load from user profile/session
 
   // Actions
   setMajorIncident: (incident) => set((state) => {
@@ -217,6 +286,31 @@ export const useFieldIncidentStore = create((set, get) => ({
 
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
+  setMode: (mode) => set({ mode }),
+  setFieldId: (fieldId) => set({ fieldId }),
+
+  setLiveIncident: (incident) =>
+    set((state) => {
+      if (!incident) return { mode: 'ROUTINE' };
+
+      const existingIncidents = state.incidents || [];
+      const incidentIndex = existingIncidents.findIndex(i => i.id === incident.id);
+      let updatedIncidents;
+      if (incidentIndex >= 0) {
+        updatedIncidents = [...existingIncidents];
+        updatedIncidents[incidentIndex] = { ...incident };
+      } else {
+        updatedIncidents = [{ ...incident }, ...existingIncidents];
+      }
+
+      return {
+        mode: 'LIVE',
+        majorIncident: incident,
+        incidents: updatedIncidents,
+        loading: false,
+        error: null,
+      };
+    }),
 
   dispatchUnitsToIncident: async (incidentIdOrPayload, unitIdsMaybe) => {
     const state = get();
@@ -243,15 +337,23 @@ export const useFieldIncidentStore = create((set, get) => ({
       window.speechSynthesis.speak(utterance);
     }
 
-    // Find target incident
+    // Find target incident or use payload targetPosition
     const target = (state.incidents || []).find((i) => i.id === incidentId);
-    if (!target) {
-      console.warn('Target incident not found:', incidentId);
+    const payloadTarget = isPayloadObject && Array.isArray(incidentIdOrPayload.targetPosition)
+      ? incidentIdOrPayload.targetPosition
+      : null;
+
+    const targetLat = target
+      ? (target.latitude ?? target.location_lat ?? target.lat)
+      : (payloadTarget ? payloadTarget[0] : undefined);
+    const targetLng = target
+      ? (target.longitude ?? target.location_lng ?? target.lng)
+      : (payloadTarget ? payloadTarget[1] : undefined);
+
+    if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+      console.warn('Target incident not found and no valid targetPosition provided:', incidentId, payloadTarget);
       return;
     }
-
-    const targetLat = target.latitude ?? target.location_lat ?? target.lat;
-    const targetLng = target.longitude ?? target.location_lng ?? target.lng;
 
     console.log('🎯 Target location:', targetLat, targetLng);
 
@@ -300,7 +402,15 @@ export const useFieldIncidentStore = create((set, get) => ({
       console.log(`🚗 Unit ${unitId} starting from CURRENT position: [${unitLat.toFixed(6)}, ${unitLng.toFixed(6)}]`);
 
       try {
-        const apiRoute = await calculateRoute(unitLat, unitLng, targetLat, targetLng);
+        const snappedStart = await getNearestRoadPoint(unitLat, unitLng);
+        const snappedTarget = await getNearestRoadPoint(targetLat, targetLng);
+
+        const startLat = snappedStart ? snappedStart[0] : unitLat;
+        const startLng = snappedStart ? snappedStart[1] : unitLng;
+        const destLat = snappedTarget ? snappedTarget[0] : targetLat;
+        const destLng = snappedTarget ? snappedTarget[1] : targetLng;
+
+        const apiRoute = await calculateRoute(startLat, startLng, destLat, destLng, { allowFallback: false });
 
         // Ensure route starts from the CLOSEST point to current position
         let route = apiRoute;
@@ -312,7 +422,14 @@ export const useFieldIncidentStore = create((set, get) => ({
         }
 
         console.log(`✅ Route calculated for unit ${unitId}:`, route?.length, 'waypoints');
-        return { unitId, route, startLat: unitLat, startLng: unitLng };
+        return {
+          unitId,
+          route,
+          startLat: startLat,
+          startLng: startLng,
+          targetLat: destLat,
+          targetLng: destLng,
+        };
       } catch (error) {
         console.warn(`Failed to calculate route for unit ${unitId}:`, error);
         return { unitId, route: null };
@@ -336,6 +453,12 @@ export const useFieldIncidentStore = create((set, get) => ({
         const unitLng = Number.isFinite(routeData?.startLng)
           ? routeData.startLng
           : (u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined));
+        const assignedTarget = (Number.isFinite(routeData?.targetLat) && Number.isFinite(routeData?.targetLng))
+          ? [routeData.targetLat, routeData.targetLng]
+          : u.assignedTarget;
+
+        const nextLat = hasRoute ? routeData.route[0]?.[0] : unitLat;
+        const nextLng = hasRoute ? routeData.route[0]?.[1] : unitLng;
 
         console.log(`📍 Unit ${u.id} assigned route with ${routeData?.route?.length ?? 0} waypoints`);
         console.log(`📍 Unit ${u.id} KEEPING current position: [${unitLat}, ${unitLng}]`);
@@ -351,12 +474,24 @@ export const useFieldIncidentStore = create((set, get) => ({
           ...u, // Keep current fields
           status: 'EN_ROUTE',
           assignedTo: incidentId,
+          // TODO(auth/field): attach assignedFieldId here to restrict control to the target field
+          assignedTarget,
           route: routeData?.route || null,
           routeIndex: 0,
+          routePending: !hasRoute,
+          routeRetryAt: !hasRoute ? Date.now() + randomMsBetween(ROUTE_RETRY_MS) : 0,
+          patrolRoute: null,
+          patrolIndex: 0,
+          patrolRoutePending: false,
+          patrolRetryAt: 0,
+          onRoad: !!hasRoute,
+          stopUntil: null,
+          onSceneAt: null,
+          autoReleaseAt: null,
           // Normalize position to the freshest lat/lng so MapView doesn't jump to stale position
-          latitude: Number.isFinite(unitLat) ? unitLat : u.latitude,
-          longitude: Number.isFinite(unitLng) ? unitLng : u.longitude,
-          position: (Number.isFinite(unitLat) && Number.isFinite(unitLng)) ? [unitLat, unitLng] : u.position,
+          latitude: Number.isFinite(nextLat) ? nextLat : u.latitude,
+          longitude: Number.isFinite(nextLng) ? nextLng : u.longitude,
+          position: (Number.isFinite(nextLat) && Number.isFinite(nextLng)) ? [nextLat, nextLng] : u.position,
         };
       });
 
@@ -367,23 +502,41 @@ export const useFieldIncidentStore = create((set, get) => ({
         if (!unitIds.includes(u.id)) return u;
 
         const routeData = routes.find((r) => r.unitId === u.id);
+        const hasRoute = routeData?.route && Array.isArray(routeData.route) && routeData.route.length > 0;
         const unitLat = Number.isFinite(routeData?.startLat)
           ? routeData.startLat
           : (u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined));
         const unitLng = Number.isFinite(routeData?.startLng)
           ? routeData.startLng
           : (u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined));
+        const assignedTarget = (Number.isFinite(routeData?.targetLat) && Number.isFinite(routeData?.targetLng))
+          ? [routeData.targetLat, routeData.targetLng]
+          : u.assignedTarget;
+
+        const nextLat = hasRoute ? routeData.route[0]?.[0] : unitLat;
+        const nextLng = hasRoute ? routeData.route[0]?.[1] : unitLng;
 
         return {
           ...u,
           status: 'EN_ROUTE',
           assignedTo: incidentId,
+          assignedTarget,
           route: routeData?.route || null,
           routeIndex: 0,
+          routePending: !hasRoute,
+          routeRetryAt: !hasRoute ? Date.now() + randomMsBetween(ROUTE_RETRY_MS) : 0,
+          patrolRoute: null,
+          patrolIndex: 0,
+          patrolRoutePending: false,
+          patrolRetryAt: 0,
+          onRoad: !!hasRoute,
+          stopUntil: null,
+          onSceneAt: null,
+          autoReleaseAt: null,
           // Keep unit where it is, but normalize position to freshest lat/lng if available
-          latitude: Number.isFinite(unitLat) ? unitLat : u.latitude,
-          longitude: Number.isFinite(unitLng) ? unitLng : u.longitude,
-          position: (Number.isFinite(unitLat) && Number.isFinite(unitLng)) ? [unitLat, unitLng] : u.position,
+          latitude: Number.isFinite(nextLat) ? nextLat : u.latitude,
+          longitude: Number.isFinite(nextLng) ? nextLng : u.longitude,
+          position: (Number.isFinite(nextLat) && Number.isFinite(nextLng)) ? [nextLat, nextLng] : u.position,
         };
       });
 
@@ -421,94 +574,328 @@ export const useFieldIncidentStore = create((set, get) => ({
     });
   },
 
-  tickRoutinePatrol: () =>
-    set((state) => {
-      if (state.mode !== 'ROUTINE') {
-        return {};
+  tickRoutinePatrol: () => {
+    const state = get();
+    if (state.mode !== 'ROUTINE') {
+      return;
+    }
+
+    const now = Date.now();
+    const baseUnits = (Array.isArray(state.routineUnits) && state.routineUnits.length > 0)
+      ? state.routineUnits
+      : (Array.isArray(state.units) && state.units.length > 0)
+        ? state.units
+        : createRoutineUnits();
+
+    const routeRequests = [];
+    const nearestRequests = [];
+
+    const updatedUnits = baseUnits.map((unit, idx) => {
+      // Skip units that are EN_ROUTE or ON_SCENE - they are handled by moveUnits
+      if (unit.status === 'EN_ROUTE' || unit.status === 'ON_SCENE') {
+        return unit;
       }
 
-      const baseUnits = (Array.isArray(state.routineUnits) && state.routineUnits.length > 0)
-        ? state.routineUnits
-        : (Array.isArray(state.units) && state.units.length > 0)
-          ? state.units
-          : createRoutineUnits();
+      const hasPos = Array.isArray(unit.position) && unit.position.length >= 2;
+      const [currentLat, currentLng] = hasPos ? unit.position : randomLandPoint();
 
-      // Use same speed as dispatched units for consistency
-      const PATROL_SPEED = 0.0005; // Same as route movement speed
-
-      const updatedUnits = baseUnits.map((unit, idx) => {
-        // Skip units that are EN_ROUTE or ON_SCENE - they should be handled by moveUnits
-        if (unit.status === 'EN_ROUTE' || unit.status === 'ON_SCENE') {
-          return unit;
+      // Keep parked units at their home station (realistic idle)
+      if (unit.isParked) {
+        const station = unit.homeStation || randomStationForType(unit.type);
+        const parkedLat = Array.isArray(unit.homeStationSnap) ? unit.homeStationSnap[0] : station.lat;
+        const parkedLng = Array.isArray(unit.homeStationSnap) ? unit.homeStationSnap[1] : station.lng;
+        const shouldDepart = Math.random() < 0.02; // occasional patrol departure
+        if (shouldDepart) {
+          const nextTarget = randomLandPoint();
+          return {
+            ...unit,
+            id: unit.id || `routine-${idx}`,
+            isParked: false,
+            status: 'PATROL',
+            targetPosition: nextTarget,
+            patrolRoute: null,
+            patrolIndex: 0,
+            patrolRoutePending: false,
+            patrolRetryAt: now + randomMsBetween(ROUTE_RETRY_MS),
+            stopUntil: null,
+            lastUpdated: now,
+          };
         }
 
-        const hasPos = Array.isArray(unit.position) && unit.position.length >= 2;
-        const hasTarget = Array.isArray(unit.targetPosition) && unit.targetPosition.length >= 2;
-
-        const [currentLat, currentLng] = hasPos ? unit.position : randomLandPoint();
-        const [targetLat, targetLng] = hasTarget ? unit.targetPosition : randomLandPoint();
-
-        const dLat = targetLat - currentLat;
-        const dLng = targetLng - currentLng;
-        const dist = Math.sqrt(dLat * dLat + dLng * dLng);
-
-        let nextLat = currentLat;
-        let nextLng = currentLng;
-        let nextTarget = [targetLat, targetLng];
-
-        if (dist < PATROL_SPEED * 2 || !Number.isFinite(dist)) {
-          // Arrived: pick a new waypoint
-          nextTarget = randomLandPoint();
-        } else {
-          // Move at constant speed towards target
-          const ratio = PATROL_SPEED / dist;
-          nextLat = currentLat + dLat * ratio;
-          nextLng = currentLng + dLng * ratio;
+        if (!unit.onRoad) {
+          if (!unit.onRoadPending && (!Number.isFinite(unit.roadRetryAt) || now >= unit.roadRetryAt)) {
+            if (nearestRequests.length < MAX_NEAREST_REQUESTS_PER_TICK) {
+              nearestRequests.push({
+                unitId: unit.id || `routine-${idx}`,
+                lat: station.lat,
+                lng: station.lng,
+              });
+            }
+          }
+          return {
+            ...unit,
+            id: unit.id || `routine-${idx}`,
+            position: [parkedLat, parkedLng],
+            latitude: parkedLat,
+            longitude: parkedLng,
+            targetPosition: [parkedLat, parkedLng],
+            status: 'AVAILABLE',
+            onRoadPending: true,
+            roadRetryAt: now + randomMsBetween(NEAREST_RETRY_MS),
+            lastUpdated: now,
+          };
         }
-
-        const [clampedLat, clampedLng] = clampToIsrael(nextLat, nextLng);
 
         return {
           ...unit,
           id: unit.id || `routine-${idx}`,
-          position: [clampedLat, clampedLng],
-          latitude: clampedLat,
-          longitude: clampedLng,
-          targetPosition: nextTarget,
-          lastUpdated: Date.now(),
+          position: [parkedLat, parkedLng],
+          latitude: parkedLat,
+          longitude: parkedLng,
+          targetPosition: [parkedLat, parkedLng],
+          status: 'AVAILABLE',
+          onRoad: true,
+          onRoadPending: false,
+          roadRetryAt: 0,
+          lastUpdated: now,
         };
-      });
+      }
 
-      // Merge: keep EN_ROUTE/ON_SCENE units from current state, update patrol units
-      const currentUnits = state.units || [];
-      const mergedUnits = currentUnits.map(u => {
-        // If unit is dispatched, keep it as-is (it's updated by moveUnits)
-        if (u.status === 'EN_ROUTE' || u.status === 'ON_SCENE') {
-          return u;
+      // If unit is off-road, snap to nearest road before moving
+      if (!unit.onRoad) {
+        if (!unit.onRoadPending && (!Number.isFinite(unit.roadRetryAt) || now >= unit.roadRetryAt)) {
+          if (nearestRequests.length < MAX_NEAREST_REQUESTS_PER_TICK) {
+            nearestRequests.push({
+              unitId: unit.id || `routine-${idx}`,
+              lat: currentLat,
+              lng: currentLng,
+            });
+          }
         }
-        // Otherwise use the updated patrol version
-        const updated = updatedUnits.find(upd => upd.id === u.id);
-        return updated || u;
-      });
 
-      // CRITICAL: Also merge routineUnits the same way!
-      // Don't overwrite EN_ROUTE units in routineUnits with patrol versions
-      const currentRoutineUnits = state.routineUnits || [];
-      const mergedRoutineUnits = currentRoutineUnits.map(u => {
-        // If unit is dispatched, keep it from current routineUnits (updated by moveUnits)
-        if (u.status === 'EN_ROUTE' || u.status === 'ON_SCENE') {
-          return u;
+        return {
+          ...unit,
+          id: unit.id || `routine-${idx}`,
+          position: [currentLat, currentLng],
+          latitude: currentLat,
+          longitude: currentLng,
+          onRoadPending: true,
+          roadRetryAt: now + randomMsBetween(NEAREST_RETRY_MS),
+          lastUpdated: now,
+        };
+      }
+
+      // Handle stops (red lights / random pauses)
+      if (Number.isFinite(unit.stopUntil) && unit.stopUntil > now) {
+        return {
+          ...unit,
+          id: unit.id || `routine-${idx}`,
+          position: [currentLat, currentLng],
+          latitude: currentLat,
+          longitude: currentLng,
+          lastUpdated: now,
+        };
+      }
+
+      // If there is a patrol route, move along it
+      if (unit.patrolRoute && Array.isArray(unit.patrolRoute) && unit.patrolRoute.length > 0) {
+        const nextPos = getNextPositionOnRoute(
+          unit.patrolRoute,
+          currentLat,
+          currentLng,
+          unit.patrolIndex ?? 0,
+          PATROL_SPEED
+        );
+
+        if (nextPos.lat !== null && nextPos.lng !== null && Number.isFinite(nextPos.lat) && Number.isFinite(nextPos.lng)) {
+          const [clampedLat, clampedLng] = clampToIsrael(nextPos.lat, nextPos.lng);
+
+          // Random short stop (red light)
+          const shouldStop = Math.random() < RED_LIGHT_STOP_CHANCE;
+          const stopUntil = shouldStop ? now + randomMsBetween(RED_LIGHT_STOP_MS) : null;
+
+          if (nextPos.arrived) {
+            const nextTarget = randomLandPoint();
+            const shouldPark = Math.random() < 0.25;
+            const station = unit.homeStation || randomStationForType(unit.type);
+            return {
+              ...unit,
+              id: unit.id || `routine-${idx}`,
+              position: shouldPark ? [station.lat, station.lng] : [clampedLat, clampedLng],
+              latitude: shouldPark ? station.lat : clampedLat,
+              longitude: shouldPark ? station.lng : clampedLng,
+              patrolRoute: null,
+              patrolIndex: 0,
+              patrolRoutePending: false,
+              patrolRetryAt: now + randomMsBetween(ROUTE_RETRY_MS),
+              onRoad: true,
+              onRoadPending: false,
+              roadRetryAt: 0,
+              targetPosition: shouldPark ? [station.lat, station.lng] : nextTarget,
+              isParked: shouldPark,
+              status: shouldPark ? 'AVAILABLE' : 'PATROL',
+              stopUntil: shouldPark ? null : (now + randomMsBetween(RANDOM_STOP_MS)),
+              lastUpdated: now,
+            };
+          }
+
+          return {
+            ...unit,
+            id: unit.id || `routine-${idx}`,
+            position: [clampedLat, clampedLng],
+            latitude: clampedLat,
+            longitude: clampedLng,
+            patrolIndex: nextPos.index,
+            onRoad: true,
+            onRoadPending: false,
+            roadRetryAt: 0,
+            stopUntil,
+            lastUpdated: now,
+          };
         }
-        // Otherwise use the updated patrol version
-        const updated = updatedUnits.find(upd => upd.id === u.id);
-        return updated || u;
-      });
+      }
+
+      // No patrol route yet: pick/keep a target and request a route
+      const hasTarget = Array.isArray(unit.targetPosition) && unit.targetPosition.length >= 2;
+      const [targetLat, targetLng] = hasTarget ? unit.targetPosition : randomLandPoint();
+
+      if (!unit.patrolRoutePending && (!Number.isFinite(unit.patrolRetryAt) || now >= unit.patrolRetryAt)) {
+        if (routeRequests.length < MAX_ROUTE_REQUESTS_PER_TICK) {
+          routeRequests.push({
+            unitId: unit.id || `routine-${idx}`,
+            fromLat: currentLat,
+            fromLng: currentLng,
+            toLat: targetLat,
+            toLng: targetLng,
+          });
+        }
+      }
 
       return {
-        routineUnits: mergedRoutineUnits,
-        units: mergedUnits,
+        ...unit,
+        id: unit.id || `routine-${idx}`,
+        position: [currentLat, currentLng],
+        latitude: currentLat,
+        longitude: currentLng,
+        targetPosition: [targetLat, targetLng],
+        patrolRoutePending: true,
+        patrolRetryAt: now + randomMsBetween(ROUTE_RETRY_MS),
+        onRoad: unit.onRoad,
+        onRoadPending: unit.onRoadPending,
+        roadRetryAt: unit.roadRetryAt,
+        lastUpdated: now,
       };
-    }),
+    });
+
+    // Merge: keep EN_ROUTE/ON_SCENE units from current state, update patrol units
+    set((state) => {
+      const currentUnits = state.units || [];
+      const mergedUnits = currentUnits.map(u => {
+        if (u.status === 'EN_ROUTE' || u.status === 'ON_SCENE') {
+          return u;
+        }
+        const updated = updatedUnits.find(upd => upd.id === u.id);
+        return updated || u;
+      });
+
+      const currentRoutineUnits = state.routineUnits || [];
+      const mergedRoutineUnits = currentRoutineUnits.map(u => {
+        if (u.status === 'EN_ROUTE' || u.status === 'ON_SCENE') {
+          return u;
+        }
+        const updated = updatedUnits.find(upd => upd.id === u.id);
+        return updated || u;
+      });
+
+      return { routineUnits: mergedRoutineUnits, units: mergedUnits };
+    });
+
+    // Async: calculate patrol routes and set them when ready
+    if (routeRequests.length > 0) {
+      Promise.all(
+        routeRequests.map(async (req) => {
+          try {
+            const route = await calculateRoute(req.fromLat, req.fromLng, req.toLat, req.toLng, { allowFallback: false });
+            return { ...req, route };
+          } catch {
+            return { ...req, route: null };
+          }
+        })
+      ).then((routes) => {
+        if (!routes || routes.length === 0) return;
+        set((state) => {
+          const updated = (list) => (list || []).map((u) => {
+            const routeData = routes.find(r => r.unitId === u.id);
+            if (!routeData) return u;
+            const hasRoute = Array.isArray(routeData.route) && routeData.route.length > 0;
+            const nextLat = hasRoute ? routeData.route[0]?.[0] : (u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined));
+            const nextLng = hasRoute ? routeData.route[0]?.[1] : (u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined));
+            return {
+              ...u,
+              patrolRoute: hasRoute ? routeData.route : null,
+              patrolIndex: 0,
+              patrolRoutePending: false,
+              onRoad: !!hasRoute,
+              latitude: Number.isFinite(nextLat) ? nextLat : u.latitude,
+              longitude: Number.isFinite(nextLng) ? nextLng : u.longitude,
+              position: (Number.isFinite(nextLat) && Number.isFinite(nextLng)) ? [nextLat, nextLng] : u.position,
+            };
+          });
+
+          return {
+            units: updated(state.units),
+            routineUnits: updated(state.routineUnits),
+          };
+        });
+      });
+    }
+
+    if (nearestRequests.length > 0) {
+      Promise.all(
+        nearestRequests.map(async (req) => {
+          const snapped = await getNearestRoadPoint(req.lat, req.lng);
+          return { ...req, snapped };
+        })
+      ).then((snaps) => {
+        if (!snaps || snaps.length === 0) return;
+        set((state) => {
+          const updated = (list) => (list || []).map((u) => {
+            const snap = snaps.find(s => s.unitId === u.id);
+            if (!snap) return u;
+            const hasSnap = Array.isArray(snap.snapped) && snap.snapped.length === 2;
+            if (!hasSnap) {
+              return {
+                ...u,
+                onRoad: false,
+                onRoadPending: false,
+                roadRetryAt: Date.now() + randomMsBetween(NEAREST_RETRY_MS),
+              };
+            }
+
+            const [sLat, sLng] = snap.snapped;
+            const stillParked = !!u.isParked;
+            return {
+              ...u,
+              onRoad: true,
+              onRoadPending: false,
+              roadRetryAt: 0,
+              homeStationSnap: stillParked ? [sLat, sLng] : u.homeStationSnap,
+              isParked: stillParked,
+              status: stillParked ? 'AVAILABLE' : 'PATROL',
+              position: [sLat, sLng],
+              latitude: sLat,
+              longitude: sLng,
+            };
+          });
+
+          return {
+            units: updated(state.units),
+            routineUnits: updated(state.routineUnits),
+          };
+        });
+      });
+    }
+  },
 
   // Update incident data
   updateMajorIncident: (updates) =>
@@ -557,6 +944,45 @@ export const useFieldIncidentStore = create((set, get) => ({
         ? { ...state.majorIncident, priority: newPriority }
         : state.majorIncident,
     })),
+
+  releaseUnits: (unitIds = []) =>
+    set((state) => {
+      const releaseSet = new Set(unitIds);
+
+      const releaseUnit = (u) => {
+        if (!releaseSet.has(u.id)) return u;
+        const [nextLat, nextLng] = randomLandPoint();
+        return {
+          ...u,
+          status: 'PATROL',
+          assignedTo: null,
+          route: null,
+          routeIndex: 0,
+          routePending: false,
+          routeRetryAt: 0,
+          patrolRoute: null,
+          patrolIndex: 0,
+          patrolRoutePending: true,
+          patrolRetryAt: Date.now() + randomMsBetween(ROUTE_RETRY_MS),
+          onRoad: false,
+          onRoadPending: false,
+          roadRetryAt: Date.now() + randomMsBetween(NEAREST_RETRY_MS),
+          stopUntil: null,
+          onSceneAt: null,
+          autoReleaseAt: null,
+          position: [nextLat, nextLng],
+          latitude: nextLat,
+          longitude: nextLng,
+          targetPosition: randomLandPoint(),
+          lastUpdated: Date.now(),
+        };
+      };
+
+      return {
+        units: (state.units || []).map(releaseUnit),
+        routineUnits: (state.routineUnits || []).map(releaseUnit),
+      };
+    }),
 
   addEvent: (newEvent) =>
     set((state) => {
@@ -619,135 +1045,243 @@ export const useFieldIncidentStore = create((set, get) => ({
     }),
 
   // Movement Engine - called every tick to update unit positions
-  moveUnits: () =>
-    set((state) => {
-      if (!Array.isArray(state.units) || state.units.length === 0) {
-        return {};
+  moveUnits: () => {
+    const state = get();
+    if (!Array.isArray(state.units) || state.units.length === 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const routeRequests = [];
+    const nearestRequests = [];
+
+    const updatedUnits = state.units.map((u) => {
+      // Ambulance auto-release logic when ON_SCENE
+      if (u.status === 'ON_SCENE' && u.type === 'MEDICAL') {
+        const autoReleaseAt = Number.isFinite(u.autoReleaseAt)
+          ? u.autoReleaseAt
+          : now + randomMsBetween(AUTO_RELEASE_MS);
+
+        if (now >= autoReleaseAt) {
+          const [nextLat, nextLng] = randomLandPoint();
+          return {
+            ...u,
+            status: 'PATROL',
+            assignedTo: null,
+            route: null,
+            routeIndex: 0,
+            routePending: false,
+            routeRetryAt: 0,
+            patrolRoute: null,
+            patrolIndex: 0,
+            patrolRoutePending: true,
+            patrolRetryAt: now + randomMsBetween(ROUTE_RETRY_MS),
+            onRoad: false,
+            onRoadPending: false,
+            roadRetryAt: now + randomMsBetween(NEAREST_RETRY_MS),
+            stopUntil: null,
+            onSceneAt: null,
+            autoReleaseAt: null,
+            position: [nextLat, nextLng],
+            latitude: nextLat,
+            longitude: nextLng,
+            targetPosition: randomLandPoint(),
+            lastUpdated: now,
+          };
+        }
+
+        return {
+          ...u,
+          onSceneAt: u.onSceneAt || now,
+          autoReleaseAt,
+        };
       }
 
-      // moveUnits: Update positions of EN_ROUTE units
+      if (u.status === 'EN_ROUTE' && u.assignedTo) {
+        const target = (state.incidents || []).find((i) => i.id === u.assignedTo);
+        if (!target) {
+          console.warn(`Unit ${u.id} assigned to non-existent incident ${u.assignedTo}`);
+          return u;
+        }
 
-      let movedCount = 0;
-      const updatedUnits = state.units.map((u) => {
-        if (u.status === 'EN_ROUTE' && u.assignedTo) {
-          const target = (state.incidents || []).find((i) => i.id === u.assignedTo);
-          if (!target) {
-            console.warn(`Unit ${u.id} assigned to non-existent incident ${u.assignedTo}`);
-            return u;
-          }
+        const hasPosition = Array.isArray(u.position) && u.position.length >= 2;
+        const currentLat = hasPosition && Number.isFinite(u.position[0])
+          ? u.position[0]
+          : u.latitude;
+        const currentLng = hasPosition && Number.isFinite(u.position[1])
+          ? u.position[1]
+          : u.longitude;
 
-          // Check if unit has a route before trying to move it
-          if (!u.route || !Array.isArray(u.route) || u.route.length === 0) {
-            console.warn(`🚨 Unit ${u.id} is EN_ROUTE but has NO ROUTE! Route value:`, u.route);
-            // Return unit as-is without trying to move
-            return u;
-          }
+        const targetLat = Array.isArray(u.assignedTarget)
+          ? u.assignedTarget[0]
+          : (target.latitude ?? target.location_lat ?? target.lat);
+        const targetLng = Array.isArray(u.assignedTarget)
+          ? u.assignedTarget[1]
+          : (target.longitude ?? target.location_lng ?? target.lng);
 
-          const hasPosition = Array.isArray(u.position) && u.position.length >= 2;
-          const currentLat = hasPosition && Number.isFinite(u.position[0])
-            ? u.position[0]
-            : u.latitude;
-          const currentLng = hasPosition && Number.isFinite(u.position[1])
-            ? u.position[1]
-            : u.longitude;
+        if (!Number.isFinite(currentLat) || !Number.isFinite(currentLng)) {
+          console.warn(`Unit ${u.id} has invalid current position: [${currentLat}, ${currentLng}]`);
+          return u;
+        }
 
-          // Validate current position
-          if (!Number.isFinite(currentLat) || !Number.isFinite(currentLng)) {
-            console.warn(`Unit ${u.id} has invalid current position: [${currentLat}, ${currentLng}]`);
-            return u;
-          }
+        if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+          console.warn(`Unit ${u.id} target has invalid position: [${targetLat}, ${targetLng}]`);
+          return u;
+        }
 
-          const targetLat = target.latitude ?? target.location_lat ?? target.lat;
-          const targetLng = target.longitude ?? target.location_lng ?? target.lng;
-
-          if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
-            console.warn(`Unit ${u.id} target has invalid position: [${targetLat}, ${targetLng}]`);
-            return u;
-          }
-
-          // If unit has a route, follow it
-          if (u.route && Array.isArray(u.route) && u.route.length > 0) {
-            const currentIndex = u.routeIndex ?? 0;
-
-            // Log current position in route
-            const currentWaypoint = u.route[Math.min(currentIndex, u.route.length - 1)];
-            const nextWaypoint = u.route[Math.min(currentIndex + 1, u.route.length - 1)];
-
-            console.log(`🚀 Moving ${u.id}: waypoint ${currentIndex}/${u.route.length}`);
-            console.log(`   Current: [${currentWaypoint[0].toFixed(4)}, ${currentWaypoint[1].toFixed(4)}], Next: [${nextWaypoint[0].toFixed(4)}, ${nextWaypoint[1].toFixed(4)}]`);
-
-            const nextPos = getNextPositionOnRoute(
-              u.route,
-              currentLat,
-              currentLng,
-              currentIndex,
-              0.0005 // Movement speed in degrees per tick
-            );
-
-            if (nextPos.lat !== null && nextPos.lng !== null && Number.isFinite(nextPos.lat) && Number.isFinite(nextPos.lng)) {
-              const movedDist = Math.sqrt(
-                Math.pow(nextPos.lat - currentLat, 2) + Math.pow(nextPos.lng - currentLng, 2)
-              );
-              console.log(`✅ ${u.id} moved to [${nextPos.lat.toFixed(6)}, ${nextPos.lng.toFixed(6)}], index=${nextPos.index}, moved=${movedDist.toFixed(6)}, arrived=${nextPos.arrived}`);
-              movedCount++;
-              return {
-                ...u,
-                latitude: nextPos.lat,
-                longitude: nextPos.lng,
-                position: [nextPos.lat, nextPos.lng],
-                routeIndex: nextPos.index,
-                status: nextPos.arrived ? 'ON_SCENE' : 'EN_ROUTE',
-                lastUpdated: Date.now(),
-              };
-            } else {
-              console.warn(`getNextPositionOnRoute returned invalid position for ${u.id}:`, nextPos);
-              // Don't move unit if position is invalid
-              return u;
+        // If unit is off-road, snap to nearest road before routing
+        if (!u.onRoad) {
+          if (!u.onRoadPending && (!Number.isFinite(u.roadRetryAt) || now >= u.roadRetryAt)) {
+            if (nearestRequests.length < MAX_NEAREST_REQUESTS_PER_TICK) {
+              nearestRequests.push({
+                unitId: u.id,
+                lat: currentLat,
+                lng: currentLng,
+              });
             }
-          } else {
-            console.warn(`Unit ${u.id} is EN_ROUTE but has no route!`);
-            // Fallback to straight line movement if no route
-            const FALLBACK_SPEED = 0.0005;
-            const dLat = targetLat - currentLat;
-            const dLng = targetLng - currentLng;
-            const distanceToTarget = Math.sqrt(dLat * dLat + dLng * dLng);
-
-            // If very close to target, snap to it
-            if (distanceToTarget < FALLBACK_SPEED * 2) {
-              movedCount++;
-              return {
-                ...u,
-                latitude: targetLat,
-                longitude: targetLng,
-                position: [targetLat, targetLng],
-                status: 'ON_SCENE',
-                lastUpdated: Date.now(),
-              };
-            }
-
-            // Move at constant speed towards target
-            const ratio = FALLBACK_SPEED / distanceToTarget;
-            const nextLat = currentLat + dLat * ratio;
-            const nextLng = currentLng + dLng * ratio;
-
-            movedCount++;
-            return {
-              ...u,
-              latitude: nextLat,
-              longitude: nextLng,
-              position: [nextLat, nextLng],
-              status: 'EN_ROUTE',
-              lastUpdated: Date.now(),
-            };
           }
+          return {
+            ...u,
+            onRoadPending: true,
+            roadRetryAt: now + randomMsBetween(NEAREST_RETRY_MS),
+          };
+        }
+
+        // If unit has no route, request one (road-only)
+        if (!u.route || !Array.isArray(u.route) || u.route.length === 0) {
+          if (!u.routePending && (!Number.isFinite(u.routeRetryAt) || now >= u.routeRetryAt)) {
+            if (routeRequests.length < MAX_ROUTE_REQUESTS_PER_TICK) {
+              routeRequests.push({
+                unitId: u.id,
+                fromLat: currentLat,
+                fromLng: currentLng,
+                toLat: targetLat,
+                toLng: targetLng,
+              });
+            }
+          }
+          return { ...u, routePending: true, routeRetryAt: now + randomMsBetween(ROUTE_RETRY_MS) };
+        }
+
+        const currentIndex = u.routeIndex ?? 0;
+        const nextPos = getNextPositionOnRoute(
+          u.route,
+          currentLat,
+          currentLng,
+          currentIndex,
+          PATROL_SPEED
+        );
+
+        if (nextPos.lat !== null && nextPos.lng !== null && Number.isFinite(nextPos.lat) && Number.isFinite(nextPos.lng)) {
+          const arrived = nextPos.arrived;
+          return {
+            ...u,
+            latitude: nextPos.lat,
+            longitude: nextPos.lng,
+            position: [nextPos.lat, nextPos.lng],
+            routeIndex: nextPos.index,
+            status: arrived ? 'ON_SCENE' : 'EN_ROUTE',
+            onSceneAt: arrived ? (u.onSceneAt || now) : null,
+            autoReleaseAt: arrived && u.type === 'MEDICAL'
+              ? (u.autoReleaseAt || now + randomMsBetween(AUTO_RELEASE_MS))
+              : u.autoReleaseAt,
+            onRoad: true,
+            lastUpdated: now,
+          };
         }
 
         return u;
-      });
+      }
 
-      // Update BOTH units and routineUnits to keep them in sync
-      return { units: updatedUnits, routineUnits: updatedUnits };
-    }),
+      return u;
+    });
+
+    // Update BOTH units and routineUnits to keep them in sync
+    set({ units: updatedUnits, routineUnits: updatedUnits });
+
+    // Async: calculate missing EN_ROUTE routes
+    if (routeRequests.length > 0) {
+      Promise.all(
+        routeRequests.map(async (req) => {
+          try {
+            const route = await calculateRoute(req.fromLat, req.fromLng, req.toLat, req.toLng, { allowFallback: false });
+            return { ...req, route };
+          } catch {
+            return { ...req, route: null };
+          }
+        })
+      ).then((routes) => {
+        if (!routes || routes.length === 0) return;
+        set((state) => {
+          const updated = (list) => (list || []).map((u) => {
+            const routeData = routes.find(r => r.unitId === u.id);
+            if (!routeData) return u;
+            const hasRoute = Array.isArray(routeData.route) && routeData.route.length > 0;
+            const nextLat = hasRoute ? routeData.route[0]?.[0] : (u.latitude ?? (Array.isArray(u.position) ? u.position[0] : undefined));
+            const nextLng = hasRoute ? routeData.route[0]?.[1] : (u.longitude ?? (Array.isArray(u.position) ? u.position[1] : undefined));
+            return {
+              ...u,
+              route: hasRoute ? routeData.route : null,
+              routeIndex: 0,
+              routePending: false,
+              routeRetryAt: hasRoute ? 0 : (u.routeRetryAt || now + randomMsBetween(ROUTE_RETRY_MS)),
+              onRoad: !!hasRoute,
+              latitude: Number.isFinite(nextLat) ? nextLat : u.latitude,
+              longitude: Number.isFinite(nextLng) ? nextLng : u.longitude,
+              position: (Number.isFinite(nextLat) && Number.isFinite(nextLng)) ? [nextLat, nextLng] : u.position,
+            };
+          });
+
+          return {
+            units: updated(state.units),
+            routineUnits: updated(state.routineUnits),
+          };
+        });
+      });
+    }
+
+    if (nearestRequests.length > 0) {
+      Promise.all(
+        nearestRequests.map(async (req) => {
+          const snapped = await getNearestRoadPoint(req.lat, req.lng);
+          return { ...req, snapped };
+        })
+      ).then((snaps) => {
+        if (!snaps || snaps.length === 0) return;
+        set((state) => {
+          const updated = (list) => (list || []).map((u) => {
+            const snap = snaps.find(s => s.unitId === u.id);
+            if (!snap) return u;
+            const hasSnap = Array.isArray(snap.snapped) && snap.snapped.length === 2;
+            if (!hasSnap) {
+              return {
+                ...u,
+                onRoad: false,
+                onRoadPending: false,
+                roadRetryAt: Date.now() + randomMsBetween(NEAREST_RETRY_MS),
+              };
+            }
+
+            const [sLat, sLng] = snap.snapped;
+            return {
+              ...u,
+              onRoad: true,
+              onRoadPending: false,
+              roadRetryAt: 0,
+              position: [sLat, sLng],
+              latitude: sLat,
+              longitude: sLng,
+            };
+          });
+
+          return {
+            units: updated(state.units),
+            routineUnits: updated(state.routineUnits),
+          };
+        });
+      });
+    }
+  },
 
   // Selectors
   getFilteredTaskGroups: () => {
@@ -1173,3 +1707,37 @@ export const useFieldIncidentStore = create((set, get) => ({
     });
   },
 }));
+
+// Cross-tab sync (Field <-> War-Room)
+if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+  const fieldSyncChannel = new BroadcastChannel('field-incident-sync');
+  const tabId = `tab-${Math.random().toString(36).slice(2)}`;
+  let applyingRemote = false;
+
+  fieldSyncChannel.onmessage = (event) => {
+    if (!event?.data || event.data.source === tabId) return;
+    const payload = event.data.payload;
+    if (!payload || typeof payload !== 'object') return;
+
+    applyingRemote = true;
+    useFieldIncidentStore.setState(payload);
+    applyingRemote = false;
+  };
+
+  useFieldIncidentStore.subscribe((state) => {
+    if (applyingRemote) return;
+    const payload = {
+      mode: state.mode,
+      simulationType: state.simulationType,
+      simulationStep: state.simulationStep,
+      majorIncident: state.majorIncident,
+      sectors: state.sectors,
+      taskGroups: state.taskGroups,
+      events: state.events,
+      incidents: state.incidents,
+      units: state.units,
+      routineUnits: state.routineUnits,
+    };
+    fieldSyncChannel.postMessage({ source: tabId, payload });
+  });
+}

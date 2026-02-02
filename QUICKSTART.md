@@ -6,7 +6,7 @@
 
 **Option 1: Automatic (Recommended)**
 ```cmd
-cd emergency_CRM
+cd final_code
 run_dashboard.bat
 ```
 
@@ -28,7 +28,7 @@ Then open browser → `http://localhost:5173`
 ### Mac/Linux Users
 
 ```bash
-cd emergency_CRM
+cd final_code
 chmod +x run_dashboard.sh
 ./run_dashboard.sh
 ```
@@ -48,12 +48,6 @@ npm run dev
 
 ## ✅ You Should See
 
-- [ ] Backend log: `Starting development server at http://0.0.0.0:8000/`
-- [ ] Frontend log: `VITE v5.0.2  ready in XXXms`
-- [ ] Browser opens: Dashboard with 8 incidents, 12 units
-- [ ] Map shows markers with colors
-- [ ] Event log shows activity
-- [ ] Status badge shows 🟢 LIVE
 
 ## 🎮 Try These Actions (30 seconds)
 
@@ -130,44 +124,18 @@ VITE_PORT=5174 npm run dev
 ## 📋 What's Included
 
 ✅ **Mock Data Service**
-- 8 realistic incidents
-- 12 units (Ambulance, Police, Fire, Rescue)
-- Continuous event generation
-- Real-time updates
 
 ✅ **Professional UI**
-- KPI dashboard cards
-- Filterable incident list
-- Interactive Leaflet map
-- Incident details panel
-- Live event feed
-- Connection status indicator
 
 ✅ **Real-Time Features**
-- Server-Sent Events (SSE) stream
-- Auto-reconnection
-- Fallback to polling
-- Live incident/unit updates
 
 ✅ **Production-Ready Code**
-- Clean architecture
-- Modular components
-- Documented code
-- Error handling
-- Loading states
 
 ## 📚 Documentation
 
-- **README.md** - Full feature documentation
-- **IMPLEMENTATION.md** - Architecture & technical details
-- **This file** - Quick start guide
 
 ## 🎓 Learning Resources
 
-- **Frontend**: React + Zustand + Leaflet
-- **Backend**: Django + DRF + Server-Sent Events
-- **Real-time**: EventSource API (no external WebSocket library)
-- **Styling**: CSS Grid + CSS Variables
 
 ## 💡 Pro Tips
 
@@ -227,15 +195,12 @@ After the demo, you can:
 ## 📞 Support
 
 Check the console (F12 in browser) for:
-- API request/response logs
-- Real-time connection status
-- Error messages and stack traces
 
 Backend logs in terminal will show:
-- Django request logs
-- Mock data generation events
-- SSE connection/disconnection
 
----
 
 **Dashboard MVP | Ready to Demo | Built with ❤️**
+
+**Field access (stub):**
+- On the selector page, set **Field ID** and enable **Field Manager Access**.
+## 🚀 Next Steps

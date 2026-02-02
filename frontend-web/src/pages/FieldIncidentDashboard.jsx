@@ -53,13 +53,31 @@ const FieldIncidentDashboard = () => {
   const stopSimulation = useFieldIncidentStore((s) => s.stopSimulation);
   const addIncidentEvent = useFieldIncidentStore((s) => s.addEvent);
   const moveUnits = useFieldIncidentStore((s) => s.moveUnits);
+  const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
+  const setFieldId = useFieldIncidentStore((s) => s.setFieldId);
+  const fieldId = useFieldIncidentStore((s) => s.fieldId);
 
   const simulationTimerRef = useRef(null);
   const routineEventTimerRef = useRef(null);
   const movementTimerRef = useRef(null);
 
+  const userRole = typeof window !== 'undefined' ? localStorage.getItem('userRole') : null;
+  const hasAccess = userRole === 'FIELD_MANAGER';
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedFieldId = localStorage.getItem('fieldId');
+    if (storedFieldId && setFieldId) {
+      setFieldId(storedFieldId);
+    }
+  }, [setFieldId]);
+
   // Load initial data
   useEffect(() => {
+    if (mode === 'LIVE' && majorIncident) {
+      setLoading(false);
+      return;
+    }
     const loadInitialData = async () => {
       try {
         setLoading(true);
@@ -162,8 +180,8 @@ const FieldIncidentDashboard = () => {
 
   // Simulate updates for demo (remove in production)
   useEffect(() => {
-    // Don't run backend simulation if in simulation mode
-    if (mode === 'SIMULATION') {
+    // Only run backend simulation in ROUTINE mode
+    if (mode !== 'ROUTINE') {
       return;
     }
 
@@ -209,7 +227,7 @@ const FieldIncidentDashboard = () => {
     simulationTimerRef.current = setInterval(() => {
       if (mode === 'SIMULATION') {
         nextSimulationStep();
-      } else {
+      } else if (mode === 'ROUTINE') {
         tickRoutinePatrol();
       }
     }, 2500);
@@ -250,6 +268,28 @@ const FieldIncidentDashboard = () => {
   const handleStopSimulation = () => {
     stopSimulation();
   };
+
+  if (!hasAccess) {
+    return (
+      <div className="field-incident-dashboard">
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100vh', fontSize: '1.2rem' }}>
+          <div>🚫 Access denied</div>
+          <div style={{ marginTop: '0.5rem', fontSize: '1rem' }}>
+            Field ID: {fieldId || 'unknown'}
+          </div>
+          <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#94a3b8' }}>
+            TODO(auth): replace with real login + role validation
+          </div>
+          <button
+            onClick={() => window.history.back()}
+            style={{ marginTop: '1.5rem', padding: '0.5rem 1rem', fontSize: '1rem', cursor: 'pointer' }}
+          >
+            Back
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Loading state
   if (loading) {
@@ -297,6 +337,9 @@ const FieldIncidentDashboard = () => {
           <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#e2e8f0' }}>
             🎯 Field Incident Command Dashboard
           </h1>
+          <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: '#94a3b8' }}>
+            Field: {fieldId || 'unknown'}
+          </div>
         </div>
 
         {/* Center: Simulation Controls */}

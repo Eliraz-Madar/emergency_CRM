@@ -40,9 +40,9 @@ const SituationOverview = () => {
   // Force display based on mode to prevent stale data
   const isRoutine = mode === 'ROUTINE';
   const titleColor = isRoutine ? '#10b981' : '#dc2626';
-  const displayTitle = isRoutine ? 'ROUTINE SECURITY OPERATIONS' : summary.title;
-  const displayStatus = isRoutine ? 'ACTIVE MONITORING' : summary.status;
-  const displayType = isRoutine ? 'ROUTINE' : summary.type;
+  const displayTitle = isRoutine ? 'ROUTINE SECURITY OPERATIONS' : (summary.title || 'Incident');
+  const displayStatus = isRoutine ? 'ACTIVE MONITORING' : (summary.status || 'ACTIVE');
+  const displayType = isRoutine ? 'ROUTINE' : (summary.type || 'INCIDENT');
 
   return (
     <div className="situation-overview">
@@ -56,13 +56,13 @@ const SituationOverview = () => {
             <span className="type-badge" style={{
               backgroundColor: isRoutine ? '#065f46' : undefined,
             }}>
-              {displayType.replace(/_/g, ' ')}
+              {String(displayType).replace(/_/g, ' ')}
             </span>
             <span
               className="status-badge"
               style={{ backgroundColor: statusColor[displayStatus] || statusColor.ACTIVE }}
             >
-              {displayStatus.replace(/_/g, ' ')}
+              {String(displayStatus).replace(/_/g, ' ')}
             </span>
           </div>
         </div>
@@ -150,8 +150,8 @@ const SituationOverview = () => {
         </div>
         <div className="stat-row">
           <span className="stat-label">Incident Status:</span>
-          <span className="stat-value" style={{ color: statusColor[summary.status] }}>
-            {summary.status.replace(/_/g, ' ')}
+          <span className="stat-value" style={{ color: statusColor[summary.status] || statusColor.ACTIVE }}>
+            {String(summary.status || 'ACTIVE').replace(/_/g, ' ')}
           </span>
         </div>
       </div>

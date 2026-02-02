@@ -6,6 +6,9 @@
 
 // OSRM Public API - Free, no auth required, CORS enabled
 const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
+const OSRM_NEAREST_URL = 'https://router.project-osrm.org/nearest/v1/driving';
+const nearestCache = new Map();
+let nearestRateLimitUntil = 0;
 
 // Cache for routes to avoid excessive API calls
 const routeCache = new Map();
@@ -18,7 +21,8 @@ const routeCache = new Map();
  * @param {number} toLng - Destination longitude
  * @returns {Promise<Array>} Array of [lat, lng] coordinates along the route
  */
-export async function calculateRoute(fromLat, fromLng, toLat, toLng) {
+export async function calculateRoute(fromLat, fromLng, toLat, toLng, options = {}) {
+    const { allowFallback = true } = options;
     console.log(`🗺️ Calculating route from [${fromLat}, ${fromLng}] to [${toLat}, ${toLng}]`);
 
     // Create cache key
@@ -38,15 +42,15 @@ export async function calculateRoute(fromLat, fromLng, toLat, toLng) {
         const response = await fetch(url);
 
         if (!response.ok) {
-            console.warn(`⚠️ OSRM API error: ${response.status}. Falling back to straight line.`);
-            return fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+            console.warn(`⚠️ OSRM API error: ${response.status}.`);
+            return allowFallback ? fallbackStraightLine(fromLat, fromLng, toLat, toLng) : null;
         }
 
         const data = await response.json();
 
         if (!data.routes || data.routes.length === 0) {
-            console.warn('⚠️ No route found. Falling back to straight line.');
-            return fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+            console.warn('⚠️ No route found.');
+            return allowFallback ? fallbackStraightLine(fromLat, fromLng, toLat, toLng) : null;
         }
 
         console.log('✅ Route received from OSRM:', data.routes[0].geometry.coordinates.length, 'points');
@@ -67,8 +71,8 @@ export async function calculateRoute(fromLat, fromLng, toLat, toLng) {
         return coordinates;
 
     } catch (error) {
-        console.warn('OSRM routing error:', error.message, '- Using straight line');
-        return fallbackStraightLine(fromLat, fromLng, toLat, toLng);
+        console.warn('OSRM routing error:', error.message);
+        return allowFallback ? fallbackStraightLine(fromLat, fromLng, toLat, toLng) : null;
     }
 }
 
@@ -189,4 +193,54 @@ export function getNextPositionOnRoute(route, currentLat, currentLng, currentInd
  */
 export function clearRouteCache() {
     routeCache.clear();
+}
+
+/**
+ * Snap a point to the nearest road using OSRM Nearest
+ * @param {number} lat
+ * @param {number} lng
+ * @returns {Promise<Array|null>} [lat, lng] or null if not found
+ */
+export async function getNearestRoadPoint(lat, lng) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+    }
+
+    const now = Date.now();
+    if (now < nearestRateLimitUntil) {
+        return null;
+    }
+
+    const cacheKey = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+    if (nearestCache.has(cacheKey)) {
+        return nearestCache.get(cacheKey);
+    }
+
+    try {
+        const url = `${OSRM_NEAREST_URL}/${lng},${lat}?number=1`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (response.status === 429) {
+            nearestRateLimitUntil = Date.now() + 30000; // 30s backoff
+            return null;
+        }
+        if (!response.ok) {
+            return null;
+        }
+        const data = await response.json();
+        const point = data?.waypoints?.[0]?.location;
+        if (!point || point.length < 2) return null;
+        const snapped = [point[1], point[0]];
+        nearestCache.set(cacheKey, snapped);
+        if (nearestCache.size > 500) {
+            const firstKey = nearestCache.keys().next().value;
+            nearestCache.delete(firstKey);
+        }
+        return snapped;
+    } catch {
+        nearestRateLimitUntil = Date.now() + 60000; // 60s backoff on timeouts/errors
+        return null;
+    }
 }

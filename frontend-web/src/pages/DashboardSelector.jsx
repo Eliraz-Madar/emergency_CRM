@@ -6,11 +6,43 @@
  * 2. Field Incident Command Dashboard - for command-level management of single major incident
  */
 
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../styles/dashboard-selector.css';
 
 const DashboardSelector = () => {
   const navigate = useNavigate();
+  const [fieldId, setFieldId] = useState('field-1');
+  const [isFieldManager, setIsFieldManager] = useState(false);
+
+  useEffect(() => {
+    try {
+      const storedFieldId = localStorage.getItem('fieldId');
+      const storedRole = localStorage.getItem('userRole');
+      if (storedFieldId) setFieldId(storedFieldId);
+      if (storedRole === 'FIELD_MANAGER') setIsFieldManager(true);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const handleFieldChange = (value) => {
+    setFieldId(value);
+    try {
+      localStorage.setItem('fieldId', value);
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  const handleRoleToggle = (checked) => {
+    setIsFieldManager(checked);
+    try {
+      localStorage.setItem('userRole', checked ? 'FIELD_MANAGER' : 'VIEWER');
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   return (
     <div className="dashboard-selector">
@@ -19,6 +51,33 @@ const DashboardSelector = () => {
         <div className="selector-header">
           <h1>🎯 Emergency Response Command System</h1>
           <p>Select operational dashboard</p>
+        </div>
+
+        {/* Field Context */}
+        <div className="selector-context">
+          <div className="context-row">
+            <label htmlFor="fieldId" className="context-label">Field ID</label>
+            <select
+              id="fieldId"
+              className="context-select"
+              value={fieldId}
+              onChange={(e) => handleFieldChange(e.target.value)}
+            >
+              <option value="field-1">field-1</option>
+              <option value="field-2">field-2</option>
+              <option value="north">north</option>
+              <option value="south">south</option>
+            </select>
+          </div>
+          <div className="context-row">
+            <label className="context-label">Field Manager Access</label>
+            <input
+              type="checkbox"
+              checked={isFieldManager}
+              onChange={(e) => handleRoleToggle(e.target.checked)}
+            />
+            <span className="context-hint">TODO(auth): replace with real login/roles</span>
+          </div>
         </div>
 
         {/* Dashboard Options */}

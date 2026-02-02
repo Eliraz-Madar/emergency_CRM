@@ -112,7 +112,13 @@ export function MapView({
     return '#6b7280'; // Gray default
   };
 
-  const { selectedIncidentId, setSelectedIncident, incidents: dashboardIncidents } = useDashboardStore();
+  const {
+    selectedIncidentId,
+    setSelectedIncident,
+    incidents: dashboardIncidents,
+    selectedUnitId,
+    setSelectedUnit,
+  } = useDashboardStore();
 
   // Subscribe directly to the field incident store for strict reactivity
   const fieldIncidents = useFieldIncidentStore((s) => s.incidents || []);
@@ -156,6 +162,12 @@ export function MapView({
       attribution: '© OpenStreetMap contributors',
       maxZoom: 19,
     }).addTo(map);
+
+    map.on('click', () => {
+      if (map && map.closePopup) {
+        map.closePopup();
+      }
+    });
 
     mapInstanceRef.current = map;
 
@@ -254,9 +266,15 @@ export function MapView({
 
     const renderedUnits = activeUnits && Array.isArray(activeUnits) ? activeUnits : units;
 
-    // Draw routes for units that have them
+    const selectedUnitKey = selectedUnitId === null || selectedUnitId === undefined
+      ? null
+      : String(selectedUnitId);
+
+    // Draw route only for selected unit
     renderedUnits.forEach((unit) => {
-      if (unit.status === 'EN_ROUTE' && unit.route && Array.isArray(unit.route) && unit.route.length > 0) {
+      if (selectedUnitKey === null) return;
+      if (String(unit.id) !== selectedUnitKey) return;
+      if (unit.route && Array.isArray(unit.route) && unit.route.length > 0) {
         const routeColor = unit.type === 'POLICE' ? '#3b82f6' : unit.type === 'FIRE' ? '#ef4444' : '#10b981';
 
         // Draw a thick glow/shadow first for better visibility
@@ -280,8 +298,8 @@ export function MapView({
           lineJoin: 'round',
         }).addTo(map);
         markersRef.current[`route-${unit.id}`] = routeLine;
-      } else if (unit.status === 'EN_ROUTE' && !unit.route) {
-        console.warn(`⚠️ Unit ${unit.id} is EN_ROUTE but has no route!`);
+      } else if (unit.assignedTo && !unit.route) {
+        console.warn(`⚠️ Unit ${unit.id} is linked to incident but has no route!`);
       }
     });
 
@@ -335,7 +353,7 @@ export function MapView({
       const popup = L.popup({
         autoPan: false, // Don't auto-pan when unit moves
         closeOnClick: true, // Close when clicking elsewhere on map
-        autoClose: false, // Don't close when another popup opens
+        autoClose: true, // Close when another popup opens
       }).setContent(`
         <div class="map-popup">
           <strong>${unit.name || `Unit ${idx + 1}`}</strong>
@@ -345,13 +363,18 @@ export function MapView({
       `);
 
       marker.bindPopup(popup);
+      marker.on('click', () => {
+        if (setSelectedUnit) {
+          setSelectedUnit(unit.id !== undefined && unit.id !== null ? String(unit.id) : null);
+        }
+      });
 
       // Reopen popup if it was open before
       if (openPopups.has(markerKey)) {
         marker.openPopup();
       }
     });
-  }, [incidents, selectedIncidentId, simulationSectors, simulationIncident, activeFilter, isSimulation]);
+  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {

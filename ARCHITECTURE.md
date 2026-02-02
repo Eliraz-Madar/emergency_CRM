@@ -168,6 +168,8 @@ GET  /api/field/updates/stream/              - SSE stream
   sectors: [],
   taskGroups: [],
   events: [],
+   mode: 'ROUTINE' | 'SIMULATION' | 'LIVE',
+   fieldId: 'field-1',
   selectedSector: null,
   selectedTaskGroup: null,
   connectionStatus: 'CONNECTED',
@@ -220,6 +222,7 @@ FieldIncidentDashboard (page)
 **Implementation:**
 - Regional: `connectToUpdatesStream()` - polls for mock incidents/units
 - Field Incident: `connectToFieldIncidentStream()` - streams simulated updates
+- Cross-tab: `BroadcastChannel('field-incident-sync')` to sync Field/Regional views
 
 ## Styling Architecture
 
@@ -269,7 +272,7 @@ FieldIncidentDashboard (page)
 
 **Navigation:**
 - All dashboards accessible from selector
-- Each dashboard stands alone (no cross-linking)
+- Regional dashboard includes a quick action to open the Field dashboard
 - Back button returns to selector
 
 ## Extensibility
@@ -328,6 +331,7 @@ FieldIncidentDashboard (page)
 - SSE connection reused (no polling)
 - Auto-reconnect with exponential backoff (3s → 30s)
 - Fallback to polling if SSE unavailable
+- Unit routing uses OSRM public endpoints (rate limits possible)
 
 ## Security Notes
 
@@ -335,6 +339,7 @@ FieldIncidentDashboard (page)
 - No authentication (bypassed for MVP)
 - CORS enabled for development
 - Django DEBUG = true in development
+- Field access uses a localStorage role stub (demo only)
 
 ### Production Recommendations
 1. Implement JWT authentication
@@ -383,6 +388,6 @@ Suitable for:
 
 ---
 
-**Last Updated:** December 2025
-**Architecture Version:** 2.0 (Added Field Incident Dashboard)
+**Last Updated:** 2024
+**Architecture Version:** 2.1 (Field LIVE mode + cross-tab sync)
 **Status:** Production-ready MVP

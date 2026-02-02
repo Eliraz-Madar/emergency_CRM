@@ -30,6 +30,7 @@ export default function Dashboard() {
     demoMode,
     lastUpdateTime,
     incidents,
+    selectedIncidentId,
   } = useDashboardStore();
 
   // Connect to Field Incident simulation store
@@ -46,6 +47,8 @@ export default function Dashboard() {
     tickRoutinePatrol,
     setIncidents: setFieldIncidents,
     incidents: fieldIncidents, // Add this to get incidents from fieldIncidentStore
+    setLiveIncident,
+    setMode: setFieldMode,
   } = useFieldIncidentStore();
 
   const { selectedUnitIds } = useDashboardStore();
@@ -75,6 +78,18 @@ export default function Dashboard() {
       setLastSyncedFieldIncidentsCount(fieldIncidents.length);
     }
   }, [fieldIncidents, setIncidents, lastSyncedFieldIncidentsCount]);
+
+  // Link field dashboard to selected incident in regional dashboard
+  useEffect(() => {
+    if (fieldMode === 'SIMULATION') return;
+    if (!selectedIncidentId) return;
+
+    const selected = (incidents || []).find((inc) => inc.id === selectedIncidentId);
+    if (!selected) return;
+
+    setFieldMode && setFieldMode('LIVE');
+    setLiveIncident && setLiveIncident(selected);
+  }, [selectedIncidentId, incidents, setLiveIncident, setFieldMode, fieldMode]);
 
   // Sync simulation events to war-room when active
   useEffect(() => {
@@ -266,6 +281,12 @@ export default function Dashboard() {
           >
             {getConnectionStatusText()}
           </span>
+          <button
+            className="feed-toggle"
+            onClick={() => window.open('/field-incident', '_blank', 'noopener,noreferrer')}
+          >
+            🧭 Open Field
+          </button>
           <button
             className="feed-toggle"
             onClick={() => setShowEventFeed(!showEventFeed)}
