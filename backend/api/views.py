@@ -10,9 +10,9 @@ import os
 from .models import Incident, Task, Unit
 from .serializers import IncidentSerializer, TaskSerializer, UnitSerializer
 from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission
-from utils.mock_data import get_mock_service
-from utils.realtime import get_realtime_service
-from utils.field_incident_data import get_field_incident_service
+from simulated.mock_data import get_mock_service
+from simulated.realtime import get_realtime_service
+from simulated.field_incident_data import get_field_incident_service
 
 
 class IncidentViewSet(viewsets.ModelViewSet):

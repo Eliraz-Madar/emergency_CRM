@@ -25,7 +25,24 @@ export function MapView({
   const prevStatusRef = useRef(new Map());
   const arrivalAnnouncedRef = useRef(new Set());
 
-  const unitHtml = (emoji, isSelected = false, color = '#3b82f6') => `
+  const hasAssignedUnits = (incident) => {
+    const assignedUnits = Array.isArray(incident?.assignedUnits)
+      ? incident.assignedUnits.length
+      : 0;
+    const assignedIds = Array.isArray(incident?.assigned_unit_ids)
+      ? incident.assigned_unit_ids.length
+      : 0;
+    return assignedUnits > 0 || assignedIds > 0;
+  };
+
+  const unitHtml = (emoji, isSelected = false, color = '#3b82f6', status = 'PATROL') => {
+    const normalizedStatus = (status || '').toUpperCase();
+    const background = normalizedStatus === 'EN_ROUTE'
+      ? '#fef3c7'
+      : normalizedStatus === 'ON_SCENE'
+        ? '#fee2e2'
+        : '#ffffff';
+    return `
     <div style="
       width: 100%; 
       height: 100%; 
@@ -55,7 +72,7 @@ export function MapView({
         justify-content: center; 
         align-items: center; 
         border-radius: 50%; 
-        background: white; 
+        background: ${background}; 
         border: 3px solid ${isSelected ? color : '#1f2937'}; 
         font-size: 35px; 
         line-height: 60px; 
@@ -66,8 +83,9 @@ export function MapView({
       </div>
     </div>
   `;
+  };
 
-  const createUnitIcon = (type, isSelected = false) => {
+  const createUnitIcon = (type, isSelected = false, status = 'PATROL') => {
     const icons = {
       POLICE: { emoji: '🚓', color: '#3b82f6' },
       FIRE: { emoji: '🚒', color: '#ef4444' },
@@ -76,7 +94,7 @@ export function MapView({
     const config = icons[type] || icons.POLICE;
     return L.divIcon({
       className: `marker-unit-${type?.toLowerCase() || 'police'}`,
-      html: unitHtml(config.emoji, isSelected, config.color),
+      html: unitHtml(config.emoji, isSelected, config.color, status),
       iconSize: isSelected ? [90, 90] : [60, 60],
       iconAnchor: isSelected ? [45, 90] : [30, 60],
     });
@@ -179,6 +197,34 @@ export function MapView({
     };
   }, []);
 
+  // Keep Leaflet map stable when container resizes
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    const container = mapRef.current;
+    if (!map || !container) return;
+
+    const invalidate = () => {
+      try {
+        map.invalidateSize({ animate: false });
+      } catch {
+        // ignore
+      }
+    };
+
+    let observer;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => invalidate());
+      observer.observe(container);
+    }
+
+    window.addEventListener('resize', invalidate);
+
+    return () => {
+      if (observer) observer.disconnect();
+      window.removeEventListener('resize', invalidate);
+    };
+  }, []);
+
   // Update markers
   useEffect(() => {
     const map = mapInstanceRef.current;
@@ -200,7 +246,7 @@ export function MapView({
 
     // Clear ONLY incident and route markers - keep unit markers for updates
     Object.keys(markersRef.current).forEach((key) => {
-      if (key.startsWith('incident-') || key.startsWith('route-')) {
+      if (key.startsWith('incident-') || key.startsWith('route-') || key.startsWith('route-shadow-')) {
         map.removeLayer(markersRef.current[key]);
         delete markersRef.current[key];
       }
@@ -227,13 +273,36 @@ export function MapView({
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
       const pinColor = getPinColor(incident.priority || incident.severity);
+      const assignedStar = hasAssignedUnits(incident)
+        ? `
+          <div style="
+            position: absolute;
+            top: -10px;
+            right: -10px;
+            width: 18px;
+            height: 18px;
+            background: #fbbf24;
+            color: #111827;
+            border-radius: 50%;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 2px solid #111827;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+          ">★</div>
+        `
+        : '';
 
       const marker = L.marker(
         [lat, lng],
         {
           icon: L.divIcon({
             html: `
-              <div style="background-color: ${pinColor}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: all 0.3s ease;"></div>
+              <div style="position: relative;">
+                <div style="background-color: ${pinColor}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: all 0.3s ease;"></div>
+                ${assignedStar}
+              </div>
             `,
             className: `marker-incident ${selectedIncidentId === incident.id ? 'selected' : ''}`,
             iconSize: [24, 24],
@@ -317,7 +386,7 @@ export function MapView({
       const markerKey = `unit-${unit.id || idx}`;
       const type = (unit.type || '').toUpperCase();
       const isSelected = selectedUnitIds.includes(unit.id);
-      const unitIcon = createUnitIcon(type, isSelected);
+      const unitIcon = createUnitIcon(type, isSelected, unit.status);
 
       // UPDATE existing unit marker OR create new one
       let marker = markersRef.current[markerKey];
@@ -408,7 +477,7 @@ export function MapView({
         // ALWAYS update icon to preserve selection state
         const type = (unit.type || '').toUpperCase();
         const isSelected = selectedUnitIds.includes(unit.id);
-        const unitIcon = createUnitIcon(type, isSelected);
+        const unitIcon = createUnitIcon(type, isSelected, unit.status);
         marker.setIcon(unitIcon);
       }
 
@@ -494,7 +563,10 @@ export function MapView({
 
           // Dynamic color based on priority
           const color = getPinColor(incident.priority);
-          const pinHtml = `<div style='background-color: ${color}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px ${color};'></div>`;
+          const assignedStar = hasAssignedUnits(incident)
+            ? `<div style='position:absolute; top:-10px; right:-10px; width:18px; height:18px; background:#fbbf24; color:#111827; border-radius:50%; font-size:12px; display:flex; align-items:center; justify-content:center; border:2px solid #111827; box-shadow:0 1px 2px rgba(0,0,0,0.4);'>★</div>`
+            : '';
+          const pinHtml = `<div style='position:relative;'><div style='background-color: ${color}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px ${color};'></div>${assignedStar}</div>`;
           const customIcon = L.divIcon({ html: pinHtml, className: 'marker-pin', iconSize: [24, 24], iconAnchor: [12, 12] });
 
           return (

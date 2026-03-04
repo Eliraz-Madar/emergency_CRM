@@ -8,7 +8,7 @@ _polling_interval = int(getattr(settings, "POLLING_INTERVAL", 5))
 
 
 def _sync_with_external():
-    from external.mock_api_client import fetch_mock_events
+    from simulated.mock_api_client import fetch_mock_events
     from api.models import Incident, Unit
 
     payload = fetch_mock_events()

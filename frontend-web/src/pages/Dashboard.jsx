@@ -30,6 +30,7 @@ export default function Dashboard() {
     demoMode,
     lastUpdateTime,
     incidents,
+    events,
     selectedIncidentId,
   } = useDashboardStore();
 
@@ -37,6 +38,8 @@ export default function Dashboard() {
   const {
     mode: fieldMode,
     simulationType,
+    startSimulation,
+    stopSimulation,
     majorIncident,
     sectors: fieldSectors,
     events: fieldTimeline,
@@ -58,9 +61,20 @@ export default function Dashboard() {
   const [showEventFeed, setShowEventFeed] = useState(false);
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [lastSyncedFieldIncidentsCount, setLastSyncedFieldIncidentsCount] = useState(0);
+  const [selectedScenario, setSelectedScenario] = useState('FIRE');
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
+
+  const handleStartSimulation = () => {
+    if (selectedScenario) {
+      startSimulation(selectedScenario);
+    }
+  };
+
+  const handleStopSimulation = () => {
+    stopSimulation();
+  };
 
   // Sync dashboard incidents to field incident store (one-time on load)
   useEffect(() => {
@@ -96,7 +110,7 @@ export default function Dashboard() {
     if (isSimulation && fieldTimeline) {
       // Convert field timeline events to dashboard event format
       const convertedEvents = fieldTimeline.map((evt, idx) => ({
-        id: evt.id || `sim-${idx}`,
+        id: evt.id ? `sim-${evt.id}` : `sim-${idx}`,
         timestamp: evt.timestamp || new Date().toISOString(),
         entity_type: 'simulation',
         entity_id: majorIncident?.id || 'sim',
@@ -104,9 +118,14 @@ export default function Dashboard() {
         level: evt.severity === 'CRITICAL' ? 'error' :
           evt.severity === 'HIGH' ? 'warn' : 'info',
       }));
-      setEvents(convertedEvents);
+
+      const nonSimulationEvents = (events || []).filter((e) =>
+        e?.entity_type !== 'simulation' && !String(e?.id || '').startsWith('sim-')
+      );
+
+      setEvents([...convertedEvents, ...nonSimulationEvents]);
     }
-  }, [isSimulation, fieldTimeline, majorIncident, setEvents]);
+  }, [isSimulation, fieldTimeline, majorIncident, setEvents, events]);
 
   // Initialize data and realtime connection
   useEffect(() => {
@@ -281,6 +300,49 @@ export default function Dashboard() {
           >
             {getConnectionStatusText()}
           </span>
+          {fieldMode !== 'SIMULATION' ? (
+            <>
+              <select
+                value={selectedScenario}
+                onChange={(e) => setSelectedScenario(e.target.value)}
+                style={{
+                  backgroundColor: '#0f172a',
+                  color: '#e2e8f0',
+                  border: '1px solid #475569',
+                  borderRadius: '4px',
+                  padding: '0.35rem 0.6rem',
+                  fontSize: '0.75rem',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  outline: 'none',
+                  minWidth: '150px',
+                }}
+                title="Select drill scenario"
+              >
+                <option value="FIRE">🔥 Fire Emergency</option>
+                <option value="TSUNAMI">🌊 Tsunami Event</option>
+                <option value="EARTHQUAKE">🏚️ Earthquake Crisis</option>
+                <option value="MISSILE">🚀 Missile Attack</option>
+              </select>
+              <button
+                className="feed-toggle"
+                onClick={handleStartSimulation}
+                title="Start emergency drill"
+                style={{ backgroundColor: '#dc2626', borderColor: '#dc2626' }}
+              >
+                ▶ Drill
+              </button>
+            </>
+          ) : (
+            <button
+              className="feed-toggle"
+              onClick={handleStopSimulation}
+              title="Stop emergency drill"
+              style={{ backgroundColor: '#991b1b', borderColor: '#991b1b' }}
+            >
+              ⏹ Stop Drill
+            </button>
+          )}
           <button
             className="feed-toggle"
             onClick={() => window.open('/field-incident', '_blank', 'noopener,noreferrer')}

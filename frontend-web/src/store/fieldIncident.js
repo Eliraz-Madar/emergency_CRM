@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand';
-import { SCENARIOS } from '../data/simulationScenarios';
+import { SCENARIOS } from '../simulations/simulationScenarios';
 import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
 
 // Major Israeli cities used for unit and event placement (inland-safe centers)
@@ -410,7 +410,7 @@ export const useFieldIncidentStore = create((set, get) => ({
         const destLat = snappedTarget ? snappedTarget[0] : targetLat;
         const destLng = snappedTarget ? snappedTarget[1] : targetLng;
 
-        const apiRoute = await calculateRoute(startLat, startLng, destLat, destLng, { allowFallback: false });
+        const apiRoute = await calculateRoute(startLat, startLng, destLat, destLng, { allowFallback: true });
 
         // Ensure route starts from the CLOSEST point to current position
         let route = apiRoute;
@@ -815,7 +815,7 @@ export const useFieldIncidentStore = create((set, get) => ({
       Promise.all(
         routeRequests.map(async (req) => {
           try {
-            const route = await calculateRoute(req.fromLat, req.fromLng, req.toLat, req.toLng, { allowFallback: false });
+            const route = await calculateRoute(req.fromLat, req.fromLng, req.toLat, req.toLng, { allowFallback: true });
             return { ...req, route };
           } catch {
             return { ...req, route: null };
@@ -1008,7 +1008,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       // If this is a routine event (has type and subtype), also add to incidents array
       let updatedIncidents = state.incidents || [];
 
-      if (newEvent.type && newEvent.subtype) {
+      const allowEventIncidents = state.mode === 'ROUTINE';
+      if (allowEventIncidents && newEvent.type && newEvent.subtype) {
         // This is a routine event - convert it to incident format for map display
         const newIncident = {
           id: eventWithTime.id,
@@ -1035,7 +1036,7 @@ export const useFieldIncidentStore = create((set, get) => ({
           console.log('⚠️ Incident with this ID already exists:', newIncident.id);
         }
       } else {
-        console.log('ℹ️ Event has no type/subtype, not adding to incidents');
+        console.log('ℹ️ Event not eligible for incident creation in current mode');
       }
 
       return {
@@ -1204,7 +1205,7 @@ export const useFieldIncidentStore = create((set, get) => ({
       Promise.all(
         routeRequests.map(async (req) => {
           try {
-            const route = await calculateRoute(req.fromLat, req.fromLng, req.toLat, req.toLng, { allowFallback: false });
+            const route = await calculateRoute(req.fromLat, req.fromLng, req.toLat, req.toLng, { allowFallback: true });
             return { ...req, route };
           } catch {
             return { ...req, route: null };

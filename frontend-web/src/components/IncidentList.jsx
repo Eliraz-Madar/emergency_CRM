@@ -68,6 +68,16 @@ export function IncidentList({
     return colors[severity] || '#6b7280';
   };
 
+  const hasAssignedUnits = (incident) => {
+    const assignedUnits = Array.isArray(incident?.assignedUnits)
+      ? incident.assignedUnits.length
+      : 0;
+    const assignedIds = Array.isArray(incident?.assigned_unit_ids)
+      ? incident.assigned_unit_ids.length
+      : 0;
+    return assignedUnits > 0 || assignedIds > 0;
+  };
+
   const getStatusIcon = (status) => {
     const icons = {
       OPEN: '📌',
@@ -141,7 +151,12 @@ export function IncidentList({
               <div className="incident-content">
                 <div className="incident-header">
                   <span className="incident-icon">{getStatusIcon(incident.status)}</span>
-                  <span className="incident-title">{incident.title}</span>
+                  <span className="incident-title">
+                    {incident.title}
+                    {hasAssignedUnits(incident) && (
+                      <span title="Units assigned" style={{ marginLeft: '6px', color: '#fbbf24' }}>★</span>
+                    )}
+                  </span>
                   <span className="incident-severity" style={{
                     backgroundColor: getSeverityColor(incident.priority || incident.severity) + '20',
                     color: getSeverityColor(incident.priority || incident.severity),
