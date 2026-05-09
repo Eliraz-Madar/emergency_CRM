@@ -7,6 +7,7 @@
 
 import { create } from 'zustand';
 import { SCENARIOS } from '../simulations/simulationScenarios';
+import { getFieldIncident } from '../api/client';
 import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
 
 // Major Israeli cities used for unit and event placement (inland-safe centers)
@@ -288,6 +289,26 @@ export const useFieldIncidentStore = create((set, get) => ({
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
   setMode: (mode) => set({ mode }),
   setFieldId: (fieldId) => set({ fieldId }),
+  loadFieldIncident: async (fieldIdOverride = null) => {
+    const state = get();
+    const fieldId = fieldIdOverride || state.fieldId || getStoredFieldId();
+    set({ loading: true, error: null });
+    try {
+      const data = await getFieldIncident(fieldId);
+      state.setMajorIncident?.(data.major_incident || null);
+      set({
+        sectors: data.sectors || [],
+        taskGroups: data.task_groups || [],
+        events: data.events || [],
+        loading: false,
+      });
+    } catch (err) {
+      set({
+        error: err?.message || 'Failed to load data',
+        loading: false,
+      });
+    }
+  },
 
   setLiveIncident: (incident) =>
     set((state) => {

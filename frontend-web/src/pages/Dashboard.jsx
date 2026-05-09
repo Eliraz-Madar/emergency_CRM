@@ -32,6 +32,7 @@ export default function Dashboard() {
     incidents,
     events,
     selectedIncidentId,
+    units,
   } = useDashboardStore();
 
   // Connect to Field Incident simulation store
@@ -62,6 +63,20 @@ export default function Dashboard() {
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [lastSyncedFieldIncidentsCount, setLastSyncedFieldIncidentsCount] = useState(0);
   const [selectedScenario, setSelectedScenario] = useState('FIRE');
+  const [fieldCommands, setFieldCommands] = useState([]);
+  const [selectedFieldCommand, setSelectedFieldCommand] = useState(null);
+  const [fieldCommandSummary, setFieldCommandSummary] = useState(null);
+  const [fieldCommandLoading, setFieldCommandLoading] = useState(false);
+  const [fieldCommandError, setFieldCommandError] = useState('');
+  const [isCreateFieldOpen, setIsCreateFieldOpen] = useState(false);
+  const [createFieldLocation, setCreateFieldLocation] = useState(null);
+  const [createFieldForm, setCreateFieldForm] = useState({
+    unitName: '',
+    incidentType: '',
+    notes: '',
+    status: 'DISPATCHING',
+    incidentPhase: 'Containment',
+  });
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
@@ -74,6 +89,99 @@ export default function Dashboard() {
 
   const handleStopSimulation = () => {
     stopSimulation();
+  };
+
+  const refreshFieldCommands = async () => {
+    const fields = await api.getFieldCommands();
+    setFieldCommands(fields || []);
+  };
+
+  const handleFieldCommandSelect = async (field) => {
+    if (!field?.id) return;
+    setSelectedFieldCommand(field);
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      const summary = await api.getFieldCommand(field.id);
+      setFieldCommandSummary(summary);
+    } catch (error) {
+      console.error('Failed to load field command summary:', error);
+      setFieldCommandError('Failed to load field command data.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
+  };
+
+  const handleAssignUnitToField = async (unitId) => {
+    if (!selectedFieldCommand?.id || !unitId) return;
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      await api.assignUnitToField(selectedFieldCommand.id, unitId);
+      const [updatedUnits, updatedSummary] = await Promise.all([
+        api.getUnits(),
+        api.getFieldCommand(selectedFieldCommand.id),
+      ]);
+      setUnits(updatedUnits || []);
+      setFieldCommandSummary(updatedSummary);
+      await refreshFieldCommands();
+    } catch (error) {
+      console.error('Failed to assign unit to field:', error);
+      setFieldCommandError('Failed to assign unit.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
+  };
+
+  const handleMapCreateFieldCommand = (coords) => {
+    setCreateFieldLocation(coords);
+    setIsCreateFieldOpen(true);
+  };
+
+  const handleCreateFieldChange = (field, value) => {
+    setCreateFieldForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const resetCreateFieldForm = () => {
+    setCreateFieldForm({
+      unitName: '',
+      incidentType: '',
+      notes: '',
+      status: 'DISPATCHING',
+      incidentPhase: 'Containment',
+    });
+    setCreateFieldLocation(null);
+  };
+
+  const handleCreateFieldSubmit = async (event) => {
+    event.preventDefault();
+    if (!createFieldLocation) return;
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      const payload = {
+        name: createFieldForm.unitName || 'Field Command',
+        unit_name: createFieldForm.unitName || 'Field Unit',
+        incident_type: createFieldForm.incidentType || 'General Incident',
+        initial_report: createFieldForm.notes,
+        status: createFieldForm.status,
+        incident_phase: createFieldForm.incidentPhase,
+        location_lat: createFieldLocation.lat,
+        location_lng: createFieldLocation.lng,
+      };
+      const created = await api.createFieldCommand(payload);
+      await refreshFieldCommands();
+      if (created?.id) {
+        await handleFieldCommandSelect(created);
+      }
+      setIsCreateFieldOpen(false);
+      resetCreateFieldForm();
+    } catch (error) {
+      console.error('Failed to create field command:', error);
+      setFieldCommandError('Failed to create field command.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
   };
 
   // Sync dashboard incidents to field incident store (one-time on load)
@@ -143,6 +251,11 @@ export default function Dashboard() {
         setIncidents(incidents);
         setUnits(units);
         setEvents(events);
+        try {
+          await refreshFieldCommands();
+        } catch (error) {
+          console.warn('Failed to load field commands:', error);
+        }
 
         setConnectionStatus('CONNECTED');
         setIsLoading(false);
@@ -406,11 +519,138 @@ export default function Dashboard() {
             simulationUnits={isSimulation ? simulationUnits : null}
             routineUnits={!isSimulation ? routineUnits : null}
             selectedUnitIds={selectedUnitIds}
+            fieldCommands={fieldCommands}
+            selectedFieldCommandId={selectedFieldCommand?.id || null}
+            onFieldCommandSelect={handleFieldCommandSelect}
+            onMapCreateFieldCommand={handleMapCreateFieldCommand}
           />
         </div>
 
         {/* Right: Details + Events */}
         <div className="content-right">
+          <div
+            style={{
+              background: 'rgba(15, 23, 42, 0.7)',
+              border: '1px solid #334155',
+              borderRadius: '10px',
+              padding: '12px',
+              marginBottom: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Field Command Overview</h3>
+              <button
+                className="feed-toggle"
+                onClick={refreshFieldCommands}
+                style={{ fontSize: '0.75rem' }}
+              >
+                ⟳ Refresh
+              </button>
+            </div>
+            {fieldCommandError && (
+              <div style={{ color: '#ef4444', fontSize: '0.8rem', marginTop: '6px' }}>
+                {fieldCommandError}
+              </div>
+            )}
+            {!selectedFieldCommand && (
+              <div style={{ color: '#94a3b8', marginTop: '8px', fontSize: '0.85rem' }}>
+                Select a field command marker on the map to view assignments.
+              </div>
+            )}
+            {selectedFieldCommand && (
+              <div style={{ marginTop: '10px' }}>
+                <div style={{ fontWeight: 600 }}>{selectedFieldCommand.name || selectedFieldCommand.id}</div>
+                <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                  Incidents: {fieldCommandSummary?.incidents?.length ?? selectedFieldCommand.incidents_count ?? 0} | Forces: {fieldCommandSummary?.units?.length ?? selectedFieldCommand.units_count ?? 0}
+                </div>
+
+                {fieldCommandLoading && (
+                  <div style={{ color: '#e2e8f0', fontSize: '0.8rem', marginTop: '8px' }}>
+                    Loading field command data...
+                  </div>
+                )}
+
+                {fieldCommandSummary && (
+                  <>
+                    <div style={{ marginTop: '10px' }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '0.8rem', color: '#e2e8f0' }}>
+                        <div>Status: {fieldCommandSummary.status || 'ACTIVE'}</div>
+                        <div>Phase: {fieldCommandSummary.incident_phase || 'Containment'}</div>
+                        <div>Casualties: {fieldCommandSummary.casualty_count ?? 0}</div>
+                        <div>Evacuated: {fieldCommandSummary.evacuated_count ?? 0}</div>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: '10px' }}>
+                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Operational Notes</div>
+                      {fieldCommandSummary.operational_notes?.length ? (
+                        <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
+                          {fieldCommandSummary.operational_notes.map((note, idx) => (
+                            <div key={`${note.timestamp || idx}`} style={{ fontSize: '0.78rem', padding: '4px 0' }}>
+                              <div style={{ color: '#94a3b8' }}>{note.timestamp || ''}</div>
+                              <div>{note.message || ''}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>No notes yet.</div>
+                      )}
+                    </div>
+                    <div style={{ marginTop: '10px' }}>
+                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assigned Incidents</div>
+                      {fieldCommandSummary.incidents?.length ? (
+                        <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
+                          {fieldCommandSummary.incidents.map((incident) => (
+                            <div key={incident.id} style={{ fontSize: '0.8rem', padding: '4px 0' }}>
+                              {incident.title || 'Incident'}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned incidents</div>
+                      )}
+                    </div>
+
+                    <div style={{ marginTop: '10px' }}>
+                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assigned Forces</div>
+                      {fieldCommandSummary.units?.length ? (
+                        <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
+                          {fieldCommandSummary.units.map((unit) => (
+                            <div key={unit.id} style={{ fontSize: '0.8rem', padding: '4px 0' }}>
+                              {unit.name || `Unit ${unit.id}`} ({unit.type})
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned forces</div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                <div style={{ marginTop: '12px' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assign Global Forces</div>
+                  {Array.isArray(units) && units.filter((u) => !u.field_id).length ? (
+                    <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
+                      {units.filter((u) => !u.field_id).slice(0, 10).map((unit) => (
+                        <div key={unit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                          <span style={{ fontSize: '0.8rem' }}>{unit.name || `Unit ${unit.id}`}</span>
+                          <button
+                            className="feed-toggle"
+                            style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
+                            onClick={() => handleAssignUnitToField(unit.id)}
+                          >
+                            Assign
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No unassigned forces available</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
           {showEventFeed ? (
             <EventFeed />
           ) : (
@@ -418,6 +658,95 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {isCreateFieldOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.7)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 999,
+          }}
+        >
+          <div
+            style={{
+              background: '#0f172a',
+              border: '1px solid #334155',
+              borderRadius: '12px',
+              padding: '16px',
+              width: '360px',
+              color: '#e2e8f0',
+            }}
+          >
+            <h3 style={{ marginTop: 0 }}>Create Field Command</h3>
+            <form onSubmit={handleCreateFieldSubmit}>
+              <label style={{ fontSize: '0.8rem' }}>Unit Name</label>
+              <input
+                type="text"
+                value={createFieldForm.unitName}
+                onChange={(e) => handleCreateFieldChange('unitName', e.target.value)}
+                style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
+                placeholder="Field Command Alpha"
+                required
+              />
+              <label style={{ fontSize: '0.8rem' }}>Incident Type</label>
+              <input
+                type="text"
+                value={createFieldForm.incidentType}
+                onChange={(e) => handleCreateFieldChange('incidentType', e.target.value)}
+                style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
+                placeholder="Wildfire"
+                required
+              />
+              <label style={{ fontSize: '0.8rem' }}>Initial Report / Notes</label>
+              <textarea
+                value={createFieldForm.notes}
+                onChange={(e) => handleCreateFieldChange('notes', e.target.value)}
+                style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px', minHeight: '70px' }}
+                placeholder="Initial situation report..."
+              />
+              <label style={{ fontSize: '0.8rem' }}>Initial Status</label>
+              <select
+                value={createFieldForm.status}
+                onChange={(e) => handleCreateFieldChange('status', e.target.value)}
+                style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
+              >
+                <option value="DISPATCHING">Dispatching</option>
+                <option value="ACTIVE">Active</option>
+                <option value="CONTAINMENT">Containment</option>
+                <option value="EVACUATION">Evacuation</option>
+                <option value="CLEANUP">Cleanup</option>
+              </select>
+              <label style={{ fontSize: '0.8rem' }}>Incident Phase</label>
+              <input
+                type="text"
+                value={createFieldForm.incidentPhase}
+                onChange={(e) => handleCreateFieldChange('incidentPhase', e.target.value)}
+                style={{ width: '100%', margin: '6px 0 12px', padding: '6px', borderRadius: '6px' }}
+                placeholder="Containment"
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="feed-toggle"
+                  onClick={() => {
+                    setIsCreateFieldOpen(false);
+                    resetCreateFieldForm();
+                  }}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="feed-toggle">
+                  Create
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <div className="dashboard-footer">

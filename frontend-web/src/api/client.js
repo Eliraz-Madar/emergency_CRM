@@ -22,8 +22,9 @@ export const login = async (username, password) => {
 };
 
 // Mock Data API - Incidents
-export const getIncidents = async () => {
-  const res = await api.get("/mock/incidents/");
+export const getIncidents = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/mock/incidents/", { params });
   return res.data;
 };
 
@@ -53,14 +54,42 @@ export const addIncidentNote = async (incidentId, note) => {
 };
 
 // Mock Data API - Units
-export const getUnits = async () => {
-  const res = await api.get("/mock/units/");
+export const getUnits = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/mock/units/", { params });
   return res.data;
 };
 
 // Mock Data API - Events
 export const getEvents = async (limit = 50) => {
   const res = await api.get("/mock/events/", { params: { limit } });
+  return res.data;
+};
+
+// Field Command API
+export const getFieldCommands = async () => {
+  const res = await api.get("/mock/fields/");
+  return res.data;
+};
+
+export const getFieldCommand = async (fieldId) => {
+  const res = await api.get(`/mock/fields/${fieldId}/`);
+  return res.data;
+};
+
+export const assignUnitToField = async (fieldId, unitId) => {
+  const res = await api.patch(`/mock/fields/${fieldId}/assign-unit/`, { unit_id: unitId });
+  return res.data;
+};
+
+export const createFieldCommand = async (payload) => {
+  const res = await api.post("/field/create/", payload);
+  return res.data;
+};
+
+export const updateFieldMetrics = async (payload, fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.patch("/field/metrics/", payload, { params });
   return res.data;
 };
 
@@ -85,56 +114,65 @@ export const connectToUpdatesStream = () => {
 // ============================================
 
 // Get major incident with all data
-export const getFieldIncident = async () => {
-  const res = await api.get("/field/incident/");
+export const getFieldIncident = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/field/incident/", { params });
   return res.data;
 };
 
 // Get sectors for current incident
-export const getFieldIncidentSectors = async () => {
-  const res = await api.get("/field/sectors/");
+export const getFieldIncidentSectors = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/field/sectors/", { params });
   return res.data;
 };
 
 // Get task groups for current incident
-export const getFieldIncidentTaskGroups = async () => {
-  const res = await api.get("/field/task-groups/");
+export const getFieldIncidentTaskGroups = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/field/task-groups/", { params });
   return res.data;
 };
 
 // Get operational timeline events
-export const getFieldIncidentEvents = async () => {
-  const res = await api.get("/field/events/");
+export const getFieldIncidentEvents = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/field/events/", { params });
   return res.data;
 };
 
 // Update sector
-export const updateFieldSector = async (sectorId, updates) => {
-  const res = await api.patch(`/field/sectors/${sectorId}/`, updates);
+export const updateFieldSector = async (sectorId, updates, fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.patch(`/field/sectors/${sectorId}/`, updates, { params });
   return res.data;
 };
 
 // Update task group
-export const updateFieldTaskGroup = async (taskGroupId, updates) => {
-  const res = await api.patch(`/field/task-groups/${taskGroupId}/`, updates);
+export const updateFieldTaskGroup = async (taskGroupId, updates, fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.patch(`/field/task-groups/${taskGroupId}/`, updates, { params });
   return res.data;
 };
 
 // Update casualty estimates
-export const updateFieldCasualties = async (updates) => {
-  const res = await api.patch("/field/casualty-update/", updates);
+export const updateFieldCasualties = async (updates, fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.patch("/field/casualty-update/", updates, { params });
   return res.data;
 };
 
 // Add event to timeline
-export const addFieldEvent = async (eventData) => {
-  const res = await api.post("/field/add-event/", eventData);
+export const addFieldEvent = async (eventData, fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.post("/field/add-event/", eventData, { params });
   return res.data;
 };
 
 // Simulate update to field incident
-export const simulateFieldIncidentUpdate = async () => {
-  const res = await api.get("/field/simulate/");
+export const simulateFieldIncidentUpdate = async (fieldId = null) => {
+  const params = fieldId ? { fieldId } : undefined;
+  const res = await api.get("/field/simulate/", { params });
   return res.data;
 };
 

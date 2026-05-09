@@ -5,7 +5,9 @@ from .views import (
     IncidentViewSet, TaskViewSet, UnitViewSet,
     mock_incidents, mock_units, mock_events, mock_incident_detail,
     mock_incident_status, mock_incident_priority, mock_incident_assign,
-    mock_incident_note, mock_simulate_update, mock_updates_stream,
+     mock_incident_note, mock_simulate_update, mock_updates_stream,
+     mock_fields, mock_field_detail, mock_field_assign_unit,
+    field_create, field_update_metrics,
     field_incident_detail, field_incident_sectors, field_incident_task_groups,
     field_incident_events, field_incident_sector_update, field_incident_task_group_update,
     field_incident_casualty_update, field_incident_add_event, field_incident_simulate,
@@ -35,6 +37,14 @@ urlpatterns = [
          mock_incident_note, name="mock_incident_note"),
     path("mock/simulate/", mock_simulate_update, name="mock_simulate_update"),
     path("mock/updates/stream/", mock_updates_stream, name="mock_updates_stream"),
+    path("mock/fields/", mock_fields, name="mock_fields"),
+    path("mock/fields/<str:field_id>/", mock_field_detail, name="mock_field_detail"),
+    path("mock/fields/<str:field_id>/assign-unit/",
+         mock_field_assign_unit, name="mock_field_assign_unit"),
+
+     # Field command creation and metrics
+     path("field/create/", field_create, name="field_create"),
+     path("field/metrics/", field_update_metrics, name="field_update_metrics"),
 
     # Field Incident Command Dashboard endpoints
     path("field/incident/", field_incident_detail, name="field_incident_detail"),

@@ -17,13 +17,22 @@ export function MapView({
   simulationUnits = null,
   routineUnits = null,
   isSimulation = false,
-  selectedUnitIds = []
+  selectedUnitIds = [],
+  fieldCommands = [],
+  onFieldCommandSelect = null,
+  selectedFieldCommandId = null,
+  onMapCreateFieldCommand = null
 }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef({});
   const prevStatusRef = useRef(new Map());
   const arrivalAnnouncedRef = useRef(new Set());
+  const onMapCreateFieldCommandRef = useRef(onMapCreateFieldCommand);
+
+  useEffect(() => {
+    onMapCreateFieldCommandRef.current = onMapCreateFieldCommand;
+  }, [onMapCreateFieldCommand]);
 
   const hasAssignedUnits = (incident) => {
     const assignedUnits = Array.isArray(incident?.assignedUnits)
@@ -97,6 +106,31 @@ export function MapView({
       html: unitHtml(config.emoji, isSelected, config.color, status),
       iconSize: isSelected ? [90, 90] : [60, 60],
       iconAnchor: isSelected ? [45, 90] : [30, 60],
+    });
+  };
+
+  const createFieldCommandIcon = (isSelected = false) => {
+    const borderColor = isSelected ? '#f59e0b' : '#0f172a';
+    return L.divIcon({
+      className: 'marker-field-command',
+      html: `
+        <div style="
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          background: #111827;
+          border: 3px solid ${borderColor};
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 18px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+        ">
+          🧭
+        </div>
+      `,
+      iconSize: [34, 34],
+      iconAnchor: [17, 34],
     });
   };
 
@@ -181,7 +215,13 @@ export function MapView({
       maxZoom: 19,
     }).addTo(map);
 
-    map.on('click', () => {
+    map.on('click', (event) => {
+      if (onMapCreateFieldCommandRef.current && event?.latlng) {
+        onMapCreateFieldCommandRef.current({
+          lat: event.latlng.lat,
+          lng: event.latlng.lng,
+        });
+      }
       if (map && map.closePopup) {
         map.closePopup();
       }
@@ -244,9 +284,9 @@ export function MapView({
       }
     });
 
-    // Clear ONLY incident and route markers - keep unit markers for updates
+    // Clear ONLY incident, field command, and route markers - keep unit markers for updates
     Object.keys(markersRef.current).forEach((key) => {
-      if (key.startsWith('incident-') || key.startsWith('route-') || key.startsWith('route-shadow-')) {
+      if (key.startsWith('incident-') || key.startsWith('field-command-') || key.startsWith('route-') || key.startsWith('route-shadow-')) {
         map.removeLayer(markersRef.current[key]);
         delete markersRef.current[key];
       }
@@ -331,6 +371,37 @@ export function MapView({
       `);
 
       markersRef.current[`incident-${incident.id}`] = marker;
+    });
+
+    const fieldList = Array.isArray(fieldCommands) ? fieldCommands : [];
+    fieldList.forEach((field) => {
+      const lat = field.location_lat ?? field.lat;
+      const lng = field.location_lng ?? field.lng;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+      const isSelectedField = selectedFieldCommandId && field.id === selectedFieldCommandId;
+      const marker = L.marker(
+        [lat, lng],
+        {
+          icon: createFieldCommandIcon(isSelectedField),
+        }
+      ).addTo(map);
+
+      marker.on('click', () => {
+        if (onFieldCommandSelect) {
+          onFieldCommandSelect(field);
+        }
+      });
+
+      marker.bindPopup(`
+        <div class="map-popup">
+          <strong>${field.name || field.id}</strong>
+          <p>Incidents: ${field.incidents_count ?? 0}</p>
+          <p>Forces: ${field.units_count ?? 0}</p>
+        </div>
+      `);
+
+      markersRef.current[`field-command-${field.id}`] = marker;
     });
 
     const renderedUnits = activeUnits && Array.isArray(activeUnits) ? activeUnits : units;
@@ -443,7 +514,7 @@ export function MapView({
         marker.openPopup();
       }
     });
-  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit]);
+  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {

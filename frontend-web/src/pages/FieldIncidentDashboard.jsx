@@ -15,7 +15,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useFieldIncidentStore, generateRoutineEvent } from '../store/fieldIncident';
 import {
-  getFieldIncident,
   connectToFieldIncidentStream,
   simulateFieldIncidentUpdate,
 } from '../api/client';
@@ -29,13 +28,10 @@ const FieldIncidentDashboard = () => {
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState(null);
   const [selectedScenario, setSelectedScenario] = useState('FIRE');
 
-  const setMajorIncident = useFieldIncidentStore((s) => s.setMajorIncident);
-  const setSectors = useFieldIncidentStore((s) => s.setSectors);
-  const setTaskGroups = useFieldIncidentStore((s) => s.setTaskGroups);
-  const setEvents = useFieldIncidentStore((s) => s.setEvents);
   const setConnectionStatus = useFieldIncidentStore((s) => s.setConnectionStatus);
   const setLoading = useFieldIncidentStore((s) => s.setLoading);
   const setError = useFieldIncidentStore((s) => s.setError);
+  const loadFieldIncident = useFieldIncidentStore((s) => s.loadFieldIncident);
   const addEvent = useFieldIncidentStore((s) => s.addEvent);
   const updateMajorIncident = useFieldIncidentStore((s) => s.updateMajorIncident);
   const updateSector = useFieldIncidentStore((s) => s.updateSector);
@@ -60,6 +56,7 @@ const FieldIncidentDashboard = () => {
   const simulationTimerRef = useRef(null);
   const routineEventTimerRef = useRef(null);
   const movementTimerRef = useRef(null);
+  const lastLoadedFieldIdRef = useRef(null);
 
   const userRole = typeof window !== 'undefined' ? localStorage.getItem('userRole') : null;
   const hasAccess = userRole === 'FIELD_MANAGER';
@@ -74,21 +71,17 @@ const FieldIncidentDashboard = () => {
 
   // Load initial data
   useEffect(() => {
+    if (!fieldId) return;
+    if (lastLoadedFieldIdRef.current === fieldId) return;
     if (mode === 'LIVE' && majorIncident) {
       setLoading(false);
+      lastLoadedFieldIdRef.current = fieldId;
       return;
     }
     const loadInitialData = async () => {
       try {
-        setLoading(true);
-        setError(null);
-        const data = await getFieldIncident();
-
-        setMajorIncident(data.major_incident);
-        setSectors(data.sectors);
-        setTaskGroups(data.task_groups);
-        setEvents(data.events);
-        setLoading(false);
+        lastLoadedFieldIdRef.current = fieldId;
+        await loadFieldIncident?.(fieldId);
       } catch (err) {
         console.error('Failed to load field incident data:', err);
         setError(err.message || 'Failed to load data');
@@ -97,7 +90,7 @@ const FieldIncidentDashboard = () => {
     };
 
     loadInitialData();
-  }, []); // Empty dependency array - only run once on mount
+  }, [fieldId, loadFieldIncident]);
 
   // Connect to real-time updates
   useEffect(() => {

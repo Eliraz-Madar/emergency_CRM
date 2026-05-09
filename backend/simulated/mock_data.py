@@ -33,6 +33,13 @@ class MockDataService:
 
     CHANNELS = ["Police", "Fire", "EMS", "Civil Defense"]
 
+    FIELD_COMMANDS = [
+        {"id": "field-1", "name": "Field Command Alpha", "lat": 32.0853, "lng": 34.7818},
+        {"id": "field-2", "name": "Field Command Bravo", "lat": 31.7683, "lng": 35.2137},
+        {"id": "north", "name": "Northern Command", "lat": 32.7940, "lng": 34.9896},
+        {"id": "south", "name": "Southern Command", "lat": 31.2518, "lng": 34.7913},
+    ]
+
     def __init__(self, seed: int = None):
         """Initialize with optional seed for reproducible data."""
         if seed is not None:
@@ -43,6 +50,8 @@ class MockDataService:
         self.units = {}
         self.events = []
         self.event_counter = 0
+        self.field_commands = list(self.FIELD_COMMANDS)
+        self.field_commands = [self._normalize_field_command(cmd) for cmd in self.field_commands]
         self._init_data()
 
     def _init_data(self):
@@ -67,6 +76,7 @@ class MockDataService:
         incident_id = incident_id or len(self.incidents) + 1
         location = random.choice(self.LOCATIONS)
         priority = random.choice(["LOW", "MED", "HIGH"])
+        field_id = self._random_field_id(allow_unassigned=True)
 
         return {
             "id": incident_id,
@@ -81,6 +91,7 @@ class MockDataService:
             "updated_at": datetime.now().isoformat(),
             "channel": random.choice(self.CHANNELS),
             "assigned_unit_ids": [],
+            "field_id": field_id,
             "reporter": self.faker.name(),
             "tags": random.sample(["priority", "high-visibility", "multi-agency"], k=random.randint(1, 2)),
         }
@@ -90,6 +101,7 @@ class MockDataService:
         unit_id = unit_id or len(self.units) + 1
         unit_type = random.choice(["Ambulance", "Police", "Fire", "Rescue"])
         location = random.choice(self.LOCATIONS)
+        field_id = self._random_field_id(allow_unassigned=True)
 
         return {
             "id": unit_id,
@@ -100,7 +112,43 @@ class MockDataService:
             "location_lng": location["lng"] + random.uniform(-0.01, 0.01),
             "last_update": datetime.now().isoformat(),
             "crew_size": random.randint(1, 5),
+            "field_id": field_id,
         }
+
+    def _random_field_id(self, allow_unassigned: bool = True) -> str:
+        if allow_unassigned and random.random() < 0.5:
+            return None
+        return random.choice(self.FIELD_COMMANDS)["id"]
+
+    def _get_field(self, field_id: str) -> Dict[str, Any]:
+        for field in self.field_commands:
+            if field.get("id") == field_id:
+                return field
+        return None
+
+    def _normalize_field_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        defaults = {
+            "status": "ACTIVE",
+            "casualty_count": 0,
+            "evacuated_count": 0,
+            "incident_phase": "Containment",
+            "unit_name": command.get("name") if command.get("name") else "Field Unit",
+            "incident_type": "General Incident",
+            "operational_notes": [],
+        }
+        normalized = {**defaults, **command}
+        if normalized.get("operational_notes") is None:
+            normalized["operational_notes"] = []
+        return normalized
+
+    def _next_field_command_id(self) -> str:
+        existing = {field.get("id") for field in self.field_commands}
+        index = 1
+        while True:
+            candidate = f"field-{index}"
+            if candidate not in existing:
+                return candidate
+            index += 1
 
     def _add_event(self, entity_type: str, entity_id: int, message: str, level: str = "info"):
         """Add an event to the log."""
@@ -119,13 +167,114 @@ class MockDataService:
             self.events.pop(0)
         return event
 
-    def get_incidents(self) -> List[Dict[str, Any]]:
-        """Get all incidents."""
-        return list(self.incidents.values())
+    def get_incidents(self, field_id: str = None) -> List[Dict[str, Any]]:
+        """Get all incidents, optionally filtered by field_id."""
+        incidents = list(self.incidents.values())
+        if field_id:
+            incidents = [inc for inc in incidents if inc.get("field_id") == field_id]
+        return incidents
 
-    def get_units(self) -> List[Dict[str, Any]]:
-        """Get all units."""
-        return list(self.units.values())
+    def get_units(self, field_id: str = None) -> List[Dict[str, Any]]:
+        """Get all units, optionally filtered by field_id."""
+        units = list(self.units.values())
+        if field_id:
+            units = [unit for unit in units if unit.get("field_id") == field_id]
+        return units
+
+    def get_fields(self) -> List[Dict[str, Any]]:
+        """Get all field command metadata with assignment counts."""
+        fields = []
+        for field in self.field_commands:
+            field_id = field.get("id")
+            incidents = self.get_incidents(field_id=field_id)
+            units = self.get_units(field_id=field_id)
+            fields.append({
+                "id": field_id,
+                "name": field.get("name"),
+                "location_lat": field.get("lat"),
+                "location_lng": field.get("lng"),
+                "status": field.get("status"),
+                "incident_phase": field.get("incident_phase"),
+                "casualty_count": field.get("casualty_count", 0),
+                "evacuated_count": field.get("evacuated_count", 0),
+                "unit_name": field.get("unit_name"),
+                "incident_type": field.get("incident_type"),
+                "incidents_count": len(incidents),
+                "units_count": len(units),
+            })
+        return fields
+
+    def get_field_summary(self, field_id: str) -> Dict[str, Any]:
+        """Get field metadata, incidents, and units for a specific field command."""
+        field = self._get_field(field_id)
+        if not field:
+            return None
+        incidents = self.get_incidents(field_id=field_id)
+        units = self.get_units(field_id=field_id)
+        return {
+            "id": field.get("id"),
+            "name": field.get("name"),
+            "location_lat": field.get("lat"),
+            "location_lng": field.get("lng"),
+            "status": field.get("status"),
+            "incident_phase": field.get("incident_phase"),
+            "casualty_count": field.get("casualty_count", 0),
+            "evacuated_count": field.get("evacuated_count", 0),
+            "unit_name": field.get("unit_name"),
+            "incident_type": field.get("incident_type"),
+            "operational_notes": field.get("operational_notes", []),
+            "incidents": incidents,
+            "units": units,
+        }
+
+    def create_field_command(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new field command entry (war-room initiated)."""
+        field_id = payload.get("id") or self._next_field_command_id()
+        command = {
+            "id": field_id,
+            "name": payload.get("name") or f"Field Command {field_id}",
+            "lat": payload.get("location_lat"),
+            "lng": payload.get("location_lng"),
+            "status": payload.get("status") or "ACTIVE",
+            "incident_phase": payload.get("incident_phase") or "Containment",
+            "casualty_count": int(payload.get("casualty_count", 0) or 0),
+            "evacuated_count": int(payload.get("evacuated_count", 0) or 0),
+            "unit_name": payload.get("unit_name") or payload.get("name") or "Field Unit",
+            "incident_type": payload.get("incident_type") or "General Incident",
+            "operational_notes": [],
+        }
+
+        initial_note = payload.get("initial_report") or payload.get("notes")
+        if initial_note:
+            command["operational_notes"].append({
+                "timestamp": datetime.now().isoformat(),
+                "message": initial_note,
+            })
+
+        command = self._normalize_field_command(command)
+        self.field_commands.append(command)
+        return command
+
+    def update_field_metrics(self, field_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Update field command operational metrics."""
+        field = self._get_field(field_id)
+        if not field:
+            return None
+
+        for key in ["status", "incident_phase", "casualty_count", "evacuated_count", "unit_name", "incident_type"]:
+            if key in updates and updates[key] is not None:
+                field[key] = updates[key]
+
+        note = updates.get("operational_note") or updates.get("note")
+        if note:
+            notes = field.get("operational_notes") or []
+            notes.append({
+                "timestamp": datetime.now().isoformat(),
+                "message": note,
+            })
+            field["operational_notes"] = notes
+
+        return field
 
     def get_events(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get recent events."""
@@ -171,6 +320,9 @@ class MockDataService:
         incident = self.incidents[incident_id]
         unit = self.units[unit_id]
 
+        if incident.get("field_id"):
+            unit["field_id"] = incident.get("field_id")
+
         if unit_id not in incident["assigned_unit_ids"]:
             incident["assigned_unit_ids"].append(unit_id)
             incident["updated_at"] = datetime.now().isoformat()
@@ -181,6 +333,20 @@ class MockDataService:
                             f"Assigned to incident {incident_id}", "info")
 
         return incident
+
+    def assign_unit_to_field(self, unit_id: int, field_id: str) -> Dict[str, Any]:
+        """Assign a unit to a field command."""
+        if unit_id not in self.units:
+            return None
+        field = self._get_field(field_id)
+        if not field:
+            return None
+
+        unit = self.units[unit_id]
+        unit["field_id"] = field_id
+        unit["last_update"] = datetime.now().isoformat()
+        self._add_event("unit", unit_id, f"Assigned to field {field_id}", "info")
+        return unit
 
     def add_incident_note(self, incident_id: int, note: str) -> Dict[str, Any]:
         """Add a note to an incident."""

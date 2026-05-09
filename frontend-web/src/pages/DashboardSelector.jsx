@@ -8,12 +8,17 @@
 
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getFieldCommand, getFieldCommands } from '../api/client';
 import '../styles/dashboard-selector.css';
 
 const DashboardSelector = () => {
   const navigate = useNavigate();
   const [fieldId, setFieldId] = useState('field-1');
   const [isFieldManager, setIsFieldManager] = useState(false);
+  const [fieldValidationError, setFieldValidationError] = useState('');
+  const [isValidating, setIsValidating] = useState(false);
+  const [fieldOptions, setFieldOptions] = useState([]);
+  const [fieldOptionsError, setFieldOptionsError] = useState('');
 
   useEffect(() => {
     try {
@@ -24,6 +29,24 @@ const DashboardSelector = () => {
     } catch {
       // ignore storage errors
     }
+  }, []);
+
+  useEffect(() => {
+    const loadFieldCommands = async () => {
+      try {
+        const fields = await getFieldCommands();
+        const normalized = Array.isArray(fields) ? fields : [];
+        setFieldOptions(normalized);
+        if (!normalized.find((field) => field.id === fieldId) && normalized[0]?.id) {
+          handleFieldChange(normalized[0].id);
+        }
+      } catch (error) {
+        console.error('Failed to load field commands:', error);
+        setFieldOptionsError('Failed to load field commands.');
+      }
+    };
+
+    loadFieldCommands();
   }, []);
 
   const handleFieldChange = (value) => {
@@ -41,6 +64,19 @@ const DashboardSelector = () => {
       localStorage.setItem('userRole', checked ? 'FIELD_MANAGER' : 'VIEWER');
     } catch {
       // ignore storage errors
+    }
+  };
+
+  const validateAndNavigate = async (path) => {
+    setIsValidating(true);
+    setFieldValidationError('');
+    try {
+      await getFieldCommand(fieldId);
+      navigate(path);
+    } catch {
+      setFieldValidationError('Invalid field ID. Please choose a valid field command.');
+    } finally {
+      setIsValidating(false);
     }
   };
 
@@ -63,11 +99,31 @@ const DashboardSelector = () => {
               value={fieldId}
               onChange={(e) => handleFieldChange(e.target.value)}
             >
-              <option value="field-1">field-1</option>
-              <option value="field-2">field-2</option>
-              <option value="north">north</option>
-              <option value="south">south</option>
+              {fieldOptions.length ? (
+                fieldOptions.map((field) => (
+                  <option key={field.id} value={field.id}>
+                    {field.name || field.id}
+                  </option>
+                ))
+              ) : (
+                <option value={fieldId}>{fieldId}</option>
+              )}
             </select>
+            {fieldOptionsError && (
+              <div style={{ color: '#ef4444', fontSize: '0.85rem', marginTop: '0.35rem' }}>
+                {fieldOptionsError}
+              </div>
+            )}
+            {fieldValidationError && (
+              <div style={{ color: '#ef4444', fontSize: '0.85rem', marginTop: '0.35rem' }}>
+                {fieldValidationError}
+              </div>
+            )}
+            {isValidating && (
+              <div style={{ color: '#e2e8f0', fontSize: '0.8rem', marginTop: '0.35rem' }}>
+                Validating field command...
+              </div>
+            )}
           </div>
           <div className="context-row">
             <label className="context-label">Field Manager Access</label>
@@ -85,7 +141,7 @@ const DashboardSelector = () => {
           {/* Field War-Room Dashboard */}
           <div
             className="dashboard-card regional-card"
-            onClick={() => navigate('/regional')}
+            onClick={() => validateAndNavigate('/regional')}
           >
             <div className="card-icon">🎯</div>
             <h2>Field War-Room Dashboard</h2>
@@ -115,7 +171,7 @@ const DashboardSelector = () => {
           {/* Field Incident Dashboard */}
           <div
             className="dashboard-card field-card"
-            onClick={() => navigate('/field-incident')}
+            onClick={() => validateAndNavigate('/field-incident')}
           >
             <div className="card-icon">🎖️</div>
             <h2>Field Incident Command</h2>
