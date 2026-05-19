@@ -32,6 +32,8 @@ export default function Dashboard() {
     incidents,
     events,
     selectedIncidentId,
+    selectedUnitId,
+    selectedUnitIds,
     units,
   } = useDashboardStore();
 
@@ -54,8 +56,6 @@ export default function Dashboard() {
     setLiveIncident,
     setMode: setFieldMode,
   } = useFieldIncidentStore();
-
-  const { selectedUnitIds } = useDashboardStore();
 
   const [isLoading, setIsLoading] = useState(true);
   const [realtimeService, setRealtimeService] = useState(null);
@@ -80,6 +80,19 @@ export default function Dashboard() {
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
+  const activeUnits = isSimulation ? simulationUnits : (routineUnits.length > 0 ? routineUnits : units);
+  const selectedUnit = Array.isArray(activeUnits) && selectedUnitId
+    ? activeUnits.find((u) => String(u.id) === String(selectedUnitId))
+    : null;
+  const selectedUnitDestination = selectedUnit
+    ? selectedUnit.assignedTo
+      ? ((incidents || []).find((inc) => inc.id === selectedUnit.assignedTo)?.title || 'Assigned Incident')
+      : (Array.isArray(selectedUnit.assignedTarget) && selectedUnit.assignedTarget.length === 2
+        ? `${selectedUnit.assignedTarget[0].toFixed(5)}, ${selectedUnit.assignedTarget[1].toFixed(5)}`
+        : (selectedUnit.assignedTarget && selectedUnit.assignedTarget.lat !== undefined && selectedUnit.assignedTarget.lng !== undefined
+          ? `${selectedUnit.assignedTarget.lat.toFixed(5)}, ${selectedUnit.assignedTarget.lng.toFixed(5)}`
+          : 'None'))
+    : 'None';
 
   const handleStartSimulation = () => {
     if (selectedScenario) {
@@ -183,6 +196,39 @@ export default function Dashboard() {
       setFieldCommandLoading(false);
     }
   };
+
+  const handleCancelCreateField = () => {
+    setIsCreateFieldOpen(false);
+    resetCreateFieldForm();
+  };
+
+  const handleCloseFieldCommand = async () => {
+    if (!selectedFieldCommand?.id) return;
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      await api.closeFieldCommand(selectedFieldCommand.id);
+      setSelectedFieldCommand(null);
+      setFieldCommandSummary(null);
+      await refreshFieldCommands();
+    } catch (error) {
+      console.error('Failed to close field command:', error);
+      setFieldCommandError('Failed to close the field command.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isCreateFieldOpen) return;
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') {
+        handleCancelCreateField();
+      }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [isCreateFieldOpen]);
 
   // Sync dashboard incidents to field incident store (one-time on load)
   useEffect(() => {
@@ -528,6 +574,43 @@ export default function Dashboard() {
 
         {/* Right: Details + Events */}
         <div className="content-right">
+          {selectedUnit && (
+            <div
+              style={{
+                background: 'rgba(8, 18, 35, 0.92)',
+                border: '1px solid #2563eb',
+                borderRadius: '10px',
+                padding: '14px',
+                marginBottom: '12px',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <div>
+                  <div style={{ fontSize: '0.95rem', fontWeight: '700' }}>Selected Vehicle</div>
+                  <div style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Click a unit on the map to inspect it</div>
+                </div>
+                <span style={{ background: '#2563eb', color: '#fff', borderRadius: '999px', padding: '4px 10px', fontSize: '0.75rem' }}>
+                  {selectedUnit.type || 'Unit'}
+                </span>
+              </div>
+              <div style={{ color: '#e2e8f0', fontSize: '0.95rem', fontWeight: '600' }}>{selectedUnit.name || `Unit ${selectedUnit.id}`}</div>
+              <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px' }}>
+                <div style={{ background: '#0f172a', padding: '10px', borderRadius: '10px', border: '1px solid #334155' }}>
+                  <div style={{ color: '#94a3b8', fontSize: '0.72rem', textTransform: 'uppercase' }}>Assigned</div>
+                  <div style={{ marginTop: '4px', color: '#fff', fontWeight: '700' }}>{selectedUnit.assignedTo ? 'Yes' : 'No'}</div>
+                </div>
+                <div style={{ background: '#0f172a', padding: '10px', borderRadius: '10px', border: '1px solid #334155' }}>
+                  <div style={{ color: '#94a3b8', fontSize: '0.72rem', textTransform: 'uppercase' }}>Destination</div>
+                  <div style={{ marginTop: '4px', color: '#fff', fontWeight: '700' }}>
+                    {selectedUnitDestination}
+                  </div>
+                </div>
+              </div>
+              <div style={{ marginTop: '10px', color: '#94a3b8', fontSize: '0.85rem' }}>
+                Status: {selectedUnit.status || 'Unknown'}
+              </div>
+            </div>
+          )}
           <div
             style={{
               background: 'rgba(15, 23, 42, 0.7)',
@@ -554,7 +637,7 @@ export default function Dashboard() {
             )}
             {!selectedFieldCommand && (
               <div style={{ color: '#94a3b8', marginTop: '8px', fontSize: '0.85rem' }}>
-                Select a field command marker on the map to view assignments.
+                Select a field command marker on the map or click "Open Command" in the marker popup to assign forces.
               </div>
             )}
             {selectedFieldCommand && (
@@ -624,6 +707,22 @@ export default function Dashboard() {
                         <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned forces</div>
                       )}
                     </div>
+
+                    <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        className="feed-toggle"
+                        onClick={handleCloseFieldCommand}
+                        style={{
+                          backgroundColor: '#ef4444',
+                          borderColor: '#ef4444',
+                          fontSize: '0.8rem',
+                          padding: '0.5rem 0.75rem',
+                        }}
+                      >
+                        Close Camp
+                      </button>
+                    </div>
                   </>
                 )}
 
@@ -670,6 +769,7 @@ export default function Dashboard() {
             justifyContent: 'center',
             zIndex: 999,
           }}
+          onClick={handleCancelCreateField}
         >
           <div
             style={{
@@ -680,6 +780,7 @@ export default function Dashboard() {
               width: '360px',
               color: '#e2e8f0',
             }}
+            onClick={(event) => event.stopPropagation()}
           >
             <h3 style={{ marginTop: 0 }}>Create Field Command</h3>
             <form onSubmit={handleCreateFieldSubmit}>
@@ -732,10 +833,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   className="feed-toggle"
-                  onClick={() => {
-                    setIsCreateFieldOpen(false);
-                    resetCreateFieldForm();
-                  }}
+                  onClick={handleCancelCreateField}
                 >
                   Cancel
                 </button>

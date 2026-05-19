@@ -348,6 +348,29 @@ class MockDataService:
         self._add_event("unit", unit_id, f"Assigned to field {field_id}", "info")
         return unit
 
+    def close_field_command(self, field_id: str) -> Dict[str, Any]:
+        """Close a field command and release assigned resources."""
+        field = self._get_field(field_id)
+        if not field:
+            return None
+
+        # Unassign any units that were tied to this field command
+        for unit in self.units.values():
+            if unit.get("field_id") == field_id:
+                unit["field_id"] = None
+                unit["last_update"] = datetime.now().isoformat()
+                self._add_event("unit", unit["id"], f"Released from field {field_id}", "info")
+
+        # Unassign any incidents that were tied to this field command
+        for incident in self.incidents.values():
+            if incident.get("field_id") == field_id:
+                incident["field_id"] = None
+                incident["updated_at"] = datetime.now().isoformat()
+                self._add_event("incident", incident["id"], f"Incident removed from field {field_id}", "info")
+
+        self.field_commands = [f for f in self.field_commands if f.get("id") != field_id]
+        return field
+
     def add_incident_note(self, incident_id: int, note: str) -> Dict[str, Any]:
         """Add a note to an incident."""
         if incident_id not in self.incidents:

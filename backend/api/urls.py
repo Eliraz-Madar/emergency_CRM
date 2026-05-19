@@ -7,7 +7,7 @@ from .views import (
     mock_incident_status, mock_incident_priority, mock_incident_assign,
      mock_incident_note, mock_simulate_update, mock_updates_stream,
      mock_fields, mock_field_detail, mock_field_assign_unit,
-    field_create, field_update_metrics,
+    field_create, field_update_metrics, field_close,
     field_incident_detail, field_incident_sectors, field_incident_task_groups,
     field_incident_events, field_incident_sector_update, field_incident_task_group_update,
     field_incident_casualty_update, field_incident_add_event, field_incident_simulate,
@@ -45,6 +45,7 @@ urlpatterns = [
      # Field command creation and metrics
      path("field/create/", field_create, name="field_create"),
      path("field/metrics/", field_update_metrics, name="field_update_metrics"),
+     path("field/close/", field_close, name="field_close"),
 
     # Field Incident Command Dashboard endpoints
     path("field/incident/", field_incident_detail, name="field_incident_detail"),

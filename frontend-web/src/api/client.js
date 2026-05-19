@@ -87,6 +87,11 @@ export const createFieldCommand = async (payload) => {
   return res.data;
 };
 
+export const closeFieldCommand = async (fieldId) => {
+  const res = await api.post("/field/close/", { field_id: fieldId });
+  return res.data;
+};
+
 export const updateFieldMetrics = async (payload, fieldId = null) => {
   const params = fieldId ? { fieldId } : undefined;
   const res = await api.patch("/field/metrics/", payload, { params });

@@ -1,6 +1,7 @@
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from "react-leaflet";
 import L from "leaflet";
 import { useEffect } from "react";
+import { Fragment } from "react";
 
 const severityColors = {
   low: "green",
@@ -72,40 +73,31 @@ export default function MapView({ incidents = [], units = [], includeUnits = fal
 
         {/* Render units with routes */}
         {includeUnits &&
-          units.map((unit) => {
-            const lat = unit.latitude ?? (Array.isArray(unit.position) ? unit.position[0] : null);
-            const lng = unit.longitude ?? (Array.isArray(unit.position) ? unit.position[1] : null);
+          units.map((unit) => (
+            <Fragment key={`unit-${unit.id}`}>
+              {unit.status === 'EN_ROUTE' && unit.route && Array.isArray(unit.route) && unit.route.length > 0 && (
+                <Polyline
+                  positions={unit.route}
+                  color={unit.type === 'POLICE' ? '#3b82f6' : unit.type === 'FIRE' ? '#ef4444' : '#10b981'}
+                  weight={3}
+                  opacity={0.6}
+                  dashArray="5, 10"
+                />
+              )}
 
-            if (!lat || !lng) return null;
-
-            return (
-              <div key={`unit-${unit.id}`}>
-                {/* Render route line if unit is en route and has a route */}
-                {unit.status === 'EN_ROUTE' && unit.route && Array.isArray(unit.route) && unit.route.length > 0 && (
-                  <Polyline
-                    positions={unit.route}
-                    color={unit.type === 'POLICE' ? '#3b82f6' : unit.type === 'FIRE' ? '#ef4444' : '#10b981'}
-                    weight={3}
-                    opacity={0.6}
-                    dashArray="5, 10"
-                  />
-                )}
-
-                {/* Render unit marker */}
-                <Marker
-                  position={[lat, lng]}
-                  icon={createVehicleIcon(unit.type)}
-                >
-                  <Popup>
-                    <strong>{unit.name}</strong>
-                    <p>Type: {unit.type}</p>
-                    <p>Status: {unit.status}</p>
-                    {unit.assignedTo && <p>Assigned to: {unit.assignedTo}</p>}
-                  </Popup>
-                </Marker>
-              </div>
-            );
-          })}
+              <Marker
+                position={[unit.latitude ?? (Array.isArray(unit.position) ? unit.position[0] : null), unit.longitude ?? (Array.isArray(unit.position) ? unit.position[1] : null)]}
+                icon={createVehicleIcon(unit.type)}
+              >
+                <Popup>
+                  <strong>{unit.name}</strong>
+                  <p>Type: {unit.type}</p>
+                  <p>Status: {unit.status}</p>
+                  {unit.assignedTo && <p>Assigned to: {unit.assignedTo}</p>}
+                </Popup>
+              </Marker>
+            </Fragment>
+          ))}
       </MapContainer>
     </div>
   );

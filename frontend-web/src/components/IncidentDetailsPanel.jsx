@@ -102,18 +102,12 @@ export function IncidentDetailsPanel() {
   const handleDispatch = async () => {
     if (!incident || selectedUnitIds.length === 0) return;
 
-    console.log('🚨 Dispatching from IncidentDetailsPanel:', selectedUnitIds, 'to', incident.id);
-
-    // Await the dispatch to ensure routes are calculated
     await dispatchUnitsToIncident({
       incidentId: incident.id,
       unitIds: selectedUnitIds,
       targetPosition: [incidentLat, incidentLng],
     });
 
-    console.log('✅ Dispatch completed');
-
-    // Mark incident as in-progress in dashboard store as well
     updateIncident(incident.id, { status: 'IN_PROGRESS' });
     setSelectedUnitIds([]);
     handleClose();

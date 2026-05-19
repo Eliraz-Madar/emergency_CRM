@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { Platform, useEffect, useState } from "react";
 import { View, Text, Button, Switch } from "react-native";
 import { getReports, clearReports } from "../storage/offlineDB";
 
 export default function SyncScreen({ token, online, setOnline }) {
+  const API_BASE_URL = Platform.OS === "android" ? "http://10.0.2.2:8000" : "http://localhost:8000";
   const [reports, setReports] = useState([]);
+  const [error, setError] = useState("");
 
   const loadReports = async () => {
     const data = await getReports();
@@ -16,29 +18,36 @@ export default function SyncScreen({ token, online, setOnline }) {
 
   const syncNow = async () => {
     if (!online) return;
-    for (const report of reports) {
-      await fetch("http://localhost:8000/api/incidents/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: `Offline ${report.title}`,
-          description: report.details,
-          location_lat: 32.0,
-          location_lng: 34.0,
-          severity: "LOW",
-          status: "OPEN",
-        }),
-      });
+    try {
+      for (const report of reports) {
+        await fetch(`${API_BASE_URL}/api/incidents/`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            title: `Offline ${report.title}`,
+            description: report.details,
+            location_lat: 32.0,
+            location_lng: 34.0,
+            severity: "LOW",
+            status: "OPEN",
+          }),
+        });
+      }
+      await clearReports();
+      setReports([]);
+      setError("");
+    } catch (err) {
+      setError("Sync failed. Check your connection.");
+      console.warn(err);
     }
-    await clearReports();
-    setReports([]);
   };
 
   return (
     <View style={{ padding: 16 }}>
+      {error ? <Text style={{ color: "red", marginBottom: 12 }}>{error}</Text> : null}
       <Text>Offline Reports: {reports.length}</Text>
       <Button title="Refresh" onPress={loadReports} />
       <View style={{ flexDirection: "row", alignItems: "center", marginTop: 16 }}>

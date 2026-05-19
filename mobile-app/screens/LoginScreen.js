@@ -1,14 +1,15 @@
 import { useState } from "react";
-import { View, TextInput, Button, Text } from "react-native";
+import { Platform, View, TextInput, Button, Text } from "react-native";
 
 export default function LoginScreen({ onLogin }) {
+  const API_BASE_URL = Platform.OS === "android" ? "http://10.0.2.2:8000" : "http://localhost:8000";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
   const handleLogin = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/token/", {
+      const res = await fetch(`${API_BASE_URL}/api/token/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
@@ -18,6 +19,7 @@ export default function LoginScreen({ onLogin }) {
       onLogin(data.access);
     } catch (err) {
       setError("Login failed");
+      console.warn(err);
     }
   };
 

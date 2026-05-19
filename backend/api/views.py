@@ -227,6 +227,22 @@ def field_update_metrics(request):
     return Response(updated)
 
 
+@api_view(["POST"])
+def field_close(request):
+    """Close an active field command and release assigned resources."""
+    payload = request.data or {}
+    field_id = payload.get("field_id") or request.query_params.get("fieldId")
+    if not field_id:
+        return Response({"detail": "field_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    mock_service = get_mock_service()
+    result = mock_service.close_field_command(field_id)
+    if not result:
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({"status": "closed", "field_id": field_id})
+
+
 # Server-Sent Events endpoint for real-time updates
 def mock_updates_stream(request):
     """Stream real-time updates using Server-Sent Events."""

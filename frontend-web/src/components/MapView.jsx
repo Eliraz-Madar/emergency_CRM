@@ -398,8 +398,25 @@ export function MapView({
           <strong>${field.name || field.id}</strong>
           <p>Incidents: ${field.incidents_count ?? 0}</p>
           <p>Forces: ${field.units_count ?? 0}</p>
+          <button class="field-command-open" style="width:100%; margin-top:8px; padding:8px 10px; border:none; border-radius:6px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer;">
+            Open Command
+          </button>
         </div>
       `);
+
+      marker.on('popupopen', (event) => {
+        const popupEl = event.popup.getElement();
+        if (!popupEl) return;
+        const button = popupEl.querySelector('.field-command-open');
+        if (button) {
+          button.onclick = (ev) => {
+            ev.preventDefault();
+            if (onFieldCommandSelect) {
+              onFieldCommandSelect(field);
+            }
+          };
+        }
+      });
 
       markersRef.current[`field-command-${field.id}`] = marker;
     });
@@ -461,7 +478,8 @@ export function MapView({
 
       // UPDATE existing unit marker OR create new one
       let marker = markersRef.current[markerKey];
-      if (marker && map.hasLayer(marker)) {
+      const markerExists = marker && map.hasLayer(marker);
+      if (markerExists) {
         // ONLY update icon, NOT position (Effect 2 handles positions)
         marker.setIcon(unitIcon);
       } else {
@@ -476,37 +494,53 @@ export function MapView({
       const targetIncident = unit.assignedTo ? (incidents || []).find((i) => i.id === unit.assignedTo) : null;
       const unitStatus = unit.status || 'PATROL';
 
-      let statusDisplay = 'Status: PATROL';
+      let statusDisplay = 'Patrol';
       let statusTextColor = '#10b981';
-
       if (unitStatus === 'EN_ROUTE') {
-        statusDisplay = `En Route to: ${targetIncident?.subtype || targetIncident?.type || 'Incident'}`;
+        statusDisplay = 'En Route';
         statusTextColor = '#f59e0b';
       } else if (unitStatus === 'ON_SCENE') {
         statusDisplay = 'On Scene';
         statusTextColor = '#ef4444';
       } else if (unitStatus === 'AVAILABLE' || unitStatus === 'PATROL') {
-        statusDisplay = 'Patrol';
+        statusDisplay = 'Available';
         statusTextColor = '#10b981';
       }
 
-      const popup = L.popup({
-        autoPan: false, // Don't auto-pan when unit moves
-        closeOnClick: true, // Close when clicking elsewhere on map
-        autoClose: true, // Close when another popup opens
-      }).setContent(`
+      const assignedLabel = unit.assignedTo ? 'Yes' : 'No';
+      const destinationLabel = unit.assignedTo
+        ? (targetIncident?.title || targetIncident?.subtype || targetIncident?.location_name || `Incident ${unit.assignedTo}`)
+        : (Array.isArray(unit.assignedTarget) && unit.assignedTarget.length === 2
+          ? `${unit.assignedTarget[0].toFixed(5)}, ${unit.assignedTarget[1].toFixed(5)}`
+          : 'None');
+
+      const popupContent = `
         <div class="map-popup">
           <strong>${unit.name || `Unit ${idx + 1}`}</strong>
           <p>${unit.type || 'Unknown'}</p>
           <p style="margin: 6px 0; color: ${statusTextColor}; font-weight: 600;">${statusDisplay}</p>
+          <p style="margin: 4px 0;"><strong>Assigned:</strong> ${assignedLabel}</p>
+          <p style="margin: 4px 0;"><strong>Destination:</strong> ${destinationLabel}</p>
         </div>
-      `);
+      `;
 
-      marker.bindPopup(popup);
+      if (marker.getPopup()) {
+        marker.getPopup().setContent(popupContent);
+      } else {
+        const popup = L.popup({
+          autoPan: false, // Don't auto-pan when unit moves
+          closeOnClick: true, // Close when clicking elsewhere on map
+          autoClose: true, // Close when another popup opens
+        }).setContent(popupContent);
+        marker.bindPopup(popup);
+      }
+
+      marker.off('click');
       marker.on('click', () => {
         if (setSelectedUnit) {
           setSelectedUnit(unit.id !== undefined && unit.id !== null ? String(unit.id) : null);
         }
+        marker.openPopup();
       });
 
       // Reopen popup if it was open before
