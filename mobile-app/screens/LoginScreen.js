@@ -9,11 +9,17 @@ export default function LoginScreen({ onLogin }) {
 
   const handleLogin = async () => {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      
       const res = await fetch(`${API_BASE_URL}/api/token/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
+      
       if (!res.ok) throw new Error("Bad credentials");
       const data = await res.json();
       onLogin(data.access);

@@ -1,5 +1,5 @@
-import { Platform, useEffect, useState } from "react";
-import { View, Text, Button, Switch } from "react-native";
+import { useEffect, useState } from "react";
+import { Platform, View, Text, Button, Switch } from "react-native";
 import { getReports, clearReports } from "../storage/offlineDB";
 
 export default function SyncScreen({ token, online, setOnline }) {
@@ -20,6 +20,9 @@ export default function SyncScreen({ token, online, setOnline }) {
     if (!online) return;
     try {
       for (const report of reports) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        
         await fetch(`${API_BASE_URL}/api/incidents/`, {
           method: "POST",
           headers: {
@@ -34,7 +37,9 @@ export default function SyncScreen({ token, online, setOnline }) {
             severity: "LOW",
             status: "OPEN",
           }),
+          signal: controller.signal,
         });
+        clearTimeout(timeout);
       }
       await clearReports();
       setReports([]);

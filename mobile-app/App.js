@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button } from "react-native";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import LoginScreen from "./screens/LoginScreen";
@@ -9,8 +10,7 @@ import SyncScreen from "./screens/SyncScreen";
 const Stack = createNativeStackNavigator();
 
 export default function App() {
-  const AUTH_BYPASS = true; // temporary disable auth
-  const [token, setToken] = useState(AUTH_BYPASS ? "dev-token" : null);
+  const [token, setToken] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [online, setOnline] = useState(true);
 
@@ -21,9 +21,23 @@ export default function App() {
   return (
     <NavigationContainer>
       <Stack.Navigator>
-        <Stack.Screen name="Tasks">
+        <Stack.Screen
+          name="Tasks"
+          options={({ navigation }) => ({
+            headerRight: () => (
+              <Button title="Sync" onPress={() => navigation.navigate("Sync")} />
+            ),
+          })}
+        >
           {(props) => (
-            <TasksScreen {...props} token={token} onSelectTask={(task) => setSelectedTask(task)} />
+            <TasksScreen
+              {...props}
+              token={token}
+              onSelectTask={(task) => {
+                setSelectedTask(task);
+                props.navigation.navigate("Report");
+              }}
+            />
           )}
         </Stack.Screen>
         <Stack.Screen name="Report">

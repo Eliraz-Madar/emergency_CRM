@@ -12,6 +12,9 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
   const sendUpdate = async () => {
     if (!selectedTask) throw new Error("No task selected");
     const payload = { status };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
     const res = await fetch(`${API_BASE_URL}/api/tasks/${selectedTask.id}/`, {
       method: "PATCH",
       headers: {
@@ -19,7 +22,10 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
+    
     if (!res.ok) throw new Error("Failed to update task");
   };
 
