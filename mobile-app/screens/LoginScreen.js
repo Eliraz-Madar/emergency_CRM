@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Platform, View, TextInput, Button, Text } from "react-native";
+import { View, TextInput, Button, Text } from "react-native";
+import { API_BASE_URL } from "../config";
 
 export default function LoginScreen({ onLogin }) {
-  const API_BASE_URL = Platform.OS === "android" ? "http://10.0.2.2:8000" : "http://localhost:8000";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");

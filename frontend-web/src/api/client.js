@@ -61,8 +61,10 @@ export const getUnits = async (fieldId = null) => {
 };
 
 // Mock Data API - Events
-export const getEvents = async (limit = 50) => {
-  const res = await api.get("/mock/events/", { params: { limit } });
+export const getEvents = async (limit = 50, incidentId = null) => {
+  const params = { limit };
+  if (incidentId) params.incident_id = incidentId;
+  const res = await api.get("/mock/events/", { params });
   return res.data;
 };
 

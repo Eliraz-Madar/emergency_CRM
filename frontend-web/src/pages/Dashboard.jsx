@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { formatTime } from '../utils/time.js';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
 import { RealtimeService } from '../services/realtime.js';
@@ -17,6 +19,8 @@ import * as api from '../api/client.js';
  * Displays real operational data when in routine mode.
  */
 export default function Dashboard() {
+  const navigate = useNavigate();
+
   const {
     setIncidents,
     setUnits,
@@ -35,6 +39,12 @@ export default function Dashboard() {
     selectedUnitId,
     selectedUnitIds,
     units,
+    activeFilter: storedActiveFilter,
+    setActiveFilter: storeSetActiveFilter,
+    zoomToIncidentId,
+    clearZoomToIncident,
+    setFlashingIncident,
+    clearFlashingIncident,
   } = useDashboardStore();
 
   // Connect to Field Incident simulation store
@@ -51,18 +61,20 @@ export default function Dashboard() {
     routineUnits,
     moveUnits,
     tickRoutinePatrol,
-    setIncidents: setFieldIncidents,
-    incidents: fieldIncidents, // Add this to get incidents from fieldIncidentStore
     setLiveIncident,
     setMode: setFieldMode,
   } = useFieldIncidentStore();
 
   const [isLoading, setIsLoading] = useState(true);
   const [realtimeService, setRealtimeService] = useState(null);
+  const eventsRef = React.useRef(events);
   const [showEventFeed, setShowEventFeed] = useState(false);
-  const [activeFilter, setActiveFilter] = useState('ALL');
-  const [lastSyncedFieldIncidentsCount, setLastSyncedFieldIncidentsCount] = useState(0);
+  // activeFilter is persisted in the store so it survives page refresh
+  const activeFilter = storedActiveFilter;
+  const setActiveFilter = storeSetActiveFilter;
   const [selectedScenario, setSelectedScenario] = useState('FIRE');
+  const [activeFieldId, setActiveFieldId] = useState('');
+  const [activeFieldName, setActiveFieldName] = useState('');
   const [fieldCommands, setFieldCommands] = useState([]);
   const [selectedFieldCommand, setSelectedFieldCommand] = useState(null);
   const [fieldCommandSummary, setFieldCommandSummary] = useState(null);
@@ -77,6 +89,18 @@ export default function Dashboard() {
     status: 'DISPATCHING',
     incidentPhase: 'Containment',
   });
+
+  // Load the selected control-center name from localStorage on mount
+  useEffect(() => {
+    const storedFieldId = localStorage.getItem('fieldId');
+    if (!storedFieldId) return;
+    setActiveFieldId(storedFieldId);
+    api.getFieldCommand(storedFieldId)
+      .then((data) => {
+        if (data?.name) setActiveFieldName(data.name);
+      })
+      .catch(() => {/* silently ignore – name is cosmetic */});
+  }, []);
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
@@ -230,23 +254,6 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', handleEscape);
   }, [isCreateFieldOpen]);
 
-  // Sync dashboard incidents to field incident store (one-time on load)
-  useEffect(() => {
-    if (Array.isArray(incidents) && incidents.length > 0 && fieldIncidents.length === 0) {
-      console.log('📍 Initial sync of', incidents.length, 'incidents to fieldIncident store');
-      setFieldIncidents(incidents);
-    }
-  }, [incidents, setFieldIncidents, fieldIncidents.length]);
-
-  // Sync NEW field incidents back to dashboard (for routine events)
-  useEffect(() => {
-    if (Array.isArray(fieldIncidents) && fieldIncidents.length > lastSyncedFieldIncidentsCount) {
-      console.log('🔄 New field incidents detected:', fieldIncidents.length, 'vs', lastSyncedFieldIncidentsCount);
-      setIncidents(fieldIncidents);
-      setLastSyncedFieldIncidentsCount(fieldIncidents.length);
-    }
-  }, [fieldIncidents, setIncidents, lastSyncedFieldIncidentsCount]);
-
   // Link field dashboard to selected incident in regional dashboard
   useEffect(() => {
     if (fieldMode === 'SIMULATION') return;
@@ -259,27 +266,36 @@ export default function Dashboard() {
     setLiveIncident && setLiveIncident(selected);
   }, [selectedIncidentId, incidents, setLiveIncident, setFieldMode, fieldMode]);
 
-  // Sync simulation events to war-room when active
+  // Keep a ref to events so the sync effect below can read it without
+  // adding it to the dependency array (which would cause an infinite loop).
+  useEffect(() => { eventsRef.current = events; }, [events]);
+
+  // Mirror active simulation timeline into the War-Room event feed.
+  // Only runs in SIMULATION mode — not in LIVE mode, because in LIVE mode
+  // the operational events are added directly via addEvent() (dispatch / arrival)
+  // and a setEvents() replacement call would wipe them.
+  // NOTE: 'events' is intentionally NOT in the dependency array — we read
+  // it via eventsRef to avoid the set→change→re-run→set infinite loop.
   useEffect(() => {
-    if (isSimulation && fieldTimeline) {
-      // Convert field timeline events to dashboard event format
-      const convertedEvents = fieldTimeline.map((evt, idx) => ({
-        id: evt.id ? `sim-${evt.id}` : `sim-${idx}`,
-        timestamp: evt.timestamp || new Date().toISOString(),
-        entity_type: 'simulation',
-        entity_id: majorIncident?.id || 'sim',
-        message: evt.title || evt.message || 'Simulation event',
-        level: evt.severity === 'CRITICAL' ? 'error' :
-          evt.severity === 'HIGH' ? 'warn' : 'info',
-      }));
+    if (!isSimulation || !fieldTimeline) return;
 
-      const nonSimulationEvents = (events || []).filter((e) =>
-        e?.entity_type !== 'simulation' && !String(e?.id || '').startsWith('sim-')
-      );
+    const convertedEvents = fieldTimeline.map((evt, idx) => ({
+      id: evt.id ? `sim-${evt.id}` : `sim-${idx}`,
+      timestamp: evt.timestamp || evt.created_at || new Date().toISOString(),
+      entity_type: 'simulation',
+      entity_id: majorIncident?.id || 'sim',
+      message: evt.title || evt.message || 'Simulation event',
+      level: evt.severity === 'CRITICAL' ? 'error'
+        : evt.severity === 'WARNING' || evt.severity === 'HIGH' ? 'warn' : 'info',
+    }));
 
-      setEvents([...convertedEvents, ...nonSimulationEvents]);
-    }
-  }, [isSimulation, fieldTimeline, majorIncident, setEvents, events]);
+    const nonSimulationEvents = (eventsRef.current || []).filter(
+      (e) => e?.entity_type !== 'simulation' && !String(e?.id || '').startsWith('sim-')
+    );
+
+    setEvents([...convertedEvents, ...nonSimulationEvents]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSimulation, fieldTimeline, majorIncident, setEvents]);
 
   // Initialize data and realtime connection
   useEffect(() => {
@@ -291,7 +307,7 @@ export default function Dashboard() {
         const [incidents, units, events] = await Promise.all([
           api.getIncidents(),
           api.getUnits(),
-          api.getEvents(100),
+          api.getEvents(200),
         ]);
 
         setIncidents(incidents);
@@ -302,6 +318,49 @@ export default function Dashboard() {
         } catch (error) {
           console.warn('Failed to load field commands:', error);
         }
+
+        // ── Restore dispatch assignments that survived the page refresh ──────
+        // Assignments are written to localStorage each time units are dispatched
+        // and removed when those units arrive on scene.
+        try {
+          const saved = JSON.parse(localStorage.getItem('ecm-dispatch-assignments') || '[]');
+          if (saved.length > 0) {
+            // Group by incident so one dispatchUnitsToIncident call handles all
+            // units for the same incident at once.
+            const byIncident = {};
+            saved.forEach(({ unitId, incidentId, incidentLat, incidentLng, incidentTitle }) => {
+              if (!byIncident[incidentId]) {
+                byIncident[incidentId] = { incidentId, incidentLat, incidentLng, incidentTitle, unitIds: [] };
+              }
+              byIncident[incidentId].unitIds.push(unitId);
+            });
+
+            const { dispatchUnitsToIncident } = useFieldIncidentStore.getState();
+
+            for (const assignment of Object.values(byIncident)) {
+              // silent=true: skip voice + event-log entries on restore
+              dispatchUnitsToIncident({
+                incidentId: assignment.incidentId,
+                unitIds: assignment.unitIds,
+                targetPosition: [assignment.incidentLat, assignment.incidentLng],
+                silent: true,
+              });
+              // Mark the incident IN_PROGRESS in the War-Room store too
+              updateIncident(assignment.incidentId, { status: 'IN_PROGRESS' });
+            }
+
+            // Add a single restore notice to the event log
+            addEvent({
+              id: `restore-dispatch-${Date.now()}`,
+              timestamp: new Date().toISOString(),
+              entity_type: 'system',
+              entity_id: 'system',
+              message: `🔄 Restored ${saved.length} unit dispatch assignment${saved.length > 1 ? 's' : ''} from previous session`,
+              level: 'info',
+            });
+          }
+        } catch (_) { /* non-critical — bad saved data should never block load */ }
+        // ─────────────────────────────────────────────────────────────────────
 
         setConnectionStatus('CONNECTED');
         setIsLoading(false);
@@ -338,7 +397,14 @@ export default function Dashboard() {
           },
           (error) => {
             console.error('Realtime error:', error);
-            setConnectionStatus('DEGRADED');
+            // 'connection_dropped' means the SSE closed and is actively reconnecting —
+            // show CONNECTING so the indicator turns yellow and resolves once onopen fires.
+            // Other errors (parse, unexpected) degrade to DEGRADED with fallback polling.
+            if (error?.type === 'connection_dropped') {
+              setConnectionStatus('CONNECTING');
+            } else {
+              setConnectionStatus('DEGRADED');
+            }
           }
         );
 
@@ -358,14 +424,42 @@ export default function Dashboard() {
     };
   }, []);
 
-  // Fallback polling if realtime fails
+  // Fallback polling when realtime is unavailable.
+  // Covers both DEGRADED (SSE parse errors) and OFFLINE (backend unreachable on load).
+  // On OFFLINE we also attempt to re-initialise the SSE stream once data loads.
   useEffect(() => {
-    if (connectionStatus !== 'DEGRADED') return;
+    if (connectionStatus !== 'DEGRADED' && connectionStatus !== 'OFFLINE') return;
 
     const interval = setInterval(async () => {
       try {
-        const incidents = await api.getIncidents();
+        const [incidents, units, events] = await Promise.all([
+          api.getIncidents(),
+          api.getUnits(),
+          api.getEvents(200),
+        ]);
         setIncidents(incidents);
+        setUnits(units);
+        setEvents(events);
+        setIsLoading(false);
+
+        // If we were fully offline, attempt to reconnect SSE now
+        if (connectionStatus === 'OFFLINE') {
+          setConnectionStatus('CONNECTING');
+          const realtime = new RealtimeService(
+            (update) => {
+              if (update.type === 'connected') setConnectionStatus('CONNECTED');
+            },
+            (error) => {
+              if (error?.type === 'connection_dropped') {
+                setConnectionStatus('CONNECTING');
+              } else {
+                setConnectionStatus('DEGRADED');
+              }
+            }
+          );
+          realtime.connect();
+          setRealtimeService(realtime);
+        }
       } catch (error) {
         console.error('Polling error:', error);
       }
@@ -374,25 +468,35 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
-  // Unit movement loop - runs continuously to move units along their routes
+  // Unit movement loop — runs every 500 ms for smooth animation.
+  // Also handles routine patrol ticks in ROUTINE mode.
   useEffect(() => {
     const movementInterval = setInterval(() => {
       const { moveUnits: latestMoveUnits, tickRoutinePatrol: latestTickPatrol, mode } = useFieldIncidentStore.getState();
 
-      // First tick routine patrol (for patrol units)
       if (mode === 'ROUTINE' && latestTickPatrol) {
         latestTickPatrol();
       }
-
-      // Then move units along routes (for dispatched units)
       if (latestMoveUnits) {
         latestMoveUnits();
       }
-    }, 500); // Run every 500ms for realistic movement speed
+    }, 500);
 
-    return () => {
-      clearInterval(movementInterval);
-    };
+    return () => clearInterval(movementInterval);
+  }, []);
+
+  // Simulation step loop — advances the active drill scenario every 2 500 ms.
+  // Mirrors the timer in FieldIncidentDashboard so the drill keeps running
+  // even when the user is on the War-Room and Field Command is not open.
+  useEffect(() => {
+    const simInterval = setInterval(() => {
+      const { mode, nextSimulationStep: latestNextStep } = useFieldIncidentStore.getState();
+      if (mode === 'SIMULATION' && latestNextStep) {
+        latestNextStep();
+      }
+    }, 2500);
+
+    return () => clearInterval(simInterval);
   }, []);
 
   const getConnectionStatusColor = () => {
@@ -443,12 +547,61 @@ export default function Dashboard() {
 
       {/* Top Bar */}
       <div className="dashboard-topbar">
-        <div className="topbar-left">
+        <div className="topbar-left" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            onClick={() => navigate('/')}
+            title="Return to dashboard selection"
+            style={{
+              background: 'rgba(15, 23, 42, 0.6)',
+              border: '1px solid rgba(51, 65, 85, 0.7)',
+              borderRadius: '6px',
+              color: '#94a3b8',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              padding: '5px 11px',
+              fontSize: '0.8rem',
+              fontWeight: '600',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              lineHeight: 1,
+              transition: 'border-color 0.2s, color 0.2s, background 0.2s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = 'rgba(96, 165, 250, 0.5)';
+              e.currentTarget.style.color = '#e2e8f0';
+              e.currentTarget.style.background = 'rgba(30, 41, 59, 0.9)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = 'rgba(51, 65, 85, 0.7)';
+              e.currentTarget.style.color = '#94a3b8';
+              e.currentTarget.style.background = 'rgba(15, 23, 42, 0.6)';
+            }}
+          >
+            🏠 Home
+          </button>
           <h1>🎯 Field War-Room Dashboard</h1>
+          {(activeFieldName || activeFieldId) && (
+            <span style={{
+              background: 'rgba(96, 165, 250, 0.15)',
+              border: '1px solid rgba(96, 165, 250, 0.4)',
+              color: '#60a5fa',
+              borderRadius: '6px',
+              padding: '3px 10px',
+              fontSize: '0.78rem',
+              fontWeight: '700',
+              letterSpacing: '0.04em',
+              whiteSpace: 'nowrap',
+              textTransform: 'uppercase',
+            }}>
+              📍 {activeFieldName || activeFieldId}
+            </span>
+          )}
         </div>
         <div className="topbar-center">
           {lastUpdateTime && (
-            <small>Last update: {lastUpdateTime.toLocaleTimeString()}</small>
+            <small>Last update: {formatTime(lastUpdateTime)}</small>
           )}
         </div>
         <div className="topbar-right">

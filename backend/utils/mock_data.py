@@ -45,6 +45,25 @@ class MockDataService:
         self.event_counter = 0
         self._init_data()
 
+    # Sequences of realistic follow-up events after an incident is created.
+    # Each inner list is one possible sequence; one is picked randomly per incident.
+    _FOLLOWUP_SEQUENCES = [
+        [("First responders notified via radio", "info"),
+         ("Units dispatched to scene", "warn"),
+         ("Perimeter established", "info")],
+        [("Priority elevated by commander", "warn"),
+         ("Additional backup requested", "warn"),
+         ("Command post established", "info")],
+        [("Scene assessment completed", "info"),
+         ("Medical support placed on standby", "info")],
+        [("Witness statements collected", "info"),
+         ("Status updated to IN_PROGRESS", "info"),
+         ("Situation report filed", "info")],
+        [("Area evacuation ordered", "warn"),
+         ("Road closures in effect", "warn"),
+         ("Media inquiry received", "info")],
+    ]
+
     def _init_data(self):
         """Initialize with sample data."""
         # Create initial incidents
@@ -57,10 +76,29 @@ class MockDataService:
             unit = self._generate_unit(i + 1)
             self.units[unit["id"]] = unit
 
-        # Create initial events
+        # Create initial events — realistic multi-event history per incident
         for incident in self.incidents.values():
+            created_at = datetime.fromisoformat(incident["created_at"])
+
+            # 1. Creation event at incident creation time
             self._add_event(
-                "incident", incident["id"], f"Incident created: {incident['title']}", "info")
+                "incident", incident["id"],
+                f"Incident created: {incident['title']}", "info",
+                timestamp=created_at,
+            )
+
+            # 2. Pick a random follow-up sequence and spread events over time
+            sequence = random.choice(self._FOLLOWUP_SEQUENCES)
+            for j, (message, level) in enumerate(sequence):
+                offset_minutes = random.randint((j + 1) * 5, (j + 1) * 20)
+                event_time = created_at + timedelta(minutes=offset_minutes)
+                # Cap at 2 min ago so we never generate future timestamps
+                cutoff = datetime.now() - timedelta(minutes=2)
+                if event_time > cutoff:
+                    event_time = cutoff - timedelta(minutes=j)
+                self._add_event(
+                    "incident", incident["id"], message, level, timestamp=event_time
+                )
 
     def _generate_incident(self, incident_id: int = None) -> Dict[str, Any]:
         """Generate a single mock incident."""
@@ -102,12 +140,13 @@ class MockDataService:
             "crew_size": random.randint(1, 5),
         }
 
-    def _add_event(self, entity_type: str, entity_id: int, message: str, level: str = "info"):
-        """Add an event to the log."""
+    def _add_event(self, entity_type: str, entity_id: int, message: str, level: str = "info",
+                   timestamp: datetime = None):
+        """Add an event to the log. Optionally accepts an explicit timestamp for init history."""
         self.event_counter += 1
         event = {
             "id": self.event_counter,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": (timestamp or datetime.now()).isoformat(),
             "entity_type": entity_type,
             "entity_id": entity_id,
             "message": message,

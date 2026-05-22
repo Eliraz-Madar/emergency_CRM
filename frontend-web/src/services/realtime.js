@@ -53,6 +53,8 @@ export class RealtimeService {
 
         if (this.eventSource.readyState === EventSource.CLOSED) {
           this.eventSource = null;
+          // Notify the caller so the UI can show a reconnecting indicator
+          this.onError?.({ type: 'connection_dropped' });
           this.reconnect();
         }
       };

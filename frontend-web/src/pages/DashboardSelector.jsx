@@ -16,7 +16,6 @@ const DashboardSelector = () => {
   const [fieldId, setFieldId] = useState('field-1');
   const [isFieldManager, setIsFieldManager] = useState(false);
   const [fieldValidationError, setFieldValidationError] = useState('');
-  const [isValidating, setIsValidating] = useState(false);
   const [fieldOptions, setFieldOptions] = useState([]);
   const [fieldOptionsError, setFieldOptionsError] = useState('');
 
@@ -67,17 +66,11 @@ const DashboardSelector = () => {
     }
   };
 
-  const validateAndNavigate = async (path) => {
-    setIsValidating(true);
-    setFieldValidationError('');
-    try {
-      await getFieldCommand(fieldId);
-      navigate(path);
-    } catch {
-      setFieldValidationError('Invalid field ID. Please choose a valid field command.');
-    } finally {
-      setIsValidating(false);
-    }
+  const validateAndNavigate = (path) => {
+    // The fieldId dropdown is already populated from the backend list,
+    // so a second async round-trip validation is unnecessary and can hang
+    // when the SSE stream holds Django's dev-server threads.
+    navigate(path);
   };
 
   return (
@@ -89,50 +82,68 @@ const DashboardSelector = () => {
           <p>Select operational dashboard</p>
         </div>
 
-        {/* Field Context */}
+        {/* Operator Configuration */}
         <div className="selector-context">
-          <div className="context-row">
-            <label htmlFor="fieldId" className="context-label">Field ID</label>
-            <select
-              id="fieldId"
-              className="context-select"
-              value={fieldId}
-              onChange={(e) => handleFieldChange(e.target.value)}
-            >
-              {fieldOptions.length ? (
-                fieldOptions.map((field) => (
-                  <option key={field.id} value={field.id}>
-                    {field.name || field.id}
-                  </option>
-                ))
-              ) : (
-                <option value={fieldId}>{fieldId}</option>
-              )}
-            </select>
-            {fieldOptionsError && (
-              <div style={{ color: '#ef4444', fontSize: '0.85rem', marginTop: '0.35rem' }}>
-                {fieldOptionsError}
-              </div>
-            )}
-            {fieldValidationError && (
-              <div style={{ color: '#ef4444', fontSize: '0.85rem', marginTop: '0.35rem' }}>
-                {fieldValidationError}
-              </div>
-            )}
-            {isValidating && (
-              <div style={{ color: '#e2e8f0', fontSize: '0.8rem', marginTop: '0.35rem' }}>
-                Validating field command...
-              </div>
-            )}
+          <div className="context-header">
+            <span className="context-header-icon">🏢</span>
+            <div>
+              <h3 className="context-title">Select Control Center</h3>
+              <p className="context-subtitle">Choose your assigned field command post before entering a dashboard</p>
+            </div>
           </div>
-          <div className="context-row">
-            <label className="context-label">Field Manager Access</label>
-            <input
-              type="checkbox"
-              checked={isFieldManager}
-              onChange={(e) => handleRoleToggle(e.target.checked)}
-            />
-            <span className="context-hint">TODO(auth): replace with real login/roles</span>
+
+          <div className="context-fields">
+            {/* Field Selection */}
+            <div className="context-field-group">
+              <label htmlFor="fieldId" className="context-label">
+                <span className="context-label-icon">📍</span>
+                Active Control Center
+              </label>
+              <div className="context-select-wrapper">
+                <select
+                  id="fieldId"
+                  className="context-select"
+                  value={fieldId}
+                  onChange={(e) => handleFieldChange(e.target.value)}
+                >
+                  {fieldOptions.length ? (
+                    fieldOptions.map((field) => (
+                      <option key={field.id} value={field.id}>
+                        {field.name || field.id}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={fieldId}>{fieldId}</option>
+                  )}
+                </select>
+                <span className="context-select-arrow">▾</span>
+              </div>
+              {fieldOptionsError && (
+                <div className="context-error">{fieldOptionsError}</div>
+              )}
+              {fieldValidationError && (
+                <div className="context-error">{fieldValidationError}</div>
+              )}
+            </div>
+
+            {/* Access Level Toggle */}
+            <div className="context-field-group">
+              <span className="context-label">
+                <span className="context-label-icon">🎖️</span>
+                Operator Access Level
+              </span>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={isFieldManager}
+                  onChange={(e) => handleRoleToggle(e.target.checked)}
+                />
+                <span className="toggle-slider" />
+                <span className="toggle-text">
+                  {isFieldManager ? 'Field Manager' : 'Viewer'}
+                </span>
+              </label>
+            </div>
           </div>
         </div>
 

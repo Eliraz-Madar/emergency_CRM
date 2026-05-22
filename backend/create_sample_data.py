@@ -1,5 +1,10 @@
 import os
+import sys
 import django
+
+# Force stdout to UTF-8 so checkmark characters don't crash on Windows cp1252 consoles
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 django.setup()

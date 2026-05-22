@@ -13,20 +13,26 @@
  */
 
 import { useEffect, useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useFieldIncidentStore, generateRoutineEvent } from '../store/fieldIncident';
 import {
   connectToFieldIncidentStream,
   simulateFieldIncidentUpdate,
+  getFieldCommand,
 } from '../api/client';
 import SituationOverview from '../components/field-incident/SituationOverview';
 import SectorMap from '../components/field-incident/SectorMap';
 import TaskGroupPanel from '../components/field-incident/TaskGroupPanel';
 import OperationalTimeline from '../components/field-incident/OperationalTimeline';
 import '../styles/field-incident-dashboard.css';
+import { formatTime, formatDateTime } from '../utils/time.js';
 
 const FieldIncidentDashboard = () => {
+  const navigate = useNavigate();
+
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState(null);
   const [selectedScenario, setSelectedScenario] = useState('FIRE');
+  const [activeFieldName, setActiveFieldName] = useState('');
 
   const setConnectionStatus = useFieldIncidentStore((s) => s.setConnectionStatus);
   const setLoading = useFieldIncidentStore((s) => s.setLoading);
@@ -59,7 +65,9 @@ const FieldIncidentDashboard = () => {
   const lastLoadedFieldIdRef = useRef(null);
 
   const userRole = typeof window !== 'undefined' ? localStorage.getItem('userRole') : null;
-  const hasAccess = userRole === 'FIELD_MANAGER';
+  // Allow access when no role is set (e.g. direct URL navigation in dev/demo).
+  // Only block explicitly non-field-manager roles.
+  const hasAccess = !userRole || userRole === 'FIELD_MANAGER';
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -69,15 +77,36 @@ const FieldIncidentDashboard = () => {
     }
   }, [setFieldId]);
 
-  // Load initial data
+  // Fetch human-readable name for the active control center
+  useEffect(() => {
+    if (!fieldId) return;
+    getFieldCommand(fieldId)
+      .then((data) => {
+        if (data?.name) setActiveFieldName(data.name);
+      })
+      .catch(() => {/* silently ignore – name is cosmetic */});
+  }, [fieldId]);
+
+  // Load initial data — skip if a drill or live incident is already in the store
+  // so navigating back to this page mid-simulation never overwrites active state.
   useEffect(() => {
     if (!fieldId) return;
     if (lastLoadedFieldIdRef.current === fieldId) return;
-    if (mode === 'LIVE' && majorIncident) {
+
+    // Simulation is already running — reuse existing store state without
+    // hitting the API (it has sectors, task-groups and events already loaded).
+    if (mode === 'SIMULATION') {
       setLoading(false);
       lastLoadedFieldIdRef.current = fieldId;
       return;
     }
+
+    // NOTE: we intentionally do NOT skip the API load for mode === 'LIVE'.
+    // The War-Room sets majorIncident to a thin incident object (no sectors /
+    // task-groups / events). We need loadFieldIncident() to hydrate the full
+    // field-command scenario so SituationOverview, SectorMap and TaskGroupPanel
+    // have the rich data they require.
+
     const loadInitialData = async () => {
       try {
         lastLoadedFieldIdRef.current = fieldId;
@@ -90,7 +119,7 @@ const FieldIncidentDashboard = () => {
     };
 
     loadInitialData();
-  }, [fieldId, loadFieldIncident]);
+  }, [fieldId, mode, majorIncident, loadFieldIncident]);
 
   // Connect to real-time updates
   useEffect(() => {
@@ -146,7 +175,8 @@ const FieldIncidentDashboard = () => {
         };
 
         eventSource.onerror = () => {
-          setConnectionStatus('OFFLINE');
+          // Show CONNECTING (yellow) while reconnecting — not OFFLINE (red)
+          setConnectionStatus('CONNECTING');
           eventSource.close();
 
           // Attempt reconnect after 5 seconds
@@ -154,7 +184,7 @@ const FieldIncidentDashboard = () => {
         };
       } catch (err) {
         console.error('Failed to connect to field incident stream:', err);
-        setConnectionStatus('OFFLINE');
+        setConnectionStatus('CONNECTING');
         reconnectTimeout = setTimeout(connect, 5000);
       }
     };
@@ -325,24 +355,75 @@ const FieldIncidentDashboard = () => {
         alignItems: 'center',
         boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
       }}>
-        {/* Left: Title */}
-        <div style={{ flex: '0 0 auto' }}>
-          <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#e2e8f0' }}>
+        {/* Left: Home button + Title + Active Control Center */}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '14px', minWidth: 0 }}>
+          <button
+            onClick={() => navigate('/')}
+            title="Return to dashboard selection"
+            style={{
+              background: 'rgba(15, 23, 42, 0.6)',
+              border: '1px solid rgba(51, 65, 85, 0.7)',
+              borderRadius: '6px',
+              color: '#94a3b8',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              padding: '5px 11px',
+              fontSize: '0.8rem',
+              fontWeight: '600',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              lineHeight: 1,
+              transition: 'border-color 0.2s, color 0.2s, background 0.2s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = 'rgba(96, 165, 250, 0.5)';
+              e.currentTarget.style.color = '#e2e8f0';
+              e.currentTarget.style.background = 'rgba(30, 41, 59, 0.9)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = 'rgba(51, 65, 85, 0.7)';
+              e.currentTarget.style.color = '#94a3b8';
+              e.currentTarget.style.background = 'rgba(15, 23, 42, 0.6)';
+            }}
+          >
+            🏠 Home
+          </button>
+          <div style={{ minWidth: 0 }}>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             🎯 Field Incident Command Dashboard
           </h1>
-          <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: '#94a3b8' }}>
-            Field: {fieldId || 'unknown'}
+          <div style={{ marginTop: '0.4rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{
+              fontSize: '0.72rem',
+              color: '#64748b',
+              textTransform: 'uppercase',
+              letterSpacing: '0.07em',
+              fontWeight: '600',
+            }}>
+              Active Control Center:
+            </span>
+            <span style={{
+              fontSize: '0.95rem',
+              color: '#60a5fa',
+              fontWeight: '700',
+              letterSpacing: '0.02em',
+            }}>
+              {activeFieldName || fieldId || '—'}
+            </span>
+          </div>
           </div>
         </div>
 
-        {/* Center: Simulation Controls */}
+        {/* Center: Simulation Controls — flex:1 on all three columns keeps this truly centered */}
         <div style={{
-          flex: '1 1 auto',
+          flex: 1,
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
           gap: '1rem',
-          padding: '0 2rem',
+          padding: '0 1rem',
         }}>
           {mode === 'ROUTINE' ? (
             <>
@@ -468,10 +549,11 @@ const FieldIncidentDashboard = () => {
 
         {/* Right: Server Status */}
         <div style={{
-          flex: '0 0 auto',
+          flex: 1,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
+          justifyContent: 'center',
           gap: '0.25rem',
         }}>
           <div style={{
@@ -508,6 +590,7 @@ const FieldIncidentDashboard = () => {
               {connectionStatus === 'CONNECTED' && '🟢'}
               {connectionStatus === 'OFFLINE' && '🔴'}
               {connectionStatus === 'DEGRADED' && '🟡'}
+              {connectionStatus === 'CONNECTING' && '🟡'}
               {' '}{connectionStatus}
             </span>
           </div>
@@ -544,7 +627,7 @@ const FieldIncidentDashboard = () => {
         <div className="footer-info">
           <span>🎖️ Field Incident Command System</span>
           <span className="timestamp">
-            Updated: {new Date().toLocaleTimeString()}
+            Updated: {formatTime(new Date())}
           </span>
         </div>
       </footer>
@@ -584,7 +667,7 @@ const FieldIncidentDashboard = () => {
                         : new Date(selectedTimelineEvent.created_at);
                     }
                     if (date && !isNaN(date.getTime())) {
-                      return date.toLocaleString();
+                      return formatDateTime(date);
                     }
                     return 'No timestamp available';
                   })()}

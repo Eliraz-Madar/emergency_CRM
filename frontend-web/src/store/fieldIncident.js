@@ -9,6 +9,58 @@ import { create } from 'zustand';
 import { SCENARIOS } from '../simulations/simulationScenarios';
 import { getFieldIncident } from '../api/client';
 import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
+import { useDashboardStore } from './dashboard';
+
+// ---------------------------------------------------------------------------
+// Scenario unit helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps scenario-specific unit types to the three standard types that
+ * MapView's createUnitIcon() understands: POLICE | FIRE | MEDICAL.
+ */
+const SCENARIO_UNIT_TYPE_MAP = {
+  FIRE_TRUCK: 'FIRE',
+  AMBULANCE: 'MEDICAL',
+  EMS: 'MEDICAL',
+  HAZMAT: 'FIRE',
+  RESCUE: 'FIRE',
+  TANKER: 'FIRE',
+  POLICE_CAR: 'POLICE',
+};
+
+/**
+ * Normalizes a raw scenario unit object so that moveUnits() can animate it.
+ *
+ * - Remaps non-standard types (FIRE_TRUCK → FIRE, EMS → MEDICAL, …)
+ * - Converts status MOVING → EN_ROUTE so moveUnits() routes the unit
+ * - Sets assignedTo / assignedTarget so moveUnits() knows where to go
+ * - Clears stale routing state so the unit requests a fresh road route
+ */
+const normalizeScenarioUnit = (u, simIncidentId, incLat, incLng) => {
+  const normalizedType = SCENARIO_UNIT_TYPE_MAP[u.type] || u.type;
+  const isMoving = u.status === 'MOVING' || u.status === 'EN_ROUTE';
+  return {
+    ...u,
+    type: normalizedType,
+    // Mark as a scenario-script unit so the announcement gate and routineUnits
+    // filter can distinguish it from a user-dispatched routine patrol unit.
+    isScenarioUnit: true,
+    status: isMoving ? 'EN_ROUTE' : u.status,
+    assignedTo: isMoving ? simIncidentId : (u.assignedTo || null),
+    assignedTarget: isMoving ? [incLat, incLng] : (u.assignedTarget || null),
+    route: isMoving ? null : (u.route || null),
+    routeIndex: isMoving ? 0 : (u.routeIndex || 0),
+    routePending: isMoving ? false : (u.routePending || false),
+    routeRetryAt: isMoving ? 0 : (u.routeRetryAt || 0),
+    // Treat all scenario units as "on a road already" so moveUnits() skips the
+    // async road-snap step and immediately requests a routing path.  Without
+    // this, every unit is stuck in onRoadPending while the snap API is called.
+    onRoad: true,
+    onRoadPending: false,
+    roadRetryAt: 0,
+  };
+};
 
 // Major Israeli cities used for unit and event placement (inland-safe centers)
 const ISRAEL_CITIES = [
@@ -98,12 +150,12 @@ const PATROL_STEP_DELTA = 0.003; // Visible patrol speed on country map (~300m p
 const PATROL_SPEED = 0.0005; // Same as route movement speed
 const RED_LIGHT_STOP_MS = [3000, 8000];
 const RANDOM_STOP_MS = [8000, 20000];
-const RED_LIGHT_STOP_CHANCE = 0.02; // 2% chance per tick to pause briefly
+const RED_LIGHT_STOP_CHANCE = 0; // No stops — all vehicles keep moving
 const AUTO_RELEASE_MS = [45000, 120000]; // Ambulance waits 45s–120s before release
-const ROUTE_RETRY_MS = [8000, 20000];
-const MAX_ROUTE_REQUESTS_PER_TICK = 5;
-const NEAREST_RETRY_MS = [20000, 45000];
-const MAX_NEAREST_REQUESTS_PER_TICK = 2;
+const ROUTE_RETRY_MS = [2000, 4000];
+const MAX_ROUTE_REQUESTS_PER_TICK = 10;
+const NEAREST_RETRY_MS = [3000, 8000];
+const MAX_NEAREST_REQUESTS_PER_TICK = 10;
 
 const clampToIsrael = (lat, lng) => {
   const safeLat = Number.isFinite(lat) ? Math.min(Math.max(lat, LAT_MIN), LAT_MAX) : LAT_MIN;
@@ -187,7 +239,7 @@ const generateNationwideUnits = (count = 50) => {
 
     const type = types[Math.floor(Math.random() * types.length)];
     const station = randomStationForType(type);
-    const isParked = Math.random() < 0.35;
+    const isParked = false; // All vehicles start active on patrol
 
     // Separate target waypoint near same or nearby city
     const targetCity = Math.random() > 0.7 ? randomChoice(ISRAEL_CITIES) : city;
@@ -213,7 +265,7 @@ const generateNationwideUnits = (count = 50) => {
       routePending: false,
       patrolRetryAt: 0,
       routeRetryAt: 0,
-      onRoad: false,
+      onRoad: true, // Spawn near city centers — treat as on-road immediately
       onRoadPending: false,
       roadRetryAt: 0,
       homeStationSnap: null,
@@ -288,7 +340,11 @@ export const useFieldIncidentStore = create((set, get) => ({
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
   setMode: (mode) => set({ mode }),
-  setFieldId: (fieldId) => set({ fieldId }),
+  setFieldId: (fieldId) => {
+    set({ fieldId });
+    // Mirror to localStorage so DashboardSelector and getStoredFieldId() always agree
+    try { localStorage.setItem('fieldId', fieldId); } catch { /* ignore */ }
+  },
   loadFieldIncident: async (fieldIdOverride = null) => {
     const state = get();
     const fieldId = fieldIdOverride || state.fieldId || getStoredFieldId();
@@ -338,6 +394,9 @@ export const useFieldIncidentStore = create((set, get) => ({
     const isPayloadObject = incidentIdOrPayload && typeof incidentIdOrPayload === 'object' && !Array.isArray(incidentIdOrPayload);
     const incidentId = isPayloadObject ? incidentIdOrPayload.incidentId : incidentIdOrPayload;
     const unitIds = isPayloadObject ? incidentIdOrPayload.unitIds : unitIdsMaybe;
+    // silent=true suppresses voice and event-log entries — used when re-applying
+    // saved dispatch assignments after a page refresh.
+    const silent = isPayloadObject ? (incidentIdOrPayload.silent === true) : false;
 
     console.log('🚨 Dispatching units:', unitIds, 'to incident:', incidentId);
 
@@ -347,7 +406,7 @@ export const useFieldIncidentStore = create((set, get) => ({
     }
 
     // Voice notification on dispatch
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    if (!silent && typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const isPlural = unitIds.length > 1;
       const friendlyUnitId = (id) => (typeof id === 'string' ? id.replace(/^routine-/, '') : id);
       const unitLabel = isPlural
@@ -358,8 +417,9 @@ export const useFieldIncidentStore = create((set, get) => ({
       window.speechSynthesis.speak(utterance);
     }
 
-    // Find target incident or use payload targetPosition
-    const target = (state.incidents || []).find((i) => i.id === incidentId);
+    // Find target incident — also check majorIncident as fallback (simulation uses 'sim-1')
+    const target = (state.incidents || []).find((i) => i.id === incidentId)
+      || (state.majorIncident?.id === incidentId ? state.majorIncident : null);
     const payloadTarget = isPayloadObject && Array.isArray(incidentIdOrPayload.targetPosition)
       ? incidentIdOrPayload.targetPosition
       : null;
@@ -593,6 +653,46 @@ export const useFieldIncidentStore = create((set, get) => ({
 
       return { units: updatedUnits, routineUnits: updatedRoutineUnits, incidents: updatedIncidents, majorIncident: updatedMajorIncident };
     });
+
+    // Persist dispatch assignments to localStorage so they survive page refresh.
+    // Each entry stores just IDs + coordinates — routes are recalculated on restore.
+    try {
+      const existing = JSON.parse(localStorage.getItem('ecm-dispatch-assignments') || '[]');
+      const fresh = unitIds.map((uid) => ({
+        unitId: uid,
+        incidentId,
+        incidentLat: targetLat,
+        incidentLng: targetLng,
+        incidentTitle: target?.title || `Incident ${incidentId}`,
+      }));
+      // Replace any existing entry for these unit IDs then append fresh ones
+      const merged = [
+        ...existing.filter((a) => !unitIds.includes(a.unitId)),
+        ...fresh,
+      ];
+      localStorage.setItem('ecm-dispatch-assignments', JSON.stringify(merged));
+    } catch (_) { /* non-critical */ }
+
+    // Write dispatch events into the War-Room event feed (skipped on silent restore)
+    if (!silent) {
+      try {
+        const { addEvent } = useDashboardStore.getState();
+        const incidentTitle = target?.title || `Incident ${incidentId}`;
+        const ts = new Date().toISOString();
+        for (const unitId of unitIds) {
+          const dispatchedUnit = (get().units || []).find((u) => u.id === unitId);
+          const unitLabel = dispatchedUnit?.name || String(unitId);
+          addEvent({
+            id: `dispatch-${unitId}-${Date.now()}`,
+            timestamp: ts,
+            entity_type: 'incident',
+            entity_id: incidentId,
+            message: `🚨 ${unitLabel} dispatched to ${incidentTitle}`,
+            level: 'warn',
+          });
+        }
+      } catch (_) { /* non-critical — never let event logging crash dispatch */ }
+    }
   },
 
   tickRoutinePatrol: () => {
@@ -737,25 +837,23 @@ export const useFieldIncidentStore = create((set, get) => ({
 
           if (nextPos.arrived) {
             const nextTarget = randomLandPoint();
-            const shouldPark = Math.random() < 0.25;
-            const station = unit.homeStation || randomStationForType(unit.type);
             return {
               ...unit,
               id: unit.id || `routine-${idx}`,
-              position: shouldPark ? [station.lat, station.lng] : [clampedLat, clampedLng],
-              latitude: shouldPark ? station.lat : clampedLat,
-              longitude: shouldPark ? station.lng : clampedLng,
+              position: [clampedLat, clampedLng],
+              latitude: clampedLat,
+              longitude: clampedLng,
               patrolRoute: null,
               patrolIndex: 0,
               patrolRoutePending: false,
-              patrolRetryAt: now + randomMsBetween(ROUTE_RETRY_MS),
+              patrolRetryAt: now + 500, // Request next route almost immediately
               onRoad: true,
               onRoadPending: false,
               roadRetryAt: 0,
-              targetPosition: shouldPark ? [station.lat, station.lng] : nextTarget,
-              isParked: shouldPark,
-              status: shouldPark ? 'AVAILABLE' : 'PATROL',
-              stopUntil: shouldPark ? null : (now + randomMsBetween(RANDOM_STOP_MS)),
+              targetPosition: nextTarget,
+              isParked: false,
+              status: 'PATROL',
+              stopUntil: null,
               lastUpdated: now,
             };
           }
@@ -780,6 +878,7 @@ export const useFieldIncidentStore = create((set, get) => ({
       const hasTarget = Array.isArray(unit.targetPosition) && unit.targetPosition.length >= 2;
       const [targetLat, targetLng] = hasTarget ? unit.targetPosition : randomLandPoint();
 
+      let routeQueued = false;
       if (!unit.patrolRoutePending && (!Number.isFinite(unit.patrolRetryAt) || now >= unit.patrolRetryAt)) {
         if (routeRequests.length < MAX_ROUTE_REQUESTS_PER_TICK) {
           routeRequests.push({
@@ -789,6 +888,7 @@ export const useFieldIncidentStore = create((set, get) => ({
             toLat: targetLat,
             toLng: targetLng,
           });
+          routeQueued = true;
         }
       }
 
@@ -799,8 +899,12 @@ export const useFieldIncidentStore = create((set, get) => ({
         latitude: currentLat,
         longitude: currentLng,
         targetPosition: [targetLat, targetLng],
-        patrolRoutePending: true,
-        patrolRetryAt: now + randomMsBetween(ROUTE_RETRY_MS),
+        // Only mark pending if a request was actually queued.
+        // If rate limit was hit, stay false so the unit retries next tick.
+        patrolRoutePending: routeQueued,
+        patrolRetryAt: routeQueued
+          ? now + randomMsBetween(ROUTE_RETRY_MS)
+          : now + 500, // retry next tick if rate-limited
         onRoad: unit.onRoad,
         onRoadPending: unit.onRoadPending,
         roadRetryAt: unit.roadRetryAt,
@@ -1076,6 +1180,8 @@ export const useFieldIncidentStore = create((set, get) => ({
     const now = Date.now();
     const routeRequests = [];
     const nearestRequests = [];
+    // Units that transition EN_ROUTE → ON_SCENE this tick
+    const newArrivals = [];
 
     const updatedUnits = state.units.map((u) => {
       // Ambulance auto-release logic when ON_SCENE
@@ -1120,7 +1226,10 @@ export const useFieldIncidentStore = create((set, get) => ({
       }
 
       if (u.status === 'EN_ROUTE' && u.assignedTo) {
-        const target = (state.incidents || []).find((i) => i.id === u.assignedTo);
+        // Also check majorIncident as a fallback — simulation incidents live there,
+        // not necessarily in state.incidents (e.g. 'sim-1').
+        const target = (state.incidents || []).find((i) => i.id === u.assignedTo)
+          || (state.majorIncident?.id === u.assignedTo ? state.majorIncident : null);
         if (!target) {
           console.warn(`Unit ${u.id} assigned to non-existent incident ${u.assignedTo}`);
           return u;
@@ -1196,6 +1305,10 @@ export const useFieldIncidentStore = create((set, get) => ({
 
         if (nextPos.lat !== null && nextPos.lng !== null && Number.isFinite(nextPos.lat) && Number.isFinite(nextPos.lng)) {
           const arrived = nextPos.arrived;
+          // Capture unit info BEFORE mutating status so we can log the transition
+          if (arrived && u.status !== 'ON_SCENE') {
+            newArrivals.push({ id: u.id, name: u.name, assignedTo: u.assignedTo, type: u.type });
+          }
           return {
             ...u,
             latitude: nextPos.lat,
@@ -1218,8 +1331,38 @@ export const useFieldIncidentStore = create((set, get) => ({
       return u;
     });
 
-    // Update BOTH units and routineUnits to keep them in sync
-    set({ units: updatedUnits, routineUnits: updatedUnits });
+    // Update units with all active units; routineUnits must stay clean (patrol only).
+    // If we copy scenario units into routineUnits, nextSimulationStep() will re-add
+    // them alongside the new step's units and create duplicates in the store.
+    const updatedRoutineUnits = updatedUnits.filter((u) => !u.isScenarioUnit);
+    set({ units: updatedUnits, routineUnits: updatedRoutineUnits });
+
+    // Write arrival events into the War-Room event feed
+    if (newArrivals.length > 0) {
+      // Remove arrived units from the persisted dispatch assignments
+      try {
+        const arrivedIds = newArrivals.map((u) => u.id);
+        const existing = JSON.parse(localStorage.getItem('ecm-dispatch-assignments') || '[]');
+        const cleaned = existing.filter((a) => !arrivedIds.includes(a.unitId));
+        localStorage.setItem('ecm-dispatch-assignments', JSON.stringify(cleaned));
+      } catch (_) { /* non-critical */ }
+
+      try {
+        const { addEvent } = useDashboardStore.getState();
+        const ts = new Date().toISOString();
+        for (const unit of newArrivals) {
+          const unitLabel = unit.name || String(unit.id);
+          addEvent({
+            id: `arrived-${unit.id}-${Date.now()}`,
+            timestamp: ts,
+            entity_type: 'incident',
+            entity_id: unit.assignedTo,
+            message: `✅ ${unitLabel} arrived on scene`,
+            level: 'info',
+          });
+        }
+      } catch (_) { /* non-critical */ }
+    }
 
     // Async: calculate missing EN_ROUTE routes
     if (routeRequests.length > 0) {
@@ -1515,30 +1658,43 @@ export const useFieldIncidentStore = create((set, get) => ({
     const routineUnits = Array.isArray(get().routineUnits) && get().routineUnits.length > 0
       ? get().routineUnits
       : createRoutineUnits();
-    const simUnits = Array.isArray(firstStep?.units) ? firstStep.units : [];
-    const combinedUnits = [...routineUnits, ...simUnits];
+
+    // Build the simulation major incident first so we can reference its id/coords
+    const simIncLat = firstStep?.incidentLocation?.lat || 31.77;
+    const simIncLng = firstStep?.incidentLocation?.lng || 35.22;
+    const simMajorIncident = {
+      id: 'sim-1',
+      title: `${type} EMERGENCY`,
+      incident_type: type,
+      status: 'INITIALIZING',
+      estimated_casualties: firstStep?.stats?.estimated_casualties || 0,
+      confirmed_deaths: firstStep?.stats?.confirmed_deaths || 0,
+      displaced_persons: firstStep?.stats?.displaced_persons || 0,
+      radius_meters: 1000,
+      location_lat: simIncLat,
+      location_lng: simIncLng,
+      latitude: simIncLat,
+      longitude: simIncLng,
+    };
+
+    // Normalize scenario units: remap types + convert MOVING → EN_ROUTE
+    const rawSimUnits = Array.isArray(firstStep?.units) ? firstStep.units : [];
+    const normalizedSimUnits = rawSimUnits.map((u) =>
+      normalizeScenarioUnit(u, simMajorIncident.id, simIncLat, simIncLng)
+    );
 
     // CRITICAL: Set safe defaults (never null) to prevent crashes
     set({
       mode: 'SIMULATION',
       simulationType: type,
       simulationStep: 0,
-      majorIncident: {
-        id: 'sim-1',
-        title: `${type} EMERGENCY`,
-        incident_type: type,
-        status: 'INITIALIZING',
-        estimated_casualties: firstStep?.stats?.estimated_casualties || 0,
-        confirmed_deaths: firstStep?.stats?.confirmed_deaths || 0,
-        displaced_persons: firstStep?.stats?.displaced_persons || 0,
-        radius_meters: 1000,
-        location_lat: firstStep?.incidentLocation?.lat || 31.77,
-        location_lng: firstStep?.incidentLocation?.lng || 35.22,
-      },
+      majorIncident: simMajorIncident,
+      // Reset incidents to ONLY the simulation incident so MapView shows a clean map
+      incidents: [simMajorIncident],
       sectors: [],
       taskGroups: [],
       routineUnits,
-      units: combinedUnits,
+      units: [...routineUnits, ...normalizedSimUnits],
       events: [{
         title: 'Simulation Started',
         description: `${type} emergency scenario activated`,
@@ -1591,8 +1747,45 @@ export const useFieldIncidentStore = create((set, get) => ({
 
     // Set units for this step (merge routine patrols so map stays populated)
     if (step.units && Array.isArray(step.units)) {
-      const routineUnits = Array.isArray(state.routineUnits) ? state.routineUnits : [];
-      set({ units: [...routineUnits, ...step.units] });
+      // Filter out any scenario units that may have leaked into routineUnits via
+      // moveUnits() — we only want the actual 50 patrol units here.
+      const routineUnits = (Array.isArray(state.routineUnits) ? state.routineUnits : [])
+        .filter((u) => !u.isScenarioUnit);
+      const currentUnits = state.units || [];
+      const incLat = state.majorIncident?.location_lat || 31.77;
+      const incLng = state.majorIncident?.location_lng || 35.22;
+      const simId = state.majorIncident?.id || 'sim-1';
+
+      const normalizedStepUnits = step.units.map((u) => {
+        const normalized = normalizeScenarioUnit(u, simId, incLat, incLng);
+        // If this unit is already moving toward the incident, preserve its routing
+        // state so moveUnits() can keep animating it smoothly instead of teleporting.
+        const existing = currentUnits.find((cu) => cu.id === u.id);
+        if (
+          existing &&
+          (existing.status === 'EN_ROUTE' || existing.status === 'MOVING') &&
+          normalized.status === 'EN_ROUTE'
+        ) {
+          return {
+            ...normalized,
+            position: existing.position,
+            latitude: existing.latitude,
+            longitude: existing.longitude,
+            route: existing.route,
+            routeIndex: existing.routeIndex,
+            onRoad: existing.onRoad,
+            onRoadPending: existing.onRoadPending,
+            roadRetryAt: existing.roadRetryAt,
+            routePending: existing.routePending,
+            routeRetryAt: existing.routeRetryAt,
+            assignedTo: existing.assignedTo || normalized.assignedTo,
+            assignedTarget: existing.assignedTarget || normalized.assignedTarget,
+          };
+        }
+        return normalized;
+      });
+
+      set({ units: [...routineUnits, ...normalizedStepUnits] });
     }
 
     // Add new sectors with defensive checks

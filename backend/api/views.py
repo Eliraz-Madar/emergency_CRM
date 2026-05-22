@@ -81,14 +81,26 @@ def mock_units(request):
 
 @api_view(["GET"])
 def mock_events(request):
-    """Get mock event log for dashboard."""
+    """Get mock event log for dashboard. Supports ?incident_id=<id> filtering."""
     limit = request.query_params.get("limit", 50)
+    incident_id_param = request.query_params.get("incident_id", None)
     try:
         limit = int(limit)
     except ValueError:
         limit = 50
     mock_service = get_mock_service()
-    return Response(mock_service.get_events(limit=limit))
+    events = mock_service.get_events(limit=limit)
+    if incident_id_param:
+        try:
+            incident_id_int = int(incident_id_param)
+            events = [
+                e for e in events
+                if e.get("entity_type") == "incident"
+                and e.get("entity_id") == incident_id_int
+            ]
+        except (ValueError, TypeError):
+            pass
+    return Response(events)
 
 
 @api_view(["GET"])

@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
+import { EventFeed } from './EventFeed.jsx';
 import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
@@ -31,6 +32,9 @@ export function IncidentDetailsPanel() {
     updateIncident,
     selectedUnitIds,
     setSelectedUnitIds,
+    setZoomToIncident,
+    setFlashingIncident,
+    clearFlashingIncident,
   } = useDashboardStore();
 
   // מושכים את המידע החי מה-Store המבצעי
@@ -58,6 +62,10 @@ export function IncidentDetailsPanel() {
   }, [selectedIncidentId, fieldIncidents, dashboardIncidents, fieldMode, majorIncident]);
 
   const [selectedType, setSelectedType] = useState('POLICE');
+  const [activeTab, setActiveTab] = useState('dispatch');
+
+  // Reset to dispatch tab whenever a different incident is opened
+  useEffect(() => { setActiveTab('dispatch'); }, [incident?.id]);
 
   // פונקציית העדכון - משתמשת ב-Store החי
   const handlePriorityChange = (newPriority) => {
@@ -110,7 +118,13 @@ export function IncidentDetailsPanel() {
 
     updateIncident(incident.id, { status: 'IN_PROGRESS' });
     setSelectedUnitIds([]);
-    handleClose();
+
+    // Keep panel open so the user sees the dispatched units list immediately.
+    // Zoom the map to the incident + its units, and flash the marker.
+    setZoomToIncident?.(incident.id);
+    setFlashingIncident?.(incident.id);
+    // Stop flashing after 4 seconds
+    setTimeout(() => clearFlashingIncident?.(), 4000);
   };
 
   const renderUnitCard = (unit) => {
@@ -145,6 +159,20 @@ export function IncidentDetailsPanel() {
       </div>
     );
   };
+
+  // Live dispatched units — read directly from the units store (reliable regardless of incident source)
+  const dispatchedUnits = useMemo(() => {
+    if (!incident?.id) return [];
+    const liveUnits = Array.isArray(units) ? units : [];
+    return liveUnits
+      .filter((u) => String(u.assignedTo) === String(incident.id))
+      .map((u) => ({
+        id: u.id,
+        name: u.name || String(u.id),
+        type: u.type || 'POLICE',
+        status: u.status || 'EN_ROUTE',
+      }));
+  }, [incident?.id, units]);
 
   const headerIcon = (() => {
     const type = (incident?.incident_type || '').toUpperCase();
@@ -197,22 +225,134 @@ export function IncidentDetailsPanel() {
         </div>
       </div>
 
-      {/* --- Scrollable Content Wrapper --- */}
-      {/* flex-1: תופס את כל המקום שנשאר. overflow-y-auto: גולל אם צריך. min-h-0: מונע באג ב-flex שמבטל גלילה. */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '1rem', minHeight: 0 }}>
+      {/* ── Tab Bar ── */}
+      <div style={{ display: 'flex', borderBottom: '1px solid #1e293b', flexShrink: 0 }}>
+        {[
+          { id: 'dispatch', label: '🚒 Dispatch' },
+          { id: 'events',   label: '📋 Events'  },
+        ].map(({ id, label }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            style={{
+              flex: 1,
+              padding: '9px 0',
+              background: activeTab === id ? 'rgba(59,130,246,0.10)' : 'transparent',
+              color: activeTab === id ? '#60a5fa' : '#6b7280',
+              border: 'none',
+              borderBottom: activeTab === id ? '2px solid #3b82f6' : '2px solid transparent',
+              cursor: 'pointer',
+              fontSize: '0.82rem',
+              fontWeight: '600',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-        {/* Incident Severity Control */}
-        <div className="cc-severity-section mb-6">
+      {/* --- Scrollable Content Wrapper --- */}
+      {/* dispatch: outer div scrolls. events: EventFeed handles its own scroll, outer must not double-scroll. */}
+      <div style={{
+        flex: 1,
+        overflowY: activeTab === 'events' ? 'hidden' : 'auto',
+        padding: activeTab === 'events' ? '0' : '1rem',
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+      }}>
+
+      {/* ── Events tab ── */}
+      {activeTab === 'events' && (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <EventFeed />
+        </div>
+      )}
+
+      {/* ── Dispatch tab content (original) ── */}
+      {activeTab === 'dispatch' && (<>
+
+        {/* ── Dispatched Units (always visible) ── */}
+        <div style={{ marginBottom: '1.25rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+            <span style={{ fontSize: '1rem' }}>🚨</span>
+            <span style={{ fontWeight: '600', color: '#e2e8f0', fontSize: '0.9rem' }}>Dispatched Units</span>
+            <span style={{
+              marginLeft: 'auto',
+              background: dispatchedUnits.length > 0 ? '#1e3a5f' : '#1f2937',
+              color: dispatchedUnits.length > 0 ? '#93c5fd' : '#6b7280',
+              borderRadius: '999px',
+              padding: '2px 10px',
+              fontSize: '0.75rem',
+              fontWeight: 'bold',
+            }}>{dispatchedUnits.length}</span>
+          </div>
+
+          {dispatchedUnits.length === 0 ? (
+            <div style={{
+              textAlign: 'center',
+              padding: '12px',
+              color: '#4b5563',
+              fontSize: '0.82rem',
+              fontStyle: 'italic',
+              background: '#0f172a',
+              borderRadius: '6px',
+              border: '1px dashed #1f2937',
+            }}>
+              No units dispatched yet
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '180px', overflowY: 'auto' }}>
+              {dispatchedUnits.map((unit) => {
+                const meta = TYPE_META[unit.type] || TYPE_META.POLICE;
+                const isArrived = unit.status === 'ON_SCENE';
+                const statusLabel = isArrived ? 'Arrived' : 'On the Way';
+                const statusColor = isArrived ? '#10b981' : '#f59e0b';
+                const statusBg = isArrived ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.12)';
+                return (
+                  <div key={unit.id} style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    background: '#0f172a',
+                    border: '1px solid #1f2937',
+                    borderRadius: '6px',
+                    padding: '8px 10px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <meta.Icon size={14} color={meta.color} />
+                      <span style={{ fontSize: '0.85rem', fontWeight: '600', color: '#e2e8f0' }}>
+                        {unit.name}
+                      </span>
+                    </div>
+                    <span style={{
+                      background: statusBg,
+                      color: statusColor,
+                      border: `1px solid ${statusColor}`,
+                      borderRadius: '999px',
+                      padding: '2px 10px',
+                      fontSize: '0.75rem',
+                      fontWeight: 'bold',
+                    }}>
+                      {statusLabel}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ── Incident Severity ── */}
+        <div style={{ marginBottom: '1.25rem' }}>
           <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Incident Severity</div>
           <div className="cc-severity-buttons grid grid-cols-3 gap-2">
             {['LOW', 'MEDIUM', 'HIGH'].map((level) => {
               const normalizedPriority = incident.priority === 'CRITICAL' ? 'HIGH' : incident.priority;
               const currentPriority = normalizedPriority === 'MED' ? 'MEDIUM' : normalizedPriority;
               const isActive = currentPriority === level;
-
               const colors = { LOW: '#10b981', MEDIUM: '#f59e0b', HIGH: '#ef4444' };
               const color = colors[level];
-
               return (
                 <button
                   key={level}
@@ -227,18 +367,18 @@ export function IncidentDetailsPanel() {
                     borderRadius: '4px',
                     fontWeight: isActive ? 'bold' : 'normal',
                     opacity: isActive ? 1 : 0.6,
-                    transform: isActive ? 'scale(1.02)' : 'scale(1)',
-                    transition: 'all 0.2s ease'
+                    transition: 'all 0.2s ease',
+                    cursor: 'pointer',
                   }}
                 >
                   {level}
                 </button>
-              )
+              );
             })}
           </div>
         </div>
 
-        {/* Dispatch Forces Section */}
+        {/* ── Dispatch Forces ── */}
         <div className="cc-section flex flex-col">
           <div className="cc-section-header flex items-center gap-2 mb-3 text-slate-300">
             <SirenIcon />
@@ -265,7 +405,7 @@ export function IncidentDetailsPanel() {
                     alignItems: 'center',
                     gap: '4px',
                     fontSize: '0.85rem',
-                    cursor: 'pointer'
+                    cursor: 'pointer',
                   }}
                 >
                   <Icon size={14} />
@@ -275,8 +415,8 @@ export function IncidentDetailsPanel() {
             })}
           </div>
 
-          {/* Unit List */}
-          <div className="cc-list-content flex flex-col gap-1">
+          {/* Unit List — grows freely, outer panel scrolls */}
+          <div>
             {filteredUnits.length === 0 ? (
               <div className="cc-empty text-center py-8 text-slate-500 italic">No available units of this type</div>
             ) : (
@@ -284,22 +424,25 @@ export function IncidentDetailsPanel() {
             )}
           </div>
         </div>
+        </>)}
       </div>
 
-      {/* Footer - Fixed Height (shrink-0) */}
-      <div className="cc-footer p-4 border-t border-slate-700 bg-slate-900 z-10" style={{ flexShrink: 0 }}>
-        <div className="flex justify-between items-center">
-          <div className="cc-selection text-sm text-slate-400">Selected: <span className="text-white font-bold">{selectedUnitIds.length}</span></div>
-          <button
-            className="cc-dispatch bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            disabled={selectedUnitIds.length === 0}
-            onClick={handleDispatch}
-          >
-            Dispatch Units
-            <ChevronRight size={16} style={{ marginLeft: 8 }} />
-          </button>
+      {/* Footer - only shown on Dispatch tab */}
+      {activeTab === 'dispatch' && (
+        <div className="cc-footer p-4 border-t border-slate-700 bg-slate-900 z-10" style={{ flexShrink: 0 }}>
+          <div className="flex justify-between items-center">
+            <div className="cc-selection text-sm text-slate-400">Selected: <span className="text-white font-bold">{selectedUnitIds.length}</span></div>
+            <button
+              className="cc-dispatch bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              disabled={selectedUnitIds.length === 0}
+              onClick={handleDispatch}
+            >
+              Dispatch Units
+              <ChevronRight size={16} style={{ marginLeft: 8 }} />
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

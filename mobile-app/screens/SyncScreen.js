@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { Platform, View, Text, Button, Switch } from "react-native";
+import { View, Text, Button, Switch } from "react-native";
 import { getReports, clearReports } from "../storage/offlineDB";
+import { API_BASE_URL } from "../config";
 
 export default function SyncScreen({ token, online, setOnline }) {
-  const API_BASE_URL = Platform.OS === "android" ? "http://10.0.2.2:8000" : "http://localhost:8000";
   const [reports, setReports] = useState([]);
   const [error, setError] = useState("");
 

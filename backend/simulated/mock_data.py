@@ -5,7 +5,7 @@ Supports seeded random generation for reproducible demos.
 """
 import random
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 from faker import Faker
 import os
@@ -21,14 +21,31 @@ class MockDataService:
     ]
 
     LOCATIONS = [
-        {"name": "Downtown Center", "lat": 31.7683, "lng": 35.2137},
-        {"name": "Port Authority", "lat": 31.7680, "lng": 35.2250},
-        {"name": "Central Station", "lat": 31.7750, "lng": 35.2100},
-        {"name": "Shopping District", "lat": 31.7600, "lng": 35.2200},
-        {"name": "Industrial Zone", "lat": 31.7550, "lng": 35.2300},
-        {"name": "Hospital Complex", "lat": 31.7700, "lng": 35.1950},
-        {"name": "Government Center", "lat": 31.7650, "lng": 35.2050},
-        {"name": "University Campus", "lat": 31.7800, "lng": 35.2400},
+        # Jerusalem — well inland, road intersections
+        {"name": "Jerusalem Jaffa Road", "lat": 31.7800, "lng": 35.2140},
+        {"name": "Jerusalem Malha Interchange", "lat": 31.7450, "lng": 35.1900},
+        # Tel Aviv / Gush Dan — all inland, away from coastline
+        {"name": "Tel Aviv Central Bus Station", "lat": 32.0580, "lng": 34.7770},
+        {"name": "Tel Aviv Azrieli Junction", "lat": 32.0700, "lng": 34.7950},
+        {"name": "Tel Aviv Dizengoff Square", "lat": 32.0777, "lng": 34.7745},
+        {"name": "Ben Gurion Airport Terminal 3", "lat": 32.0055, "lng": 34.8854},
+        {"name": "Rishon LeZion Highway 44", "lat": 31.9600, "lng": 34.8050},
+        {"name": "Bat Yam Industrial Road", "lat": 32.0210, "lng": 34.7490},
+        # Haifa / North — inland city areas
+        {"name": "Haifa Castra Road", "lat": 32.8018, "lng": 34.9878},
+        {"name": "Haifa Neve Sha'anan", "lat": 32.8110, "lng": 35.0050},
+        {"name": "Nazareth Paulus VI Street", "lat": 32.7018, "lng": 35.2985},
+        {"name": "Tiberias Route 90", "lat": 32.7810, "lng": 35.5260},
+        {"name": "Nahariya Ga'aton Boulevard", "lat": 33.0035, "lng": 35.0988},
+        # South — city centers, inland
+        {"name": "Beer Sheva Rager Boulevard", "lat": 31.2518, "lng": 34.7913},
+        {"name": "Ashdod Route 4 Junction", "lat": 31.8089, "lng": 34.6598},
+        {"name": "Ashkelon Moriah Road", "lat": 31.6720, "lng": 34.5820},
+        {"name": "Eilat Yotam Road", "lat": 29.5640, "lng": 34.9560},
+        # Center
+        {"name": "Netanya Jabotinsky Street", "lat": 32.3170, "lng": 34.8600},
+        {"name": "Petah Tikva Route 40", "lat": 32.0869, "lng": 34.8878},
+        {"name": "Rehovot Weizmann Institute Road", "lat": 31.9056, "lng": 34.8113},
     ]
 
     CHANNELS = ["Police", "Fire", "EMS", "Civil Defense"]
@@ -54,22 +71,60 @@ class MockDataService:
         self.field_commands = [self._normalize_field_command(cmd) for cmd in self.field_commands]
         self._init_data()
 
+    # Sequences of realistic follow-up events after an incident is created.
+    # One sequence is picked at random per incident during initialisation.
+    _FOLLOWUP_SEQUENCES = [
+        [("First responders notified via radio", "info"),
+         ("Units dispatched to scene", "warn"),
+         ("Perimeter established around area", "info")],
+        [("Priority elevated by field commander", "warn"),
+         ("Additional backup requested", "warn"),
+         ("Command post established", "info")],
+        [("Scene assessment completed", "info"),
+         ("Medical support placed on standby", "info")],
+        [("Witness statements collected", "info"),
+         ("Status updated to IN_PROGRESS", "info"),
+         ("Situation report filed", "info")],
+        [("Area evacuation ordered", "warn"),
+         ("Road closures in effect", "warn"),
+         ("Media inquiry received", "info")],
+    ]
+
     def _init_data(self):
         """Initialize with sample data."""
         # Create initial incidents
-        for i in range(8):
+        for i in range(18):
             incident = self._generate_incident(i + 1)
             self.incidents[incident["id"]] = incident
 
         # Create initial units
-        for i in range(12):
+        for i in range(24):
             unit = self._generate_unit(i + 1)
             self.units[unit["id"]] = unit
 
-        # Create initial events
+        # Create initial events — a realistic multi-event history per incident
         for incident in self.incidents.values():
+            created_at = datetime.fromisoformat(incident["created_at"])
+
+            # 1. Creation event at the incident's original creation time
             self._add_event(
-                "incident", incident["id"], f"Incident created: {incident['title']}", "info")
+                "incident", incident["id"],
+                f"Incident created: {incident['title']}", "info",
+                timestamp=created_at,
+            )
+
+            # 2. Pick a random follow-up sequence and spread events over time
+            sequence = random.choice(self._FOLLOWUP_SEQUENCES)
+            for j, (message, level) in enumerate(sequence):
+                offset_minutes = random.randint((j + 1) * 5, (j + 1) * 20)
+                event_time = created_at + timedelta(minutes=offset_minutes)
+                # Cap at 2 min ago to avoid future timestamps
+                cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
+                if event_time > cutoff:
+                    event_time = cutoff - timedelta(minutes=j)
+                self._add_event(
+                    "incident", incident["id"], message, level, timestamp=event_time
+                )
 
     def _generate_incident(self, incident_id: int = None) -> Dict[str, Any]:
         """Generate a single mock incident."""
@@ -84,11 +139,11 @@ class MockDataService:
             "description": self.faker.sentence(),
             "priority": priority,
             "status": "OPEN",
-            "location_lat": location["lat"] + random.uniform(-0.005, 0.005),
-            "location_lng": location["lng"] + random.uniform(-0.005, 0.005),
+            "location_lat": location["lat"] + random.uniform(-0.002, 0.002),
+            "location_lng": location["lng"] + random.uniform(-0.002, 0.002),
             "location_name": location["name"],
-            "created_at": (datetime.now() - timedelta(hours=random.randint(0, 24))).isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_at": (datetime.now(timezone.utc) - timedelta(hours=random.randint(0, 24))).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "channel": random.choice(self.CHANNELS),
             "assigned_unit_ids": [],
             "field_id": field_id,
@@ -108,9 +163,9 @@ class MockDataService:
             "name": f"{unit_type}-{unit_id}",
             "type": unit_type,
             "status": random.choice(["Available", "Dispatched", "OnScene", "Offline"]),
-            "location_lat": location["lat"] + random.uniform(-0.01, 0.01),
-            "location_lng": location["lng"] + random.uniform(-0.01, 0.01),
-            "last_update": datetime.now().isoformat(),
+            "location_lat": location["lat"] + random.uniform(-0.003, 0.003),
+            "location_lng": location["lng"] + random.uniform(-0.003, 0.003),
+            "last_update": datetime.now(timezone.utc).isoformat(),
             "crew_size": random.randint(1, 5),
             "field_id": field_id,
         }
@@ -150,12 +205,13 @@ class MockDataService:
                 return candidate
             index += 1
 
-    def _add_event(self, entity_type: str, entity_id: int, message: str, level: str = "info"):
-        """Add an event to the log."""
+    def _add_event(self, entity_type: str, entity_id: int, message: str, level: str = "info",
+                   timestamp: datetime = None):
+        """Add an event to the log. Accepts an optional timestamp for seeding historical data."""
         self.event_counter += 1
         event = {
             "id": self.event_counter,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": (timestamp or datetime.now(timezone.utc)).isoformat(),
             "entity_type": entity_type,
             "entity_id": entity_id,
             "message": message,
@@ -163,7 +219,7 @@ class MockDataService:
         }
         self.events.append(event)
         # Keep only last 100 events
-        if len(self.events) > 100:
+        if len(self.events) > 200:
             self.events.pop(0)
         return event
 
@@ -247,7 +303,7 @@ class MockDataService:
         initial_note = payload.get("initial_report") or payload.get("notes")
         if initial_note:
             command["operational_notes"].append({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message": initial_note,
             })
 
@@ -269,7 +325,7 @@ class MockDataService:
         if note:
             notes = field.get("operational_notes") or []
             notes.append({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message": note,
             })
             field["operational_notes"] = notes
@@ -277,8 +333,9 @@ class MockDataService:
         return field
 
     def get_events(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get recent events."""
-        return self.events[-limit:]
+        """Get recent events sorted newest-first."""
+        sorted_events = sorted(self.events, key=lambda e: e["timestamp"], reverse=True)
+        return sorted_events[:limit]
 
     def get_incident(self, incident_id: int) -> Dict[str, Any]:
         """Get specific incident."""
@@ -292,7 +349,7 @@ class MockDataService:
         incident = self.incidents[incident_id]
         old_status = incident["status"]
         incident["status"] = new_status
-        incident["updated_at"] = datetime.now().isoformat()
+        incident["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         self._add_event("incident", incident_id,
                         f"Status changed: {old_status} → {new_status}", "info")
@@ -306,7 +363,7 @@ class MockDataService:
         incident = self.incidents[incident_id]
         old_priority = incident.get("priority", "UNKNOWN")
         incident["priority"] = new_priority
-        incident["updated_at"] = datetime.now().isoformat()
+        incident["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         self._add_event("incident", incident_id,
                         f"Priority changed: {old_priority} → {new_priority}", "warn")
@@ -325,7 +382,7 @@ class MockDataService:
 
         if unit_id not in incident["assigned_unit_ids"]:
             incident["assigned_unit_ids"].append(unit_id)
-            incident["updated_at"] = datetime.now().isoformat()
+            incident["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             self._add_event("incident", incident_id,
                             f"Unit {unit['name']} assigned", "info")
@@ -344,7 +401,7 @@ class MockDataService:
 
         unit = self.units[unit_id]
         unit["field_id"] = field_id
-        unit["last_update"] = datetime.now().isoformat()
+        unit["last_update"] = datetime.now(timezone.utc).isoformat()
         self._add_event("unit", unit_id, f"Assigned to field {field_id}", "info")
         return unit
 
@@ -358,14 +415,14 @@ class MockDataService:
         for unit in self.units.values():
             if unit.get("field_id") == field_id:
                 unit["field_id"] = None
-                unit["last_update"] = datetime.now().isoformat()
+                unit["last_update"] = datetime.now(timezone.utc).isoformat()
                 self._add_event("unit", unit["id"], f"Released from field {field_id}", "info")
 
         # Unassign any incidents that were tied to this field command
         for incident in self.incidents.values():
             if incident.get("field_id") == field_id:
                 incident["field_id"] = None
-                incident["updated_at"] = datetime.now().isoformat()
+                incident["updated_at"] = datetime.now(timezone.utc).isoformat()
                 self._add_event("incident", incident["id"], f"Incident removed from field {field_id}", "info")
 
         self.field_commands = [f for f in self.field_commands if f.get("id") != field_id]
@@ -419,7 +476,7 @@ class MockDataService:
             unit = random.choice(list(self.units.values()))
             unit["location_lat"] += random.uniform(-0.002, 0.002)
             unit["location_lng"] += random.uniform(-0.002, 0.002)
-            unit["last_update"] = datetime.now().isoformat()
+            unit["last_update"] = datetime.now(timezone.utc).isoformat()
             self._add_event("unit", unit["id"], f"Location updated", "info")
             return {"type": "unit_updated", "data": unit}
 

@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Platform, View, Text, TextInput, Button } from "react-native";
+import { View, Text, TextInput, Button } from "react-native";
 import { saveReport } from "../storage/offlineDB";
+import { API_BASE_URL } from "../config";
 
 export default function ReportScreen({ selectedTask, token, online, onDone }) {
-  const API_BASE_URL = Platform.OS === "android" ? "http://10.0.2.2:8000" : "http://localhost:8000";
   const [status, setStatus] = useState("IN_PROGRESS");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");

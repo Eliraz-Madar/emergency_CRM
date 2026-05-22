@@ -1,134 +1,160 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 
 /**
  * Dashboard state management using Zustand.
  * Handles incidents, units, events, filters, and real-time updates.
+ *
+ * UI preferences (selectedIncidentId, filters, sortBy, activeFilter) are
+ * persisted to localStorage so they survive page refreshes.
+ * Live data (incidents, units, events) is always re-fetched from the backend.
  */
+export const useDashboardStore = create(
+  persist(
+    (set, get) => ({
+      // Data — NOT persisted (re-fetched from API on load)
+      incidents: [],
+      units: [],
+      events: [],
 
-export const useDashboardStore = create((set, get) => ({
-  // Data
-  incidents: [],
-  units: [],
-  events: [],
+      // UI State
+      selectedIncidentId: null,
+      selectedUnitId: null,
+      selectedUnitIds: [], // Array of selected unit IDs for multi-dispatch
+      connectionStatus: 'DISCONNECTED', // DISCONNECTED, CONNECTING, CONNECTED, DEGRADED
+      lastUpdateTime: null,
+      demoMode: true,
 
-  // UI State
-  selectedIncidentId: null,
-  selectedUnitId: null,
-  selectedUnitIds: [], // Array of selected unit IDs for multi-dispatch
-  connectionStatus: 'DISCONNECTED', // DISCONNECTED, CONNECTING, CONNECTED, DEGRADED
-  lastUpdateTime: null,
-  demoMode: true,
+      // Active channel filter persisted so it survives refresh
+      activeFilter: 'ALL',
 
-  // Filters
-  filters: {
-    severities: ['LOW', 'MED', 'HIGH', 'CRITICAL'],
-    statuses: ['OPEN', 'IN_PROGRESS', 'CLOSED'],
-    channels: ['Police', 'Fire', 'EMS', 'Civil Defense'],
-    searchText: '',
-  },
+      // Map zoom/flash triggers — transient, not persisted
+      zoomToIncidentId: null,
+      flashingIncidentId: null,
 
-  sortBy: 'severity', // 'severity', 'time', 'status'
+      // Filters — persisted
+      filters: {
+        severities: ['LOW', 'MED', 'HIGH', 'CRITICAL'],
+        statuses: ['OPEN', 'IN_PROGRESS', 'CLOSED'],
+        channels: ['Police', 'Fire', 'EMS', 'Civil Defense'],
+        searchText: '',
+      },
 
-  // Actions
-  setIncidents: (incidents) => set({ incidents }),
-  setUnits: (units) => set({ units }),
-  setEvents: (events) => set({ events }),
+      sortBy: 'severity', // 'severity', 'time', 'status'
 
-  addIncident: (incident) => set((state) => ({
-    incidents: [incident, ...state.incidents],
-    lastUpdateTime: new Date(),
-  })),
+      // Actions
+      setIncidents: (incidents) => set({ incidents }),
+      setUnits: (units) => set({ units }),
+      setEvents: (events) => set({ events }),
 
-  updateIncident: (incidentId, updates) => set((state) => ({
-    incidents: state.incidents.map(inc =>
-      inc.id === incidentId ? { ...inc, ...updates } : inc
-    ),
-    lastUpdateTime: new Date(),
-  })),
+      addIncident: (incident) => set((state) => ({
+        incidents: [incident, ...state.incidents],
+        lastUpdateTime: new Date(),
+      })),
 
-  updateUnit: (unitId, updates) => set((state) => ({
-    units: state.units.map(unit =>
-      unit.id === unitId ? { ...unit, ...updates } : unit
-    ),
-    lastUpdateTime: new Date(),
-  })),
+      updateIncident: (incidentId, updates) => set((state) => ({
+        incidents: state.incidents.map(inc =>
+          inc.id === incidentId ? { ...inc, ...updates } : inc
+        ),
+        lastUpdateTime: new Date(),
+      })),
 
-  addEvent: (event) => set((state) => ({
-    events: [event, ...state.events].slice(0, 100), // Keep last 100 events
-    lastUpdateTime: new Date(),
-  })),
+      updateUnit: (unitId, updates) => set((state) => ({
+        units: state.units.map(unit =>
+          unit.id === unitId ? { ...unit, ...updates } : unit
+        ),
+        lastUpdateTime: new Date(),
+      })),
 
-  setSelectedIncident: (incidentId) => set({ selectedIncidentId: incidentId }),
-  setSelectedUnit: (unitId) => set({ selectedUnitId: unitId }),
-  setSelectedUnitIds: (unitIds) => set({ selectedUnitIds: unitIds }),
-  toggleSelectedUnit: (unitId) => set((state) => ({
-    selectedUnitIds: state.selectedUnitIds.includes(unitId)
-      ? state.selectedUnitIds.filter(id => id !== unitId)
-      : [...state.selectedUnitIds, unitId]
-  })),
-  clearSelectedUnits: () => set({ selectedUnitIds: [] }),
+      addEvent: (event) => set((state) => ({
+        events: [event, ...state.events].slice(0, 100), // Keep last 100 events
+        lastUpdateTime: new Date(),
+      })),
 
-  setConnectionStatus: (status) => set({ connectionStatus: status }),
-  setDemoMode: (enabled) => set({ demoMode: enabled }),
+      setSelectedIncident: (incidentId) => set({ selectedIncidentId: incidentId }),
+      setSelectedUnit: (unitId) => set({ selectedUnitId: unitId }),
+      setSelectedUnitIds: (unitIds) => set({ selectedUnitIds: unitIds }),
+      toggleSelectedUnit: (unitId) => set((state) => ({
+        selectedUnitIds: state.selectedUnitIds.includes(unitId)
+          ? state.selectedUnitIds.filter(id => id !== unitId)
+          : [...state.selectedUnitIds, unitId]
+      })),
+      clearSelectedUnits: () => set({ selectedUnitIds: [] }),
 
-  updateFilters: (newFilters) => set((state) => ({
-    filters: { ...state.filters, ...newFilters },
-  })),
+      setConnectionStatus: (status) => set({ connectionStatus: status }),
+      setDemoMode: (enabled) => set({ demoMode: enabled }),
+      setActiveFilter: (filter) => set({ activeFilter: filter }),
 
-  setSortBy: (sortBy) => set({ sortBy }),
+      // Map zoom: trigger MapView to fly to an incident + its dispatched units.
+      // Call clearZoomToIncident() from MapView once the animation starts.
+      setZoomToIncident: (id) => set({ zoomToIncidentId: id }),
+      clearZoomToIncident: () => set({ zoomToIncidentId: null }),
 
-  // Get filtered and sorted incidents
-  getFilteredIncidents: () => {
-    const state = get();
-    let incidents = state.incidents.filter(inc => {
-      const sev = inc.priority || inc.severity;
-      // Filter by severity/priority
-      if (!state.filters.severities.includes(sev)) return false;
+      // Flashing marker: highlight an incident marker for ~4 s after dispatch.
+      setFlashingIncident: (id) => set({ flashingIncidentId: id }),
+      clearFlashingIncident: () => set({ flashingIncidentId: null }),
 
-      // Filter by status
-      if (!state.filters.statuses.includes(inc.status)) return false;
+      updateFilters: (newFilters) => set((state) => ({
+        filters: { ...state.filters, ...newFilters },
+      })),
 
-      // Filter by channel
-      if (!state.filters.channels.includes(inc.channel)) return false;
+      setSortBy: (sortBy) => set({ sortBy }),
 
-      // Filter by search text
-      if (state.filters.searchText) {
-        const text = state.filters.searchText.toLowerCase();
-        return (
-          inc.title.toLowerCase().includes(text) ||
-          inc.description.toLowerCase().includes(text) ||
-          inc.location_name?.toLowerCase().includes(text)
-        );
-      }
+      // Get filtered and sorted incidents
+      getFilteredIncidents: () => {
+        const state = get();
+        let incidents = state.incidents.filter(inc => {
+          const sev = inc.priority || inc.severity;
+          if (!state.filters.severities.includes(sev)) return false;
+          if (!state.filters.statuses.includes(inc.status)) return false;
+          if (!state.filters.channels.includes(inc.channel)) return false;
+          if (state.filters.searchText) {
+            const text = state.filters.searchText.toLowerCase();
+            return (
+              inc.title.toLowerCase().includes(text) ||
+              inc.description.toLowerCase().includes(text) ||
+              inc.location_name?.toLowerCase().includes(text)
+            );
+          }
+          return true;
+        });
 
-      return true;
-    });
+        incidents.sort((a, b) => {
+          switch (state.sortBy) {
+            case 'severity': {
+              const severityOrder = { CRITICAL: 0, HIGH: 1, MED: 2, LOW: 3 };
+              const sa = a.priority || a.severity;
+              const sb = b.priority || b.severity;
+              return (severityOrder[sa] || 999) - (severityOrder[sb] || 999);
+            }
+            case 'time':
+              return new Date(b.created_at) - new Date(a.created_at);
+            case 'status': {
+              const statusOrder = { OPEN: 0, IN_PROGRESS: 1, CLOSED: 2 };
+              return (statusOrder[a.status] || 999) - (statusOrder[b.status] || 999);
+            }
+            default:
+              return 0;
+          }
+        });
 
-    // Sort
-    incidents.sort((a, b) => {
-      switch (state.sortBy) {
-        case 'severity': {
-          const severityOrder = { CRITICAL: 0, HIGH: 1, MED: 2, LOW: 3 };
-          const sa = a.priority || a.severity;
-          const sb = b.priority || b.severity;
-          return (severityOrder[sa] || 999) - (severityOrder[sb] || 999);
-        }
-        case 'time':
-          return new Date(b.created_at) - new Date(a.created_at);
-        case 'status': {
-          const statusOrder = { OPEN: 0, IN_PROGRESS: 1, CLOSED: 2 };
-          return (statusOrder[a.status] || 999) - (statusOrder[b.status] || 999);
-        }
-        default:
-          return 0;
-      }
-    });
+        return incidents;
+      },
 
-    return incidents;
-  },
-
-  getSelectedIncident: () => {
-    const state = get();
-    return state.incidents.find(inc => inc.id === state.selectedIncidentId);
-  },
-}));
+      getSelectedIncident: () => {
+        const state = get();
+        return state.incidents.find(inc => inc.id === state.selectedIncidentId);
+      },
+    }),
+    {
+      name: 'ecm-dashboard-ui',
+      // Only persist UI preferences — live data always comes from the API
+      partialize: (state) => ({
+        selectedIncidentId: state.selectedIncidentId,
+        activeFilter: state.activeFilter,
+        filters: state.filters,
+        sortBy: state.sortBy,
+      }),
+    }
+  )
+);

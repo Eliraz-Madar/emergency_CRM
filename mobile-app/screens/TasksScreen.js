@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Platform, View, Text, Button, FlatList, ActivityIndicator } from "react-native";
+import { View, Text, Button, FlatList, ActivityIndicator } from "react-native";
+import { API_BASE_URL } from "../config";
 
 export default function TasksScreen({ token, onSelectTask }) {
-  const API_BASE_URL = Platform.OS === "android" ? "http://10.0.2.2:8000" : "http://localhost:8000";
   const [tasks, setTasks] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);

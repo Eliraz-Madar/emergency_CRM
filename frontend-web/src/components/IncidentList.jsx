@@ -102,10 +102,7 @@ export function IncidentList({
   };
 
   return (
-    <div
-      className="incident-list"
-      style={{ height: 'calc(100vh - 100px)', overflowY: 'auto' }}
-    >
+    <div className="incident-list">
       <div className="incident-list-header">
         <h2>Incidents ({filteredIncidents.length})</h2>
       </div>

@@ -23,37 +23,30 @@ const routeCache = new Map();
  */
 export async function calculateRoute(fromLat, fromLng, toLat, toLng, options = {}) {
     const { allowFallback = true } = options;
-    console.log(`🗺️ Calculating route from [${fromLat}, ${fromLng}] to [${toLat}, ${toLng}]`);
 
     // Create cache key
     const cacheKey = `${fromLat.toFixed(4)},${fromLng.toFixed(4)}-${toLat.toFixed(4)},${toLng.toFixed(4)}`;
 
     // Check cache first
     if (routeCache.has(cacheKey)) {
-        console.log('✅ Route found in cache');
         return routeCache.get(cacheKey);
     }
 
     try {
-        console.log('📡 Fetching route from OSRM API...');
         // OSRM expects: /route/v1/{profile}/{lon1},{lat1};{lon2},{lat2}
         const url = `${OSRM_BASE_URL}/${fromLng},${fromLat};${toLng},${toLat}?steps=false&geometries=geojson&overview=full`;
 
         const response = await fetch(url);
 
         if (!response.ok) {
-            console.warn(`⚠️ OSRM API error: ${response.status}.`);
             return allowFallback ? fallbackStraightLine(fromLat, fromLng, toLat, toLng) : null;
         }
 
         const data = await response.json();
 
         if (!data.routes || data.routes.length === 0) {
-            console.warn('⚠️ No route found.');
             return allowFallback ? fallbackStraightLine(fromLat, fromLng, toLat, toLng) : null;
         }
-
-        console.log('✅ Route received from OSRM:', data.routes[0].geometry.coordinates.length, 'points');
 
         // Extract coordinates from GeoJSON format
         // OSRM returns coordinates as [lng, lat], we need [lat, lng]
@@ -71,7 +64,6 @@ export async function calculateRoute(fromLat, fromLng, toLat, toLng, options = {
         return coordinates;
 
     } catch (error) {
-        console.warn('OSRM routing error:', error.message);
         return allowFallback ? fallbackStraightLine(fromLat, fromLng, toLat, toLng) : null;
     }
 }
@@ -123,24 +115,18 @@ export function getNextPositionOnRoute(route, currentLat, currentLng, currentInd
     const targetLat = targetPoint[0];
     const targetLng = targetPoint[1];
 
-    console.log(`🎯 Current: [${currentLat.toFixed(6)}, ${currentLng.toFixed(6)}], Target [${targetIndex}]: [${targetLat.toFixed(6)}, ${targetLng.toFixed(6)}]`);
-
     // Calculate distance to current target waypoint
     const dLat = targetLat - currentLat;
     const dLng = targetLng - currentLng;
     const distanceToTarget = Math.sqrt(dLat * dLat + dLng * dLng);
 
-    console.log(`📏 Distance to waypoint ${targetIndex}: ${distanceToTarget.toFixed(6)}, speed threshold: ${(speed * 1.5).toFixed(6)}`);
-
     // Check if we've reached this waypoint
     if (distanceToTarget < speed * 1.5) {
-        console.log(`✅ Reached waypoint ${targetIndex}, moving to next`);
         // Move to next waypoint
         targetIndex++;
 
         // Check if we've completed the route
         if (targetIndex >= route.length) {
-            console.log(`🏁 Route completed!`);
             return {
                 lat: targetLat,
                 lng: targetLng,
@@ -161,13 +147,9 @@ export function getNextPositionOnRoute(route, currentLat, currentLng, currentInd
         // Move towards next waypoint
         const ratio2 = Math.min(speed / dist2, 1.0);
 
-        const newLat = currentLat + dLat2 * ratio2;
-        const newLng = currentLng + dLng2 * ratio2;
-        console.log(`➡️ Moving to next waypoint ${targetIndex}: [${newLat.toFixed(6)}, ${newLng.toFixed(6)}]`);
-
         return {
-            lat: newLat,
-            lng: newLng,
+            lat: currentLat + dLat2 * ratio2,
+            lng: currentLng + dLng2 * ratio2,
             index: targetIndex,
             arrived: false
         };
@@ -175,14 +157,10 @@ export function getNextPositionOnRoute(route, currentLat, currentLng, currentInd
 
     // Move towards current target waypoint at constant speed
     const ratio = Math.min(speed / distanceToTarget, 1.0);
-    const nextLat = currentLat + dLat * ratio;
-    const nextLng = currentLng + dLng * ratio;
-
-    console.log(`🚗 Moving towards waypoint ${targetIndex}: [${nextLat.toFixed(6)}, ${nextLng.toFixed(6)}], ratio: ${ratio.toFixed(4)}`);
 
     return {
-        lat: nextLat,
-        lng: nextLng,
+        lat: currentLat + dLat * ratio,
+        lng: currentLng + dLng * ratio,
         index: targetIndex,
         arrived: false
     };

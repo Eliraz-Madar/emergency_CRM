@@ -7,6 +7,7 @@
 
 import { useState } from 'react';
 import { useFieldIncidentStore } from '../../store/fieldIncident';
+import { formatTime } from '../../utils/time.js';
 
 const OperationalTimeline = ({ onShowDetails }) => {
   const events = useFieldIncidentStore((s) => s.events);
@@ -58,7 +59,7 @@ const OperationalTimeline = ({ onShowDetails }) => {
 
     // Validate and return HH:MM format (24-hour clock)
     if (date && !isNaN(date.getTime())) {
-      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      return formatTime(date).slice(0, 5); // "HH:MM" — drop seconds for timeline brevity
     }
 
     // Return empty string for invalid dates

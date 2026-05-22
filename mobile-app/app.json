@@ -12,6 +12,9 @@
     },
     "android": {
       "package": "com.anonymous.emergencycrmfield"
-    }
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
   }
 }

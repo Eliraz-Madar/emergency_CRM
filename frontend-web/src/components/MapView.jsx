@@ -28,6 +28,7 @@ export function MapView({
   const markersRef = useRef({});
   const prevStatusRef = useRef(new Map());
   const arrivalAnnouncedRef = useRef(new Set());
+  const prevEnRouteRef = useRef(new Set());
   const onMapCreateFieldCommandRef = useRef(onMapCreateFieldCommand);
 
   useEffect(() => {
@@ -170,6 +171,9 @@ export function MapView({
     incidents: dashboardIncidents,
     selectedUnitId,
     setSelectedUnit,
+    zoomToIncidentId,
+    clearZoomToIncident,
+    flashingIncidentId,
   } = useDashboardStore();
 
   // Subscribe directly to the field incident store for strict reactivity
@@ -236,6 +240,42 @@ export function MapView({
       }
     };
   }, []);
+
+  // Zoom map to a dispatched incident + its units whenever zoomToIncidentId is set
+  useEffect(() => {
+    if (!zoomToIncidentId || !mapInstanceRef.current) return;
+    const map = mapInstanceRef.current;
+
+    const target = incidents.find((i) => i.id === zoomToIncidentId);
+    if (!target) { clearZoomToIncident(); return; }
+
+    const incLat = target.location_lat ?? target.lat;
+    const incLng = target.location_lng ?? target.lng;
+    if (!Number.isFinite(incLat) || !Number.isFinite(incLng)) { clearZoomToIncident(); return; }
+
+    // Gather all units dispatched to this incident for bounds fitting
+    const fieldUnits = useFieldIncidentStore.getState().units || [];
+    const dispatched = fieldUnits.filter((u) => String(u.assignedTo) === String(zoomToIncidentId));
+
+    const validPoints = [
+      [incLat, incLng],
+      ...dispatched.map((u) => {
+        const lat = Array.isArray(u.position) ? u.position[0] : u.location_lat;
+        const lng = Array.isArray(u.position) ? u.position[1] : u.location_lng;
+        return [lat, lng];
+      }).filter(([la, ln]) => Number.isFinite(la) && Number.isFinite(ln)),
+    ];
+
+    try {
+      if (validPoints.length > 1) {
+        map.flyToBounds(validPoints, { padding: [80, 80], animate: true, duration: 1.2 });
+      } else {
+        map.flyTo([incLat, incLng], 15, { animate: true, duration: 1.2 });
+      }
+    } catch { /* ignore Leaflet animation errors */ }
+
+    clearZoomToIncident();
+  }, [zoomToIncidentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep Leaflet map stable when container resizes
   useEffect(() => {
@@ -313,6 +353,7 @@ export function MapView({
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
       const pinColor = getPinColor(incident.priority || incident.severity);
+      const isFlashing = flashingIncidentId != null && flashingIncidentId === incident.id;
       const assignedStar = hasAssignedUnits(incident)
         ? `
           <div style="
@@ -333,6 +374,13 @@ export function MapView({
           ">★</div>
         `
         : '';
+      // Pulsing ring shown for ~4 s after units are dispatched to this incident
+      const flashRing = isFlashing
+        ? `<div class="incident-dispatch-ring"></div>`
+        : '';
+
+      const markerSize = isFlashing ? 32 : 24;
+      const markerAnchor = isFlashing ? 16 : 12;
 
       const marker = L.marker(
         [lat, lng],
@@ -340,13 +388,14 @@ export function MapView({
           icon: L.divIcon({
             html: `
               <div style="position: relative;">
-                <div style="background-color: ${pinColor}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: all 0.3s ease;"></div>
+                ${flashRing}
+                <div style="background-color: ${pinColor}; width: ${markerSize}px; height: ${markerSize}px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: width 0.3s ease, height 0.3s ease;"></div>
                 ${assignedStar}
               </div>
             `,
-            className: `marker-incident ${selectedIncidentId === incident.id ? 'selected' : ''}`,
-            iconSize: [24, 24],
-            iconAnchor: [12, 24],
+            className: `marker-incident ${selectedIncidentId === incident.id ? 'selected' : ''} ${isFlashing ? 'dispatched' : ''}`,
+            iconSize: [markerSize, markerSize],
+            iconAnchor: [markerAnchor, markerSize],
           }),
         }
       ).addTo(map);
@@ -373,7 +422,9 @@ export function MapView({
       markersRef.current[`incident-${incident.id}`] = marker;
     });
 
-    const fieldList = Array.isArray(fieldCommands) ? fieldCommands : [];
+    // Field command posts are real-world markers — hide them during simulation
+    // so the map shows only the simulation incident and units.
+    const fieldList = (!isSimulation && Array.isArray(fieldCommands)) ? fieldCommands : [];
     fieldList.forEach((field) => {
       const lat = field.location_lat ?? field.lat;
       const lng = field.location_lng ?? field.lng;
@@ -427,37 +478,32 @@ export function MapView({
       ? null
       : String(selectedUnitId);
 
-    // Draw route only for selected unit
+    // Draw red route for every EN_ROUTE unit
     renderedUnits.forEach((unit) => {
-      if (selectedUnitKey === null) return;
-      if (String(unit.id) !== selectedUnitKey) return;
-      if (unit.route && Array.isArray(unit.route) && unit.route.length > 0) {
-        const routeColor = unit.type === 'POLICE' ? '#3b82f6' : unit.type === 'FIRE' ? '#ef4444' : '#10b981';
+      if (unit.status !== 'EN_ROUTE') return;
+      if (!unit.route || !Array.isArray(unit.route) || unit.route.length === 0) return;
 
-        // Draw a thick glow/shadow first for better visibility
-        const shadowLine = L.polyline(unit.route, {
-          color: '#000000',
-          weight: 8,
-          opacity: 0.2,
-          dashArray: '10, 10',
-          lineCap: 'round',
-          lineJoin: 'round',
-        }).addTo(map);
-        markersRef.current[`route-shadow-${unit.id}`] = shadowLine;
+      // Shadow layer for contrast
+      const shadowLine = L.polyline(unit.route, {
+        color: '#000000',
+        weight: 8,
+        opacity: 0.2,
+        dashArray: '10, 10',
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map);
+      markersRef.current[`route-shadow-${unit.id}`] = shadowLine;
 
-        // Draw the main route line
-        const routeLine = L.polyline(unit.route, {
-          color: routeColor,
-          weight: 5,
-          opacity: 0.9,
-          dashArray: '8, 8',
-          lineCap: 'round',
-          lineJoin: 'round',
-        }).addTo(map);
-        markersRef.current[`route-${unit.id}`] = routeLine;
-      } else if (unit.assignedTo && !unit.route) {
-        console.warn(`⚠️ Unit ${unit.id} is linked to incident but has no route!`);
-      }
+      // Red route line
+      const routeLine = L.polyline(unit.route, {
+        color: '#ef4444',
+        weight: 5,
+        opacity: 0.9,
+        dashArray: '8, 8',
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map);
+      markersRef.current[`route-${unit.id}`] = routeLine;
     });
 
     renderedUnits.forEach((unit, idx) => {
@@ -548,7 +594,7 @@ export function MapView({
         marker.openPopup();
       }
     });
-  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId]);
+  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {
@@ -589,7 +635,10 @@ export function MapView({
       // Arrival notification when unit reaches ON_SCENE
       if (unit.id) {
         const prevStatus = prevStatusRef.current.get(unit.id);
-        if (unit.status === 'ON_SCENE' && prevStatus !== 'ON_SCENE') {
+        // Only announce for units the operator personally dispatched.
+        // Scenario-script units (isScenarioUnit: true) transition EN_ROUTE → ON_SCENE
+        // automatically — we must NOT voice-announce those.
+        if (unit.status === 'ON_SCENE' && prevStatus === 'EN_ROUTE' && !unit.isScenarioUnit) {
           if (!arrivalAnnouncedRef.current.has(unit.id)) {
             arrivalAnnouncedRef.current.add(unit.id);
 
@@ -646,6 +695,51 @@ export function MapView({
       incidentMarker.openPopup();
     }
   }, [selectedIncidentId, incidents]);
+
+  // Auto-zoom to show all dispatched (EN_ROUTE) units when new ones are dispatched
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    const activeUnits = isSimulation
+      ? (simulationUnits || [])
+      : (storeRoutineUnits.length > 0 ? storeRoutineUnits : units);
+    const renderedUnits = Array.isArray(activeUnits) ? activeUnits : [];
+
+    const enRouteUnits = renderedUnits.filter(u => u.status === 'EN_ROUTE');
+    const currentEnRouteIds = new Set(enRouteUnits.map(u => u.id));
+
+    // Only zoom if there are NEW EN_ROUTE units (i.e. just dispatched)
+    const hasNewEnRoute = enRouteUnits.some(u => !prevEnRouteRef.current.has(u.id));
+    prevEnRouteRef.current = currentEnRouteIds;
+
+    if (!hasNewEnRoute || enRouteUnits.length === 0) return;
+
+    // Build bounds: include every EN_ROUTE unit position
+    const points = enRouteUnits
+      .map(u => {
+        if (Array.isArray(u.position) && u.position.length >= 2) return u.position;
+        const lat = u.latitude ?? u.location_lat;
+        const lng = u.longitude ?? u.location_lng;
+        if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
+        return null;
+      })
+      .filter(Boolean);
+
+    // Also include the target incident location so it's in frame
+    enRouteUnits.forEach(u => {
+      if (!u.assignedTo) return;
+      const inc = incidents.find(i => String(i.id) === String(u.assignedTo));
+      if (inc && Number.isFinite(inc.location_lat) && Number.isFinite(inc.location_lng)) {
+        points.push([inc.location_lat, inc.location_lng]);
+      }
+    });
+
+    if (points.length === 0) return;
+
+    const bounds = L.latLngBounds(points);
+    map.fitBounds(bounds, { padding: [80, 80], maxZoom: 14, animate: true });
+  }, [units, storeRoutineUnits, isSimulation, simulationUnits, incidents]);
 
   return (
     <div className="map-container">
