@@ -15,7 +15,7 @@ The Emergency Response Command System supports two distinct operational modes:
 - **Users:** Dispatchers, coordinators, operational staff
 - **Decision Level:** Tactical (resource allocation, unit dispatch)
 - **Timescale:** Minutes to hours per incident
-- **Data Volume:** 8-12 concurrent incidents
+- **Data Volume:** 18+ concurrent incidents spread across Israel
 
 #### 2. Field Incident Dashboard (Major Incident Command)
 - **Scope:** Single large-scale incident with multiple sectors
@@ -112,13 +112,15 @@ GET  /api/field/updates/stream/              - SSE stream
 ### Mock Data Generation
 
 #### Regional Dashboard
-**File:** `backend/utils/mock_data.py`
+**File:** `backend/simulated/mock_data.py`
 
-- Generates 8 initial incidents with realistic data
-- 12 units across 4 types (Police, Fire, EMS, HomeFront)
+- Generates 18 initial incidents with realistic data spread across Israel
+- 24 units across 4 types (Police, Fire, EMS, HomeFront)
+- 20 named locations: Jerusalem, Tel Aviv, Haifa, Beer Sheva, Eilat, Netanya, Ashdod, Tiberias, Nahariya, and more — all inland road intersections (no coastal scatter)
 - Continuous simulation with Faker
 - Deterministic seeding with `DEMO_SEED` environment variable
 - Simulates realistic updates every 1-3 seconds
+- Incident scatter radius: ±0.002° (reduced from ±0.005° to avoid sea placement)
 
 #### Field Incident Dashboard
 **File:** `backend/utils/field_incident_data.py`
@@ -142,22 +144,32 @@ GET  /api/field/updates/stream/              - SSE stream
 
 ```javascript
 {
+  // Live data (NOT persisted — re-fetched on load)
   incidents: [],
   units: [],
   events: [],
-  selectedIncident: null,
+
+  // UI state (persisted to localStorage key: 'ecm-dashboard-ui')
+  selectedIncidentId: null,
+  activeFilter: 'ALL',
+  filters: { severity: null, status: null, channel: null, searchText: '' },
+  sortBy: 'created_at_desc',
+
+  // Transient UI triggers (NOT persisted)
   connectionStatus: 'CONNECTED',
-  filterSeverity: null,
-  searchText: '',
-  
-  // Selectors
-  getFilteredIncidents()
-  getSelectedIncident()
-  getCriticalIncidents()
+  zoomToIncidentId: null,
+  flashingIncidentId: null,
+
+  // Actions
+  setActiveFilter(filter)
+  setZoomToIncident(id)       // triggers MapView flyToBounds
+  clearZoomToIncident()
+  setFlashingIncident(id)     // triggers amber pulse ring on marker
+  clearFlashingIncident()
 }
 ```
 
-**Pattern:** Zustand with computed selectors
+**Pattern:** Zustand with `persist` middleware (partializes to UI prefs only) + computed selectors
 
 #### Field Incident Store
 **File:** `frontend-web/src/store/fieldIncident.js`
@@ -224,6 +236,51 @@ FieldIncidentDashboard (page)
 - Field Incident: `connectToFieldIncidentStream()` - streams simulated updates
 - Cross-tab: `BroadcastChannel('field-incident-sync')` to sync Field/Regional views
 
+**SSE Reconnect Flow:**
+```
+EventSource.onerror → readyState === CLOSED
+  → connectionStatus = 'CONNECTING' (yellow indicator)
+  → schedules reconnect with exponential backoff (3s → 30s)
+  → on success: connectionStatus = 'CONNECTED'
+  → fallback polling covers CONNECTING + OFFLINE states
+```
+Connection only shows RED/OFFLINE if SSE was never established; yellow CONNECTING is shown during transient drops.
+
+**Field Dashboard Data Isolation:**
+The Field Incident Command Dashboard always calls `loadFieldIncident()` from the API on mount, independently of whatever incident the War-Room has selected. The War-Room's `setLiveIncident` stores a thin incident object (id, title, lat/lng only); the Field Dashboard must load the full scenario (sectors, task groups, events) from `/api/field/incident/`.
+
+## localStorage Keys
+
+All keys written and read by the frontend:
+
+| Key | Written by | Read by | Content |
+|-----|-----------|---------|---------|
+| `ecm-dashboard-ui` | `useDashboardStore` persist | Same store on init | `{ selectedIncidentId, activeFilter, filters, sortBy }` |
+| `ecm-dispatch-assignments` | `fieldIncident.js` `dispatchUnitsToIncident` | `Dashboard.jsx` `initializeData` | `[{ unitId, incidentId, incidentLat, incidentLng, incidentTitle }]` |
+| `fieldId` | `fieldIncident.js` `setFieldId` | `FieldIncidentDashboard.jsx` on mount | String e.g. `"field-1"` |
+| `userRole` | `DashboardSelector.jsx` | `Dashboard.jsx`, `FieldIncidentDashboard.jsx` | `"FIELD_MANAGER"` or `"DISPATCHER"` |
+
+### Dispatch Persistence Pattern
+```
+DISPATCH:
+  dispatchUnitsToIncident({ unitIds, incidentId, incidentLat, incidentLng, ... })
+  → units set EN_ROUTE, OSRM route fetched
+  → localStorage['ecm-dispatch-assignments'] updated (append/replace by unitId)
+
+ON ARRIVAL:
+  moveUnits() detects unit reached destination
+  → unit status → ON_SCENE
+  → arrived unitIds removed from localStorage['ecm-dispatch-assignments']
+
+ON PAGE REFRESH (Dashboard.jsx initializeData):
+  → read localStorage['ecm-dispatch-assignments']
+  → group by incidentId
+  → call dispatchUnitsToIncident({ ..., silent: true }) per group
+      silent=true: skips voice synthesis + event-log entries
+  → set affected incidents to IN_PROGRESS
+  → log single "Restored N assignments" info event
+```
+
 ## Styling Architecture
 
 ### CSS Organization
@@ -274,6 +331,7 @@ FieldIncidentDashboard (page)
 - All dashboards accessible from selector
 - Regional dashboard includes a quick action to open the Field dashboard
 - Back button returns to selector
+- Navigation is immediate (no async validation); field access controlled by `userRole` in localStorage
 
 ## Extensibility
 
@@ -339,7 +397,7 @@ FieldIncidentDashboard (page)
 - No authentication (bypassed for MVP)
 - CORS enabled for development
 - Django DEBUG = true in development
-- Field access uses a localStorage role stub (demo only)
+- Field access uses a localStorage role stub (demo only): `userRole` and `fieldId` stored in localStorage with no server verification
 
 ### Production Recommendations
 1. Implement JWT authentication
@@ -388,6 +446,6 @@ Suitable for:
 
 ---
 
-**Last Updated:** 2024
-**Architecture Version:** 2.1 (Field LIVE mode + cross-tab sync)
+**Last Updated:** 2026
+**Architecture Version:** 2.2 (Dispatch persistence, Zustand persist, Israel-wide locations, SSE reconnect flow)
 **Status:** Production-ready MVP

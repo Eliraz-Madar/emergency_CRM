@@ -31,21 +31,25 @@ The dashboard is built with a modern frontend-backend architecture optimized for
 ### State Management (Zustand)
 Located in `src/store/dashboard.js`, manages:
 - **Data**: incidents, units, events
-- **UI State**: selected item, filters, sort, connection status
-- **Actions**: add/update entities, set filters, selection
+- **UI State**: selected item, filters, sort, connection status, zoom/flash targets
+- **Actions**: add/update entities, set filters, selection, `setZoomToIncident`, `setFlashingIncident`, `setActiveFilter`
 - **Selectors**: filtered/sorted incidents, selected incident
+- **Persistence**: wrapped with `zustand/middleware` `persist` (key: `ecm-dashboard-ui`)
+  - Persisted fields: `selectedIncidentId`, `activeFilter`, `filters`, `sortBy`
+  - NOT persisted: `incidents`, `units`, `events` (always re-fetched from API on load)
 
 Benefits:
 - ✅ Minimal boilerplate vs Redux
 - ✅ Reactive updates trigger re-renders
-- ✅ Easy to persist/restore if needed
+- ✅ UI preferences survive page refresh via `persist` middleware
 - ✅ Type-friendly with JSDoc
 
 Field incident state lives in `src/store/fieldIncident.js` and adds:
 - **Mode**: ROUTINE/SIMULATION/LIVE
-- **Field context**: `fieldId` for access scoping
+- **Field context**: `fieldId` for access scoping (also mirrored to `localStorage['fieldId']`)
 - **Unit routing**: road routes, on-scene behavior, station parking
 - **Cross-tab sync**: BroadcastChannel updates to keep Field/Regional views aligned
+- **Dispatch persistence**: writes assignments to `localStorage['ecm-dispatch-assignments']` on dispatch; removes them when units arrive on scene
 
 ### Real-Time Connection
 Located in `src/services/realtime.js`:
@@ -95,6 +99,12 @@ Dashboard.jsx (page)
   ### Routing (Units)
   Units use OSRM public routing for road paths and nearest-road snapping. The public endpoint can rate-limit or time out; for production, use a private OSRM or another routing provider.
 
+### Utility: Time Formatting (`src/utils/time.js`)
+All timestamps in the UI use `en-GB` locale with `hour12: false` to display 24-hour UTC times consistently:
+- `formatTime(isoString)` — returns `HH:MM:SS`
+- `formatDateTime(isoString)` — returns `DD/MM/YYYY, HH:MM:SS`
+Used in EventFeed, OperationalTimeline, IncidentDetailsPanel, and anywhere a timestamp is rendered.
+
 ### Styling
 Located in `src/styles.css` with:
 - CSS Variables for consistent theming
@@ -105,7 +115,7 @@ Located in `src/styles.css` with:
 
 ## Backend Mock Data Service
 
-### Mock Data Generator (`utils/mock_data.py`)
+### Mock Data Generator (`simulated/mock_data.py`)
 
 **Features:**
 - Deterministic: seed-based for reproducible demos
@@ -125,7 +135,7 @@ Located in `src/styles.css` with:
      "status": str,         # OPEN/IN_PROGRESS/CLOSED
      "location_lat": float,
      "location_lng": float,
-     "location_name": str,  # Tel Aviv area
+     "location_name": str,  # Named road/intersection across Israel
      "created_at": ISO8601,
      "updated_at": ISO8601,
      "channel": str,        # Police/Fire/EMS/Civil Defense
@@ -245,6 +255,31 @@ GET   /mock/simulate/           → Trigger one random update (for testing)
 7. Event logged automatically
 ```
 
+### Dispatch & Unit Routing
+```
+1. User selects units in IncidentDetailsPanel → clicks "Dispatch"
+2. dispatchUnitsToIncident() called in fieldIncident.js store
+3. Units set to EN_ROUTE; OSRM road routes fetched
+4. Assignment written to localStorage['ecm-dispatch-assignments']
+5. Map auto-zooms (flyToBounds) to incident + dispatched units
+6. Incident marker pulses with amber ring for 4 seconds
+7. IncidentDetailsPanel stays open (no auto-close)
+8. As units travel, moveUnits() advances positions along route
+9. On arrival: unit status → ON_SCENE; assignment removed from localStorage
+```
+
+### Dispatch Restore on Page Refresh
+```
+1. Dashboard mounts → initializeData() fetches incidents + units from API
+2. After data loads, reads localStorage['ecm-dispatch-assignments']
+3. Groups saved assignments by incidentId
+4. Calls dispatchUnitsToIncident({ ..., silent: true }) for each group
+   - silent: true → suppresses voice synthesis and event-log entries
+   - Units re-enter EN_ROUTE state with fresh routes from current positions
+5. Affected incidents set to IN_PROGRESS status
+6. Single "Restored N assignments" info event added to event log
+```
+
 ## Key Design Decisions
 
 ### 1. SSE vs WebSocket
@@ -269,7 +304,7 @@ GET   /mock/simulate/           → Trigger one random update (for testing)
   - ✅ Reactive updates
   - ✅ Composable selectors
   - ✅ Good DevTools support
-  - ⚠️ No built-in persistence (acceptable for MVP)
+  - ✅ Persistence via `zustand/middleware` `persist` — UI prefs survive page refresh
 
 ### 4. Component Architecture
 - **Chosen: Functional + Hooks** because:
@@ -352,7 +387,7 @@ if not user.can_modify_incident(incident):
 ## Testing Scenarios
 
 ### Functional Testing
-1. **Load Initial Data**: Dashboard shows 8 incidents, 12 units
+1. **Load Initial Data**: Dashboard shows 18 incidents, 24 units spread across Israel
 2. **Filter by Severity**: Show only CRITICAL → 1 incident
 3. **Search by Title**: Search "fire" → filtered list
 4. **Assign Unit**: Click incident → click assign button → verify update
@@ -366,7 +401,7 @@ if not user.can_modify_incident(incident):
 - 10 concurrent users: Backend should handle gracefully
 
 ### Edge Cases
-- Lost connection: Show "OFFLINE" status
+- Lost connection: Show "CONNECTING" (🟡 yellow) while auto-reconnecting; only goes RED/OFFLINE if SSE is closed entirely
 - Recover connection: Auto-reconnect with backoff
 - Invalid data: Show error toast
 - Server error: Fallback to last known state
@@ -423,4 +458,4 @@ Issues to address for production:
 
 ---
 
-**Dashboard Version:** 1.0 MVP | **Build Date:** 2024 | **Status:** Production Ready (for Demo)
+**Dashboard Version:** 1.1 MVP | **Build Date:** 2026 | **Status:** Production Ready (for Demo)
