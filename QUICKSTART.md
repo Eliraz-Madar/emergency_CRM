@@ -7,7 +7,7 @@
 **Option 1: Automatic (Recommended)**
 ```cmd
 cd final_code
-run_dashboard.bat
+run_project.bat
 ```
 
 **Option 2: Manual**

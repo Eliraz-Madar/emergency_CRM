@@ -293,3 +293,20 @@ class IncidentEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_type} - {self.title}"
+
+
+class ReportMedia(models.Model):
+    """Optional multimedia attachment (image or video) for an IncidentEvent report."""
+
+    class MediaType(models.TextChoices):
+        IMAGE = "image", "Image"
+        VIDEO = "video", "Video"
+
+    event = models.ForeignKey(
+        IncidentEvent, related_name="media", on_delete=models.CASCADE)
+    file = models.FileField(upload_to="report_media/%Y/%m/%d/")
+    media_type = models.CharField(max_length=10, choices=MediaType.choices)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.media_type} attachment for event {self.event_id}"

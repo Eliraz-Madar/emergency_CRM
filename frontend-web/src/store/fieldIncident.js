@@ -654,10 +654,11 @@ export const useFieldIncidentStore = create((set, get) => ({
       return { units: updatedUnits, routineUnits: updatedRoutineUnits, incidents: updatedIncidents, majorIncident: updatedMajorIncident };
     });
 
-    // Persist dispatch assignments to localStorage so they survive page refresh.
+    // Persist dispatch assignments to sessionStorage so they survive page refresh
+    // within the same tab, but are wiped automatically when the session ends.
     // Each entry stores just IDs + coordinates — routes are recalculated on restore.
     try {
-      const existing = JSON.parse(localStorage.getItem('ecm-dispatch-assignments') || '[]');
+      const existing = JSON.parse(sessionStorage.getItem('ecm-dispatch-assignments') || '[]');
       const fresh = unitIds.map((uid) => ({
         unitId: uid,
         incidentId,
@@ -670,7 +671,7 @@ export const useFieldIncidentStore = create((set, get) => ({
         ...existing.filter((a) => !unitIds.includes(a.unitId)),
         ...fresh,
       ];
-      localStorage.setItem('ecm-dispatch-assignments', JSON.stringify(merged));
+      sessionStorage.setItem('ecm-dispatch-assignments', JSON.stringify(merged));
     } catch (_) { /* non-critical */ }
 
     // Write dispatch events into the War-Room event feed (skipped on silent restore)
@@ -1342,9 +1343,9 @@ export const useFieldIncidentStore = create((set, get) => ({
       // Remove arrived units from the persisted dispatch assignments
       try {
         const arrivedIds = newArrivals.map((u) => u.id);
-        const existing = JSON.parse(localStorage.getItem('ecm-dispatch-assignments') || '[]');
+        const existing = JSON.parse(sessionStorage.getItem('ecm-dispatch-assignments') || '[]');
         const cleaned = existing.filter((a) => !arrivedIds.includes(a.unitId));
-        localStorage.setItem('ecm-dispatch-assignments', JSON.stringify(cleaned));
+        sessionStorage.setItem('ecm-dispatch-assignments', JSON.stringify(cleaned));
       } catch (_) { /* non-critical */ }
 
       try {

@@ -1,18 +1,20 @@
 from rest_framework import viewsets, status
 from rest_framework.response import Response
-from rest_framework.decorators import action, api_view
+from rest_framework.decorators import action, api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.http import JsonResponse, StreamingHttpResponse
 import json
 import time
 import random
 import os
 
-from .models import Incident, Task, Unit
-from .serializers import IncidentSerializer, TaskSerializer, UnitSerializer
+from .models import Incident, Task, Unit, IncidentEvent, ReportMedia
+from .serializers import IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer
 from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission
 from simulated.mock_data import get_mock_service
 from simulated.realtime import get_realtime_service
 from simulated.field_incident_data import get_field_incident_service
+import time as _time
 
 
 class IncidentViewSet(viewsets.ModelViewSet):
@@ -36,6 +38,9 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         user_role = getattr(request.user, "role", "")
+        user_id = getattr(request.user, "id", None)
+        username = getattr(request.user, "username", "unknown")
+
         if user_role == "fieldunit":
             status_value = request.data.get("status")
             if status_value is None:
@@ -46,6 +51,19 @@ class TaskViewSet(viewsets.ModelViewSet):
                 instance, data={"status": status_value}, partial=True)
             serializer.is_valid(raise_exception=True)
             self.perform_update(serializer)
+
+            get_realtime_service().broadcast({
+                "type": "user_action",
+                "action": "task_status_update",
+                "user_id": user_id,
+                "username": username,
+                "role": user_role,
+                "task_id": instance.id,
+                "task_title": instance.title,
+                "new_status": status_value,
+                "timestamp": _time.time(),
+            })
+
             return Response(serializer.data)
         return super().partial_update(request, *args, **kwargs)
 
@@ -192,7 +210,21 @@ def mock_field_detail(request, field_id):
     mock_service = get_mock_service()
     summary = mock_service.get_field_summary(field_id)
     if not summary:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        # Field was created in a previous server session (persisted in the browser).
+        # Reconstruct it in memory using any available field-incident location data.
+        field_incident = _get_field_incident_data(field_id)
+        lat = lng = None
+        if field_incident:
+            mi = field_incident.get("major_incident", {})
+            lat = mi.get("location_lat")
+            lng = mi.get("location_lng")
+        mock_service.create_field_command({
+            "id": field_id,
+            "name": f"Field Command {field_id}",
+            "location_lat": lat,
+            "location_lng": lng,
+        })
+        summary = mock_service.get_field_summary(field_id)
     return Response(summary)
 
 
@@ -468,27 +500,55 @@ def field_incident_casualty_update(request):
 
 
 @api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def field_incident_add_event(request):
-    """Add event to operational timeline."""
+    """Add event to operational timeline with optional image/video attachments.
+
+    Accepts multipart/form-data (for file uploads) or application/json (text-only).
+    Files must be sent under the field name 'files' (multiple allowed).
+    """
     field_id = request.query_params.get("fieldId")
     data = _get_field_incident_data(field_id)
 
     if data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
 
-    events = data.get("events", [])
+    # Persist the event to the database
+    event_obj = IncidentEvent.objects.create(
+        event_type=request.data.get("event_type", "UPDATE"),
+        severity=request.data.get("severity", "INFO"),
+        title=request.data.get("title", "Event"),
+        description=request.data.get("description", ""),
+        created_by=request.data.get("created_by", "User"),
+    )
 
-    event = {
-        "event_type": request.data.get("event_type", "UPDATE"),
-        "severity": request.data.get("severity", "INFO"),
-        "title": request.data.get("title", "Event"),
-        "description": request.data.get("description", ""),
-        "created_by": request.data.get("created_by", "User"),
+    # Persist any uploaded files as ReportMedia records
+    for uploaded_file in request.FILES.getlist("files"):
+        content_type = uploaded_file.content_type or ""
+        media_type = (
+            ReportMedia.MediaType.VIDEO
+            if content_type.startswith("video/")
+            else ReportMedia.MediaType.IMAGE
+        )
+        ReportMedia.objects.create(event=event_obj, file=uploaded_file, media_type=media_type)
+
+    serializer = IncidentEventSerializer(event_obj, context={"request": request})
+    response_data = serializer.data
+
+    # Mirror into the in-memory event list so SSE streaming stays consistent
+    in_memory_event = {
+        "id": event_obj.id,
+        "event_type": event_obj.event_type,
+        "severity": event_obj.severity,
+        "title": event_obj.title,
+        "description": event_obj.description,
+        "created_by": event_obj.created_by,
         "created_at": time.time(),
+        "media": response_data["media"],
     }
+    data.setdefault("events", []).insert(0, in_memory_event)
 
-    events.insert(0, event)  # Add to beginning of list
-    return Response(event)
+    return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET"])

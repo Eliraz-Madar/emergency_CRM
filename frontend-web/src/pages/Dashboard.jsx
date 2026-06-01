@@ -320,10 +320,12 @@ export default function Dashboard() {
         }
 
         // ── Restore dispatch assignments that survived the page refresh ──────
-        // Assignments are written to localStorage each time units are dispatched
-        // and removed when those units arrive on scene.
+        // Uses sessionStorage so assignments are scoped to the current browser tab.
+        // Closing the tab/window starts a clean session with no ghost routes.
+        // One-time: purge any stale entry left in localStorage from older builds.
+        localStorage.removeItem('ecm-dispatch-assignments');
         try {
-          const saved = JSON.parse(localStorage.getItem('ecm-dispatch-assignments') || '[]');
+          const saved = JSON.parse(sessionStorage.getItem('ecm-dispatch-assignments') || '[]');
           if (saved.length > 0) {
             // Group by incident so one dispatchUnitsToIncident call handles all
             // units for the same incident at once.

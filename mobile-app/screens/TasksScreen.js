@@ -1,62 +1,194 @@
 import { useEffect, useState } from "react";
-import { View, Text, Button, FlatList, ActivityIndicator } from "react-native";
+import {
+  View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator,
+} from "react-native";
+import { Surface } from "react-native-paper";
 import { API_BASE_URL } from "../config";
+import { useUser } from "../context/UserContext";
+import { getAuthHeaders } from "../utils/apiClient";
+
+const STATUS_CONFIG = {
+  DONE:        { bg: "#E8F5E9", color: "#2E7D32", label: "Done" },
+  IN_PROGRESS: { bg: "#FFF3E0", color: "#E65100", label: "In Progress" },
+  PENDING:     { bg: "#ECEFF1", color: "#546E7A", label: "Pending" },
+};
+
+function getStatusCfg(status) {
+  return STATUS_CONFIG[status] || STATUS_CONFIG.PENDING;
+}
 
 export default function TasksScreen({ token, onSelectTask }) {
   const [tasks, setTasks] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const { user } = useUser();
 
-  const fetchTasks = async () => {
-    setLoading(true);
+  const fetchTasks = async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
     try {
-      console.log(`[TasksScreen] Fetching from: ${API_BASE_URL}/api/tasks/`);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      
       const res = await fetch(`${API_BASE_URL}/api/tasks/`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: getAuthHeaders(token, user),
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      
-      console.log(`[TasksScreen] Response status: ${res.status}`);
-      if (!res.ok) throw new Error(`Failed to load tasks: ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      console.log(`[TasksScreen] Tasks loaded: ${data.length} items`);
       setTasks(data);
       setError("");
     } catch (err) {
-      console.error(`[TasksScreen] Error:`, err.message);
-      setError(`Unable to load tasks. Backend: ${API_BASE_URL} | Error: ${err.message}`);
+      setError("Could not load tasks. Pull to refresh.");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
   useEffect(() => {
     if (!token) return;
     fetchTasks();
-    const interval = setInterval(fetchTasks, 5000);
+    const interval = setInterval(() => fetchTasks(), 30000);
     return () => clearInterval(interval);
   }, [token]);
 
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#1565C0" />
+        <Text style={styles.loadingText}>Loading tasks…</Text>
+      </View>
+    );
+  }
+
   return (
-    <View style={{ flex: 1, padding: 16 }}>
-      <Text style={{ fontSize: 18, marginBottom: 12 }}>My Tasks</Text>
-      {loading && <ActivityIndicator size="large" color="#0000ff" />}
-      {error ? <Text style={{ color: "red", marginBottom: 12, fontSize: 12 }}>{error}</Text> : null}
+    <View style={styles.container}>
       <FlatList
         data={tasks}
         keyExtractor={(item) => String(item.id)}
-        renderItem={({ item }) => (
-          <View style={{ marginBottom: 12, padding: 12, borderWidth: 1 }}>
-            <Text>{item.title}</Text>
-            <Text>Status: {item.status}</Text>
-            <Button title="Report" onPress={() => onSelectTask(item)} />
+        contentContainerStyle={styles.list}
+        onRefresh={() => fetchTasks(true)}
+        refreshing={refreshing}
+        ListHeaderComponent={
+          <View style={styles.listHeader}>
+            <Text style={styles.sectionLabel}>MY TASKS</Text>
+            <Text style={styles.taskCount}>{tasks.length} assigned</Text>
           </View>
-        )}
+        }
+        ListEmptyComponent={
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyIcon}>✅</Text>
+            <Text style={styles.emptyTitle}>No tasks assigned</Text>
+            <Text style={styles.emptyHint}>Pull down to refresh</Text>
+          </View>
+        }
+        renderItem={({ item }) => {
+          const cfg = getStatusCfg(item.status);
+          return (
+            <Surface style={styles.card} elevation={2}>
+              <View style={styles.cardBody}>
+                <View style={styles.cardTop}>
+                  <Text style={styles.taskTitle} numberOfLines={2}>
+                    {item.title}
+                  </Text>
+                  <View style={[styles.badge, { backgroundColor: cfg.bg }]}>
+                    <Text style={[styles.badgeText, { color: cfg.color }]}>
+                      {cfg.label}
+                    </Text>
+                  </View>
+                </View>
+                {item.incident ? (
+                  <Text style={styles.incidentRef}>Incident #{item.incident}</Text>
+                ) : null}
+                <TouchableOpacity
+                  style={styles.reportBtn}
+                  onPress={() => onSelectTask(item)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.reportBtnText}>FILE REPORT  →</Text>
+                </TouchableOpacity>
+              </View>
+            </Surface>
+          );
+        }}
       />
+
+      {error ? (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorBannerText}>⚠  {error}</Text>
+        </View>
+      ) : null}
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#F0F4F8" },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, backgroundColor: "#F0F4F8" },
+  loadingText: { color: "#546E7A", fontSize: 14 },
+
+  list: { padding: 16, paddingBottom: 32 },
+  listHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+  sectionLabel: { fontSize: 12, fontWeight: "700", color: "#546E7A", letterSpacing: 1 },
+  taskCount:    { fontSize: 12, color: "#90A4AE" },
+
+  card: {
+    borderRadius: 14,
+    marginBottom: 12,
+    backgroundColor: "#FFFFFF",
+    overflow: "hidden",
+  },
+  cardBody: { padding: 16 },
+  cardTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 10,
+    marginBottom: 12,
+  },
+  taskTitle: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#1E2A3A",
+    lineHeight: 22,
+  },
+  badge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    flexShrink: 0,
+  },
+  badgeText: { fontSize: 12, fontWeight: "600", letterSpacing: 0.3 },
+
+  incidentRef: { fontSize: 12, color: "#90A4AE", marginBottom: 12 },
+
+  reportBtn: {
+    backgroundColor: "#1565C0",
+    borderRadius: 9,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  reportBtnText: { color: "#FFFFFF", fontSize: 14, fontWeight: "700", letterSpacing: 0.5 },
+
+  emptyBox: { alignItems: "center", paddingVertical: 64 },
+  emptyIcon:  { fontSize: 48, marginBottom: 12 },
+  emptyTitle: { fontSize: 17, fontWeight: "600", color: "#1E2A3A" },
+  emptyHint:  { fontSize: 13, color: "#90A4AE", marginTop: 6 },
+
+  errorBanner: {
+    position: "absolute", bottom: 0, left: 0, right: 0,
+    backgroundColor: "#FFEBEE",
+    padding: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#FFCDD2",
+  },
+  errorBannerText: { color: "#C62828", fontSize: 13, textAlign: "center" },
+});
