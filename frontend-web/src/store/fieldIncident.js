@@ -11,6 +11,10 @@ import { getFieldIncident } from '../api/client';
 import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
 import { useDashboardStore } from './dashboard';
 
+const _BACKEND_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
+  ? import.meta.env.VITE_API_URL
+  : 'http://localhost:8000/api';
+
 // ---------------------------------------------------------------------------
 // Scenario unit helpers
 // ---------------------------------------------------------------------------
@@ -281,6 +285,19 @@ const generateNationwideUnits = (count = 50) => {
 const createRoutineUnits = () => generateNationwideUnits(50);
 const buildInitialRoutineUnits = () => createRoutineUnits();
 const initialRoutineUnits = buildInitialRoutineUnits();
+
+// Register the routine unit list with the backend so the mobile app can show the same units
+(async () => {
+  try {
+    await fetch(`${_BACKEND_BASE}/mobile/register-units/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        units: initialRoutineUnits.map((u) => ({ id: u.id, name: u.name, type: u.type })),
+      }),
+    });
+  } catch (_) { /* non-critical */ }
+})();
 
 export const useFieldIncidentStore = create((set, get) => ({
   // Major incident data
@@ -693,6 +710,37 @@ export const useFieldIncidentStore = create((set, get) => ({
           });
         }
       } catch (_) { /* non-critical — never let event logging crash dispatch */ }
+    }
+
+    // Bridge dispatch to the backend so mobile app units see their tasks in real time
+    if (!silent) {
+      try {
+        const currentUnits = get().units || [];
+        const dispatchedUnitData = unitIds
+          .map((uid) => currentUnits.find((u) => u.id === uid))
+          .filter(Boolean)
+          .map((u) => ({
+            mock_unit_num: parseInt(String(u.id).replace('routine-', ''), 10),
+            type: u.type,
+            name: u.name,
+          }))
+          .filter((u) => Number.isFinite(u.mock_unit_num));
+
+        if (dispatchedUnitData.length > 0) {
+          fetch(`${_BACKEND_BASE}/mobile/dispatch/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              incident_id:    incidentId,
+              incident_title: target?.title || `Incident ${incidentId}`,
+              location_lat:   targetLat,
+              location_lng:   targetLng,
+              priority:       target?.priority || 'HIGH',
+              units:          dispatchedUnitData,
+            }),
+          }).catch(() => { /* non-critical */ });
+        }
+      } catch (_) { /* non-critical */ }
     }
   },
 

@@ -1,90 +1,88 @@
+"""
+Sets up the three canonical field-unit users (police / ambulance / fire)
+and their matching DB Unit objects.  Run once after migrations:
+
+    python create_sample_data.py
+"""
 import os
 import sys
 import django
 
-# Force stdout to UTF-8 so checkmark characters don't crash on Windows cp1252 consoles
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
 django.setup()
 
-from api.models import Incident, Unit, Task, User
+from api.models import Unit, User, Task, Incident
 
-# Create a test user if not exists
-user, created = User.objects.get_or_create(
-    username='fieldunit1',
-    defaults={
-        'email': 'field@test.com',
-        'role': 'fieldunit',
-        'is_active': True
-    }
+# ── 1. Canonical units ────────────────────────────────────────────────────────
+CANONICAL_UNITS = [
+    {"name": "Police Unit Alpha",    "type": "Police", "lat": 32.0853, "lng": 34.7818},
+    {"name": "Ambulance Unit Alpha", "type": "EMS",    "lat": 32.0860, "lng": 34.7820},
+    {"name": "Fire Unit Alpha",      "type": "Fire",   "lat": 32.0870, "lng": 34.7810},
+]
+
+units_by_type = {}
+for u in CANONICAL_UNITS:
+    obj, created = Unit.objects.get_or_create(
+        name=u["name"],
+        defaults={
+            "type":                u["type"],
+            "location_lat":        u["lat"],
+            "location_lng":        u["lng"],
+            "availability_status": "AVAILABLE",
+        },
+    )
+    units_by_type[u["type"]] = obj
+    print(f"{'✓ Created' if created else '  Exists'} unit: {obj.name}")
+
+# ── 2. Field-unit users linked to their unit ──────────────────────────────────
+FIELD_USERS = [
+    {"username": "police",    "password": "police123",    "unit_type": "Police"},
+    {"username": "ambulance", "password": "ambulance123", "unit_type": "EMS"},
+    {"username": "fire",      "password": "fire123",      "unit_type": "Fire"},
+]
+
+for fu in FIELD_USERS:
+    unit = units_by_type[fu["unit_type"]]
+    user, created = User.objects.get_or_create(
+        username=fu["username"],
+        defaults={
+            "role":      "fieldunit",
+            "is_active": True,
+            "unit":      unit,
+        },
+    )
+    if created:
+        user.set_password(fu["password"])
+        user.save()
+        print(f"✓ Created user: {fu['username']} / {fu['password']}  →  {unit.name}")
+    else:
+        # Make sure existing user is linked to the correct unit
+        if user.unit_id != unit.id:
+            user.unit = unit
+            user.save()
+            print(f"  Updated unit link for: {fu['username']}  →  {unit.name}")
+        else:
+            print(f"  Exists user: {fu['username']}")
+
+# ── 3. Keep legacy fieldunit1 for backward compat ────────────────────────────
+legacy, created = User.objects.get_or_create(
+    username="fieldunit1",
+    defaults={"role": "fieldunit", "is_active": True},
 )
 if created:
-    user.set_password('test123')
-    user.save()
-    print("✓ Created test user: fieldunit1")
+    legacy.set_password("test123")
+    legacy.save()
+    print("✓ Created legacy user: fieldunit1 / test123")
 
-# Create sample incidents
-incident1, created = Incident.objects.get_or_create(
-    title='Structure Fire - Downtown',
-    defaults={
-        'description': 'Multi-story building fire',
-        'location_lat': 32.0853,
-        'location_lng': 34.7818,
-        'priority': 'HIGH',
-        'status': 'IN_PROGRESS'
-    }
-)
-if created:
-    print("✓ Created incident: Structure Fire")
-
-# Create sample units
-unit1, created = Unit.objects.get_or_create(
-    name='Fire Truck 1',
-    defaults={
-        'type': 'Fire',
-        'location_lat': 32.0860,
-        'location_lng': 34.7820,
-        'availability_status': 'AVAILABLE'
-    }
-)
-if created:
-    print("✓ Created unit: Fire Truck 1")
-
-# Create sample tasks
-task1, created = Task.objects.get_or_create(
-    title='Evacuate Building',
-    incident=incident1,
-    assigned_unit=unit1,
-    defaults={
-        'status': 'PENDING'
-    }
-)
-if created:
-    print("✓ Created task: Evacuate Building")
-
-task2, created = Task.objects.get_or_create(
-    title='Search for Survivors',
-    incident=incident1,
-    assigned_unit=unit1,
-    defaults={
-        'status': 'PENDING'
-    }
-)
-if created:
-    print("✓ Created task: Search for Survivors")
-
-task3, created = Task.objects.get_or_create(
-    title='Report Status Update',
-    incident=incident1,
-    assigned_unit=unit1,
-    defaults={
-        'status': 'IN_PROGRESS'
-    }
-)
-if created:
-    print("✓ Created task: Report Status Update")
-
-print("\n✓ Sample data created successfully!")
-print(f"Total tasks: {Task.objects.count()}")
+# ── Summary ───────────────────────────────────────────────────────────────────
+print("\n── Field Unit Credentials ───────────────────────")
+print("  police    / police123")
+print("  ambulance / ambulance123")
+print("  fire      / fire123")
+print("─────────────────────────────────────────────────")
+print(f"Units in DB : {Unit.objects.count()}")
+print(f"Users in DB : {User.objects.filter(role='fieldunit').count()} field-unit users")
+print(f"Tasks in DB : {Task.objects.count()}")

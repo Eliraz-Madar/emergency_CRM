@@ -7,8 +7,23 @@ import json
 import time
 import random
 import os
+import queue
+import threading
 
-from .models import Incident, Task, Unit, IncidentEvent, ReportMedia
+# Per-connection queues for the field SSE stream
+_field_sse_queues: list = []
+_field_sse_lock = threading.Lock()
+
+
+def _push_field_sse(event: dict):
+    with _field_sse_lock:
+        for q in list(_field_sse_queues):
+            try:
+                q.put_nowait(event)
+            except Exception:
+                pass
+
+from .models import Incident, Task, Unit, IncidentEvent, ReportMedia, PushToken
 from .serializers import IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer
 from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission
 from simulated.mock_data import get_mock_service
@@ -30,10 +45,19 @@ class TaskViewSet(viewsets.ModelViewSet):
     permission_classes = [TaskPermission]
 
     def get_queryset(self):
-        incident_id = self.request.query_params.get("incident")
         qs = super().get_queryset()
-        if incident_id:
-            qs = qs.filter(incident_id=incident_id)
+        params = self.request.query_params
+
+        if params.get("incident"):
+            qs = qs.filter(incident_id=params["incident"])
+
+        # Mobile app passes ?mock_unit=<id> to filter by the specific dispatched unit
+        if params.get("mock_unit"):
+            try:
+                qs = qs.filter(mock_unit_id=int(params["mock_unit"]))
+            except (ValueError, TypeError):
+                qs = qs.none()
+
         return qs
 
     def partial_update(self, request, *args, **kwargs):
@@ -163,7 +187,7 @@ def mock_incident_priority(request, incident_id):
 
 @api_view(["POST"])
 def mock_incident_assign(request, incident_id):
-    """Assign unit to incident."""
+    """Assign unit to incident and mirror to real DB for the mobile app."""
     unit_id = request.data.get("unit_id")
     if not unit_id:
         return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -172,7 +196,106 @@ def mock_incident_assign(request, incident_id):
     incident = mock_service.assign_unit(int(incident_id), int(unit_id))
     if not incident:
         return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    mock_unit = mock_service.units.get(int(unit_id))
+    _sync_dispatch_to_db(incident, mock_unit)
+
     return Response(incident)
+
+
+# Maps mock unit types → canonical DB unit types
+_MOCK_TYPE_TO_DB_TYPE = {
+    "Police":    "Police",
+    "Fire":      "Fire",
+    "Ambulance": "EMS",
+}
+
+
+def _send_expo_push(tokens, title, body, data=None):
+    """Send push notifications via Expo Push API (fire-and-forget)."""
+    if not tokens:
+        return
+    import urllib.request
+    import json as _json
+    messages = [
+        {"to": t, "title": title, "body": body, "sound": "default", "data": data or {}}
+        for t in tokens
+    ]
+    payload = _json.dumps(messages).encode("utf-8")
+    req = urllib.request.Request(
+        "https://exp.host/--/api/v2/push/send",
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:
+        pass
+
+
+def _sync_dispatch_to_db(mock_incident: dict, mock_unit: dict) -> None:
+    """Mirror a dashboard dispatch as a Task in the real DB and notify the field device."""
+    if not mock_unit:
+        return
+    db_unit_type = _MOCK_TYPE_TO_DB_TYPE.get(mock_unit.get("type"))
+    if not db_unit_type:
+        return
+
+    try:
+        db_unit = Unit.objects.filter(type=db_unit_type, app_user__isnull=False).first()
+        if not db_unit:
+            return
+
+        db_incident, _ = Incident.objects.update_or_create(
+            mock_incident_id=mock_incident["id"],
+            defaults={
+                "title":        mock_incident.get("title", "Incident"),
+                "description":  mock_incident.get("description", ""),
+                "location_lat": mock_incident["location_lat"],
+                "location_lng": mock_incident["location_lng"],
+                "priority":     mock_incident.get("priority", "LOW"),
+                "status":       "IN_PROGRESS",
+            },
+        )
+
+        _, created = Task.objects.get_or_create(
+            incident=db_incident,
+            mock_unit_id=mock_unit["id"],
+            defaults={
+                "assigned_unit": db_unit,
+                "title":         f"Respond: {mock_incident.get('title', 'Incident')}",
+                "status":        "PENDING",
+            },
+        )
+
+        if created:
+            tokens = list(
+                PushToken.objects.filter(mock_unit_id=mock_unit["id"])
+                .values_list("token", flat=True)
+            )
+            _send_expo_push(
+                tokens,
+                title="New Dispatch",
+                body=f"{mock_incident.get('title', 'Incident')} — respond immediately",
+                data={"mock_incident_id": mock_incident["id"]},
+            )
+
+    except Exception:
+        pass  # never crash the dispatch response over a sync failure
+
+
+@api_view(["POST"])
+def register_push_token(request):
+    """Register an Expo push token for a specific mock unit."""
+    mock_unit_id = request.data.get("mock_unit_id")
+    token = request.data.get("token", "").strip()
+    if not mock_unit_id or not token:
+        return Response({"detail": "mock_unit_id and token required."}, status=status.HTTP_400_BAD_REQUEST)
+    PushToken.objects.update_or_create(
+        token=token,
+        defaults={"mock_unit_id": int(mock_unit_id)},
+    )
+    return Response({"status": "registered"})
 
 
 @api_view(["POST"])
@@ -343,7 +466,11 @@ _field_incident_data = {}
 
 def _get_field_incident_data(field_id=None):
     key = field_id or "default"
-    return _field_incident_data.get(key)
+    data = _field_incident_data.get(key)
+    if data is None and _field_incident_data:
+        # Fall back to first active field incident
+        data = next(iter(_field_incident_data.values()))
+    return data
 
 
 def _set_field_incident_data(field_id, data):
@@ -543,10 +670,12 @@ def field_incident_add_event(request):
         "title": event_obj.title,
         "description": event_obj.description,
         "created_by": event_obj.created_by,
-        "created_at": time.time(),
+        "created_at": event_obj.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "media": response_data["media"],
     }
     data.setdefault("events", []).insert(0, in_memory_event)
+
+    _push_field_sse({"type": "incident_update", "data": {"new_event": in_memory_event}})
 
     return Response(response_data, status=status.HTTP_201_CREATED)
 
@@ -592,11 +721,22 @@ def field_incident_simulate(request):
 def field_incident_updates_stream(request):
     """Stream real-time field incident updates using Server-Sent Events."""
     def event_generator():
-        yield f"data: {json.dumps({'type': 'connected', 'timestamp': time.time()})}\n\n"
-
+        q = queue.Queue()
+        with _field_sse_lock:
+            _field_sse_queues.append(q)
         try:
+            yield f"data: {json.dumps({'type': 'connected', 'timestamp': time.time()})}\n\n"
+
             last_heartbeat = time.time()
             while True:
+                # Drain any events pushed by add-event/ (e.g. mobile reports)
+                while True:
+                    try:
+                        pushed = q.get_nowait()
+                        yield f"data: {json.dumps(pushed)}\n\n"
+                    except queue.Empty:
+                        break
+
                 # Simulate update every 2-4 seconds
                 if random.random() < 0.3:
                     field_service = get_field_incident_service()
@@ -613,6 +753,10 @@ def field_incident_updates_stream(request):
                 time.sleep(1)
         except GeneratorExit:
             pass
+        finally:
+            with _field_sse_lock:
+                if q in _field_sse_queues:
+                    _field_sse_queues.remove(q)
 
     response = StreamingHttpResponse(
         event_generator(),
@@ -621,3 +765,132 @@ def field_incident_updates_stream(request):
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+# ============================================
+# MOBILE APP BRIDGE ENDPOINTS
+# ============================================
+
+# In-memory registry of routine units populated by the dashboard on load
+_routine_units_registry: dict = {}
+
+
+@api_view(["POST"])
+def mobile_register_units(request):
+    """Dashboard calls this on init to register its routine unit list for the mobile app."""
+    for unit in request.data.get("units", []):
+        raw_id = unit.get("id", "")
+        try:
+            num = int(str(raw_id).replace("routine-", ""))
+        except (ValueError, TypeError):
+            continue
+        _routine_units_registry[num] = {
+            "id":     num,
+            "name":   unit.get("name", f"Unit {num}"),
+            "type":   unit.get("type", "POLICE"),
+            "status": "Available",
+        }
+    return Response({"status": "ok", "count": len(_routine_units_registry)})
+
+
+@api_view(["GET"])
+def mobile_units(request):
+    """Returns registered routine units for mobile app unit selection, filtered by type."""
+    unit_type = request.query_params.get("type", "").upper()
+    units = [u for u in _routine_units_registry.values()
+             if not unit_type or u["type"] == unit_type]
+    return Response(sorted(units, key=lambda u: u["id"]))
+
+
+def _parse_incident_key(raw):
+    """Convert any frontend incident ID (int or string like 'live-5') to a stable int."""
+    if isinstance(raw, int):
+        return raw
+    s = str(raw)
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    for prefix in ("live-", "sim-", "routine-", "incident-"):
+        if s.startswith(prefix):
+            try:
+                return int(s[len(prefix):])
+            except ValueError:
+                pass
+    import hashlib
+    return int(hashlib.md5(s.encode()).hexdigest()[:8], 16)
+
+
+_ROUTINE_TYPE_TO_DB = {
+    "POLICE":  "Police",
+    "FIRE":    "Fire",
+    "MEDICAL": "EMS",
+}
+
+
+@api_view(["POST"])
+def mobile_dispatch(request):
+    """Mirror a frontend dispatch into DB Tasks so mobile-app units see their assignments."""
+    incident_id_raw = request.data.get("incident_id", "")
+    incident_title  = request.data.get("incident_title", "Incident")
+    location_lat    = request.data.get("location_lat")
+    location_lng    = request.data.get("location_lng")
+    priority        = request.data.get("priority", "HIGH")
+    units           = request.data.get("units", [])
+
+    if location_lat is None or location_lng is None:
+        return Response({"detail": "location_lat and location_lng required."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    inc_key = _parse_incident_key(incident_id_raw)
+
+    try:
+        db_incident, _ = Incident.objects.update_or_create(
+            mock_incident_id=inc_key,
+            defaults={
+                "title":        incident_title,
+                "description":  "",
+                "location_lat": float(location_lat),
+                "location_lng": float(location_lng),
+                "priority":     str(priority)[:16],
+                "status":       "IN_PROGRESS",
+            },
+        )
+    except Exception:
+        return Response({"detail": "DB error."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    tasks_created = 0
+    for unit in units:
+        mock_unit_num = unit.get("mock_unit_num")
+        unit_type_str = unit.get("type", "")
+        if not mock_unit_num:
+            continue
+
+        db_unit_type = _ROUTINE_TYPE_TO_DB.get(str(unit_type_str).upper())
+        db_unit = (Unit.objects.filter(type=db_unit_type, app_user__isnull=False).first()
+                   if db_unit_type else None)
+
+        _, created = Task.objects.get_or_create(
+            incident=db_incident,
+            mock_unit_id=int(mock_unit_num),
+            defaults={
+                "assigned_unit": db_unit,
+                "title":         f"Respond: {incident_title}",
+                "status":        "PENDING",
+            },
+        )
+
+        if created:
+            tasks_created += 1
+            tokens = list(
+                PushToken.objects.filter(mock_unit_id=int(mock_unit_num))
+                .values_list("token", flat=True)
+            )
+            _send_expo_push(
+                tokens,
+                title="New Dispatch",
+                body=f"{incident_title} — respond immediately",
+                data={"incident_key": inc_key},
+            )
+
+    return Response({"status": "ok", "tasks_created": tasks_created})

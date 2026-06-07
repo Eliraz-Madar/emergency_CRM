@@ -11,7 +11,9 @@ from .views import (
     field_incident_detail, field_incident_sectors, field_incident_task_groups,
     field_incident_events, field_incident_sector_update, field_incident_task_group_update,
     field_incident_casualty_update, field_incident_add_event, field_incident_simulate,
-    field_incident_updates_stream
+    field_incident_updates_stream,
+    register_push_token,
+    mobile_register_units, mobile_units, mobile_dispatch,
 )
 
 router = DefaultRouter()
@@ -21,6 +23,10 @@ router.register(r"units", UnitViewSet)
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("push-token/", register_push_token, name="register_push_token"),
+    path("mobile/register-units/", mobile_register_units, name="mobile_register_units"),
+    path("mobile/units/", mobile_units, name="mobile_units"),
+    path("mobile/dispatch/", mobile_dispatch, name="mobile_dispatch"),
     # Mock data API endpoints for regional dashboard demo
     path("mock/incidents/", mock_incidents, name="mock_incidents"),
     path("mock/units/", mock_units, name="mock_units"),

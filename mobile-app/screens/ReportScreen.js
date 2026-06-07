@@ -19,7 +19,8 @@ const STATUS_OPTIONS = [
 const MAX_ATTACHMENTS = 5;
 
 export default function ReportScreen({ selectedTask, token, online, onDone }) {
-  const [status, setStatus] = useState("PENDING");
+  const originalStatus = selectedTask?.status || "PENDING";
+  const [status, setStatus] = useState(originalStatus);
   const [notes, setNotes] = useState("");
   const [mediaFiles, setMediaFiles] = useState([]);
   const [error, setError] = useState("");
@@ -87,6 +88,16 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
     if (!result.canceled) appendAssets(result.assets);
   };
 
+  const recordVideo = async () => {
+    if (!(await requestCameraPermission())) return;
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ["videos"],
+      videoMaxDuration: 120,
+      quality: 0.8,
+    });
+    if (!result.canceled) appendAssets(result.assets);
+  };
+
   const removeMedia = (index) =>
     setMediaFiles((prev) => prev.filter((_, i) => i !== index));
 
@@ -109,20 +120,22 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
   };
 
   const sendEventWithMedia = async () => {
-    // Non-fatal: attaches notes + media as a field event. Fails silently if no
-    // active field incident is running on the backend.
-    if (!notes.trim() && mediaFiles.length === 0) return;
+    const statusLabel = STATUS_OPTIONS.find((s) => s.value === status)?.label || status;
+    const descParts = [];
+    if (status !== originalStatus) descParts.push(`Status set to: ${statusLabel}`);
+    if (notes.trim()) descParts.push(`Notes: ${notes.trim()}`);
+
     try {
       const formData = new FormData();
-      formData.append("event_type", "UPDATE");
+      formData.append("event_type", "STATUS_CHANGE");
       formData.append("severity", "INFO");
-      formData.append("title", `Field Report: ${taskTitle}`);
-      formData.append("description", notes.trim());
+      formData.append("title", `Task Update: ${taskTitle}`);
+      formData.append("description", descParts.join("\n"));
       formData.append("created_by", user?.username || "Field Unit");
       for (const file of mediaFiles) {
         formData.append("files", { uri: file.uri, type: file.type, name: file.name });
       }
-      await fetch(`${API_BASE_URL}/api/field/add-event/?fieldId=mobile`, {
+      await fetch(`${API_BASE_URL}/api/field/add-event/?fieldId=default`, {
         method: "POST",
         headers: getAuthHeaders(token, user),
         body: formData,
@@ -223,7 +236,11 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
       <View style={styles.attachButtonRow}>
         <TouchableOpacity style={styles.attachBtn} onPress={takePhoto} activeOpacity={0.85}>
           <Text style={styles.attachBtnIcon}>📷</Text>
-          <Text style={styles.attachBtnText}>Camera</Text>
+          <Text style={styles.attachBtnText}>Photo</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.attachBtn} onPress={recordVideo} activeOpacity={0.85}>
+          <Text style={styles.attachBtnIcon}>🎬</Text>
+          <Text style={styles.attachBtnText}>Record</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.attachBtn} onPress={pickImages} activeOpacity={0.85}>
           <Text style={styles.attachBtnIcon}>🖼</Text>
@@ -231,7 +248,7 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
         </TouchableOpacity>
         <TouchableOpacity style={styles.attachBtn} onPress={pickVideos} activeOpacity={0.85}>
           <Text style={styles.attachBtnIcon}>🎥</Text>
-          <Text style={styles.attachBtnText}>Video</Text>
+          <Text style={styles.attachBtnText}>Videos</Text>
         </TouchableOpacity>
       </View>
 
@@ -364,7 +381,7 @@ const styles = StyleSheet.create({
   },
 
   // Attach buttons
-  attachButtonRow: { flexDirection: "row", gap: 10, marginBottom: 14 },
+  attachButtonRow: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 14 },
   attachBtn: {
     flex: 1,
     alignItems: "center",

@@ -11,6 +11,12 @@ class User(AbstractUser):
     role = models.CharField(
         max_length=32, choices=Roles.choices, default=Roles.DISPATCHER)
 
+    unit = models.OneToOneField(
+        "Unit", null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="app_user",
+    )
+
     def __str__(self):
         return f"{self.username} ({self.role})"
 
@@ -31,6 +37,7 @@ class Incident(models.Model):
     description = models.TextField(blank=True)
     location_lat = models.FloatField()
     location_lng = models.FloatField()
+    mock_incident_id = models.IntegerField(null=True, blank=True, unique=True)
     priority = models.CharField(
         max_length=10, choices=Priority.choices, default=Priority.LOW)
     status = models.CharField(
@@ -68,6 +75,7 @@ class Task(models.Model):
         Incident, related_name="tasks", on_delete=models.CASCADE)
     assigned_unit = models.ForeignKey(
         Unit, related_name="tasks", on_delete=models.SET_NULL, null=True, blank=True)
+    mock_unit_id = models.IntegerField(null=True, blank=True)
     title = models.CharField(max_length=200)
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING)
@@ -310,3 +318,13 @@ class ReportMedia(models.Model):
 
     def __str__(self):
         return f"{self.media_type} attachment for event {self.event_id}"
+
+
+class PushToken(models.Model):
+    """Expo push token for a field unit device, keyed by the mock unit ID."""
+    mock_unit_id  = models.IntegerField()
+    token         = models.CharField(max_length=256, unique=True)
+    registered_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"unit {self.mock_unit_id} → {self.token[:30]}…"

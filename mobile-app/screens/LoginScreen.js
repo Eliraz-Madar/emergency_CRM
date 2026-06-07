@@ -32,7 +32,13 @@ export default function LoginScreen({ onLogin }) {
       clearTimeout(timeout);
       if (!res.ok) throw new Error("invalid_credentials");
       const data = await res.json();
-      setUser({ id: data.user_id, username: data.username, role: data.role });
+      setUser({
+        id:        data.user_id,
+        username:  data.username,
+        role:      data.role,
+        unit_id:   data.unit_id   ?? null,
+        unit_type: data.unit_type ?? null,
+      });
       onLogin(data.access);
     } catch (err) {
       if (err.message === "invalid_credentials") {

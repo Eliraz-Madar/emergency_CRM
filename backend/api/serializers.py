@@ -3,10 +3,19 @@ from .models import Incident, Task, Unit, IncidentEvent, ReportMedia
 
 
 class TaskSerializer(serializers.ModelSerializer):
+    incident_title    = serializers.CharField(source="incident.title",        read_only=True)
+    incident_lat      = serializers.FloatField(source="incident.location_lat", read_only=True)
+    incident_lng      = serializers.FloatField(source="incident.location_lng", read_only=True)
+    incident_priority = serializers.CharField(source="incident.priority",      read_only=True)
+    incident_status   = serializers.CharField(source="incident.status",        read_only=True)
+
     class Meta:
         model = Task
-        fields = ["id", "incident", "assigned_unit",
-                  "title", "status", "timestamp"]
+        fields = [
+            "id", "incident", "incident_title",
+            "incident_lat", "incident_lng", "incident_priority", "incident_status",
+            "assigned_unit", "mock_unit_id", "title", "status", "timestamp",
+        ]
 
 
 class IncidentSerializer(serializers.ModelSerializer):

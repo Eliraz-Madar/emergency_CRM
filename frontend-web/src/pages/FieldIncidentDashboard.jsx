@@ -175,17 +175,18 @@ const FieldIncidentDashboard = () => {
         };
 
         eventSource.onerror = () => {
-          // Show CONNECTING (yellow) while reconnecting — not OFFLINE (red)
           setConnectionStatus('CONNECTING');
           eventSource.close();
-
-          // Attempt reconnect after 5 seconds
-          reconnectTimeout = setTimeout(connect, 5000);
+          reconnectTimeout = setTimeout(() => {
+            // Re-fetch events to catch anything missed during the disconnect
+            loadFieldIncident?.();
+            connect();
+          }, 2000);
         };
       } catch (err) {
         console.error('Failed to connect to field incident stream:', err);
         setConnectionStatus('CONNECTING');
-        reconnectTimeout = setTimeout(connect, 5000);
+        reconnectTimeout = setTimeout(connect, 2000);
       }
     };
 

@@ -69,9 +69,16 @@ const OperationalTimeline = ({ onShowDetails }) => {
   /**
    * Filter events by severity
    */
-  const filteredEvents = severityFilter === 'ALL'
+  const getTimestamp = (event) => {
+    const raw = event.created_at ?? event.timestamp ?? event.time ?? 0;
+    const ms = typeof raw === 'number' ? raw * 1000 : new Date(raw).getTime();
+    return isNaN(ms) ? 0 : ms;
+  };
+
+  const filteredEvents = (severityFilter === 'ALL'
     ? safeEvents
-    : safeEvents.filter((event) => event?.severity === severityFilter);
+    : safeEvents.filter((event) => event?.severity === severityFilter)
+  ).slice().sort((a, b) => getTimestamp(b) - getTimestamp(a));
 
   return (
     <div className="operational-timeline">
@@ -189,7 +196,44 @@ const OperationalTimeline = ({ onShowDetails }) => {
                   </div>
 
                   {event.description && (
-                    <p className="event-description">{event.description}</p>
+                    <div className="event-description">
+                      {event.description.split('\n').map((line, i) => {
+                        const colon = line.indexOf(': ');
+                        if (colon > 0) {
+                          return (
+                            <p key={i} className="event-description-line">
+                              <strong>{line.slice(0, colon + 1)}</strong>{line.slice(colon + 1)}
+                            </p>
+                          );
+                        }
+                        return <p key={i} className="event-description-line">{line}</p>;
+                      })}
+                    </div>
+                  )}
+
+                  {Array.isArray(event.media) && event.media.length > 0 && (
+                    <div className="event-media">
+                      <span className="event-media-label">Pictures:</span>
+                      {event.media.map((m) =>
+                        m.media_type === 'video' ? (
+                          <video
+                            key={m.id}
+                            src={m.file_url}
+                            className="event-media-thumb"
+                            controls
+                            preload="metadata"
+                          />
+                        ) : (
+                          <a key={m.id} href={m.file_url} target="_blank" rel="noreferrer">
+                            <img
+                              src={m.file_url}
+                              alt="Field attachment"
+                              className="event-media-thumb"
+                            />
+                          </a>
+                        )
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

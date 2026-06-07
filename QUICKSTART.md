@@ -14,13 +14,21 @@ run_project.bat
 ```cmd
 # Terminal 1 - Backend
 cd backend
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python manage.py migrate
+python create_sample_data.py
 python manage.py runserver
 
 # Terminal 2 - Frontend (new window)
 cd frontend-web
 npm install
 npm run dev
+
+# Terminal 3 - Mobile (new window)
+cd mobile-app
+npm install
+npx expo start
 ```
 
 Then open browser → `http://localhost:5173`
@@ -28,26 +36,28 @@ Then open browser → `http://localhost:5173`
 ### Mac/Linux Users
 
 ```bash
-cd final_code
-chmod +x run_dashboard.sh
-./run_dashboard.sh
-```
-
-Or manual:
-```bash
 # Terminal 1
 cd backend
+source venv/bin/activate
 pip3 install -r requirements.txt
+python3 manage.py migrate
+python3 create_sample_data.py
 python3 manage.py runserver
 
 # Terminal 2
 cd frontend-web
 npm install
 npm run dev
+
+# Terminal 3 (mobile)
+cd mobile-app
+npm install
+npx expo start
 ```
 
 ## ✅ You Should See
 
+After start-up: the War-Room Dashboard loads at `http://localhost:5173/regional` with 18+ live incidents, unit markers on the map, and a green **CONNECTED** badge in the top-right corner.
 
 ## 🎮 Try These Actions (30 seconds)
 
@@ -61,9 +71,10 @@ npm run dev
    - Click "OPEN" → "IN_PROGRESS"
    - Notice event log updates
    
-4. **Assign a unit**
-   - Click "Assign Available Unit"
-   - Unit now shows in assigned list
+4. **Dispatch a unit to an incident**
+   - Click an incident → "DISPATCH FORCES"
+   - Select unit type, tick a unit, click Dispatch
+   - Unit drives to the incident on the map in real time
    
 5. **Filter by severity**
    - Click "Filters"
@@ -79,6 +90,12 @@ npm run dev
    - Units move on map
    - Events log real-time activity
 
+8. **Open the mobile app** (Expo)
+   - Log in as `police` / `police123`
+   - Select your specific unit (e.g., "Unit 43")
+   - Go back to the dashboard and dispatch "Unit 43" to an incident
+   - The task appears on the mobile device within 8 seconds
+
 ## 🐛 Troubleshooting
 
 ### Backend won't start
@@ -90,6 +107,14 @@ netstat -ano | findstr 8000 # Windows
 
 # Kill the process or use different port
 python manage.py runserver 8001
+```
+
+### `No module named 'django'`
+```powershell
+# Virtual environment not active — run this first:
+cd backend
+.\venv\Scripts\Activate.ps1   # Windows PowerShell
+# Then run your manage.py command
 ```
 
 ### Frontend won't load
@@ -121,18 +146,49 @@ export default defineConfig({
 VITE_PORT=5174 npm run dev
 ```
 
+### Mobile app shows "No units registered yet"
+The unit list is populated when the War-Room Dashboard loads in the browser. Start sequence:
+1. Start the backend
+2. Open `http://localhost:5173/regional` in a browser (registers the 50 routine units)
+3. Then open the mobile app and log in
+
+### Mobile app shows "Network request failed"
+Check that the IP address in `mobile-app/config.js` matches your machine:
+```js
+export const API_BASE_URL = "http://192.168.x.x:8000";  // your LAN IP
+```
+The Android emulator reaches host localhost at `10.0.2.2`; a physical device needs the LAN IP.
+
+## 🔑 Accounts
+
+| Username | Password | Role | Notes |
+|---|---|---|---|
+| `police` | `police123` | fieldunit | Police unit mobile login |
+| `ambulance` | `ambulance123` | fieldunit | Ambulance (EMS) mobile login |
+| `fire` | `fire123` | fieldunit | Fire unit mobile login |
+| `fieldunit1` | `test123` | fieldunit | Legacy test account |
+
+These accounts are created automatically by `create_sample_data.py` (run at startup). The first three are linked to unit types and are used by the mobile app.
+
 ## 📋 What's Included
 
-✅ **Mock Data Service**
+✅ **War-Room Regional Dashboard** — 18+ incidents, dispatch, map routing, SSE real-time
 
-✅ **Professional UI**
+✅ **Field Incident Command Dashboard** — sector map, task groups, casualty tracker
 
-✅ **Real-Time Features**
+✅ **Field Mobile App** — unit login, task list, field reports, offline sync, incident map
 
-✅ **Production-Ready Code**
+✅ **Dispatch → Mobile Sync** — dispatch a unit in the dashboard; task appears on the mobile app within 8 seconds
+
+✅ **Push Notifications** — mobile units get alerted when dispatched to an incident
+
+✅ **Offline Mode** — mobile reports saved to SQLite, synced when reconnected
 
 ## 📚 Documentation
 
+- `ARCHITECTURE.md` — system architecture, data models, store shapes, API reference
+- `IMPLEMENTATION.md` — data flows, design decisions, testing scenarios
+- `frontend-web/MAPBOX_SETUP.md` — optional Mapbox routing setup
 
 ## 🎓 Learning Resources
 
@@ -201,6 +257,5 @@ Backend logs in terminal will show:
 
 **Dashboard MVP | Ready to Demo | Built with ❤️**
 
-**Field access (stub):**
-- On the selector page, set **Field ID** and enable **Field Manager Access**.
-## 🚀 Next Steps
+**Field access:**
+- On the selector page, set **Field ID** and enable **Field Manager Access** to open the Field Incident Command Dashboard.

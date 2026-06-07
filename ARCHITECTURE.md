@@ -83,15 +83,33 @@ ReportMedia                          ← NEW in v3.0
 **Key design rule:** `description` (text) and `media` (files) are both optional on every report.
 A valid report can be text-only, media-only, or a combination of both.
 
+### Mobile Auth Data Model
+```
+User (AbstractUser)
+├── role        "admin" | "dispatcher" | "fieldunit"
+└── unit  ─────► Unit (OneToOne, nullable) — links mobile login to a unit type
+
+Unit
+├── name, type ("Police" | "Fire" | "EMS")
+└── app_user ──► User (reverse OneToOne)
+
+PushToken
+├── mock_unit_id   int   — routine unit number (e.g., 43 for "Unit 43")
+├── token          str   — Expo push token
+└── registered_at  DateTimeField(auto_now)
+```
+
 ### Regional Dashboard Data Model
 ```
 Incident
 ├── title, description, location_lat, location_lng
 ├── priority (LOW | MED | HIGH | CRITICAL)
 ├── status   (OPEN | IN_PROGRESS | CLOSED)
+├── mock_incident_id  int (nullable, unique) — links to a frontend routine incident
 ├── created_at
 └── Tasks[]
     ├── assigned_unit → Unit
+    ├── mock_unit_id  int (nullable) — routine unit number for mobile filtering
     └── status (PENDING | IN_PROGRESS | DONE)
 ```
 
@@ -127,13 +145,16 @@ MajorIncident
 The JWT token response now embeds operational identity:
 ```json
 {
-  "access":  "<token>",
-  "refresh": "<token>",
-  "user_id": 3,
-  "username": "fieldunit1",
-  "role": "fieldunit"
+  "access":   "<token>",
+  "refresh":  "<token>",
+  "user_id":  3,
+  "username": "police",
+  "role":     "fieldunit",
+  "unit_id":  1,
+  "unit_type":"Police"
 }
 ```
+`unit_type` is one of `"Police"` / `"Fire"` / `"EMS"` — used by `UnitSelectScreen` to query the correct routine units from the backend.
 
 **Role→Entity mapping is active at every authenticated request:**
 - The mobile app passes `X-User-ID` and `X-User-Role` headers derived from the decoded token.
@@ -184,13 +205,25 @@ This replaces the earlier stub pattern where role was stored only in localStorag
 
 #### Mobile / Field Unit Endpoints (JWT-authenticated)
 ```
-POST /api/token/                       — Obtain JWT (returns user_id, username, role)
+POST /api/token/                       — Obtain JWT (returns user_id, username, role, unit_id, unit_type)
 POST /api/token/refresh/               — Refresh access token
-GET  /api/tasks/                       — List tasks for authenticated field unit
+GET  /api/tasks/?mock_unit=<id>        — List tasks for a specific routine unit ID
 PATCH /api/tasks/<id>/                 — Update task status (fieldunit role only)
+POST /api/push-token/                  — Register Expo push token for a unit
+     { mock_unit_id, token }
 POST /api/field/add-event/             — Submit field report (text + optional files)
      ?fieldId=<id>
      Content-Type: multipart/form-data or application/json
+```
+
+#### Mobile Bridge Endpoints (open — called by dashboard JS and mobile app)
+```
+POST /api/mobile/register-units/       — Dashboard registers its routine unit list
+     { units: [{ id, name, type }] }   — stored in-memory for mobile unit selection
+GET  /api/mobile/units/?type=POLICE    — Returns routine units for unit selection screen
+                                         type: POLICE | FIRE | MEDICAL
+POST /api/mobile/dispatch/             — Dashboard mirrors a dispatch to DB + push
+     { incident_id, incident_title, location_lat, location_lng, priority, units }
 ```
 
 #### Regional Dashboard Endpoints
@@ -256,16 +289,17 @@ ON DISPATCH:
   dispatchUnitsToIncident({ unitIds, incidentId, … })
   → units set EN_ROUTE, OSRM route fetched
   → sessionStorage['ecm-dispatch-assignments'] updated
+  → POST /api/mobile/dispatch/ (fire-and-forget) → DB Task + push notification
 
 ON ARRIVAL (moveUnits() detects destination reached):
   → unit.status = 'ON_SCENE'
   → arrived unitIds removed from sessionStorage['ecm-dispatch-assignments']
 
 ON PAGE REFRESH (Dashboard.jsx initializeData):
-  → localStorage.removeItem('ecm-dispatch-assignments')  // one-time cleanup
+  → localStorage.removeItem('ecm-dispatch-assignments')  // one-time cleanup (legacy key)
   → read sessionStorage['ecm-dispatch-assignments']
   → if entries exist: call dispatchUnitsToIncident({ …, silent: true }) per group
-      silent = true: skips voice synthesis and event-log entries on restore
+      silent = true: skips voice synthesis, event-log entries, and backend bridge call on restore
   → set affected incidents IN_PROGRESS
 
 ON NEW SESSION (tab closed and reopened):
@@ -278,13 +312,17 @@ ON NEW SESSION (tab closed and reopened):
 ```javascript
 {
   units:        Unit[],        // active dispatch + simulation units
-  routineUnits: Unit[],        // nationwide patrol units
+  routineUnits: Unit[],        // nationwide patrol units (50, generated on load)
   majorIncident: Incident|null,
   mode:         'ROUTINE' | 'SIMULATION' | 'LIVE',
   incidents:    Incident[],
   fieldId:      string,
 }
 ```
+
+**Routine unit generation:** On store module load, `generateNationwideUnits(50)` creates 50 units with IDs `routine-1`…`routine-50`, names `"Unit 1"`…`"Unit 50"`, and types `POLICE`/`FIRE`/`MEDICAL` (random). Immediately after generation, all 50 units are POSTed to `POST /api/mobile/register-units/` so the mobile app can display the same unit list.
+
+**Dispatch bridge:** `dispatchUnitsToIncident()` fires `POST /api/mobile/dispatch/` (fire-and-forget) after updating the store, so DB Tasks and push notifications are created for the dispatched units.
 
 **moveUnits() guard:** If a unit's `assignedTo` incident ID does not exist in either `incidents` or `majorIncident`, the unit is frozen (not moved). This prevents phantom movement to non-existent targets and is the mechanism that made stale assignments visibly broken — now resolved by sessionStorage scoping.
 
@@ -326,16 +364,44 @@ Cross-tab sync: `BroadcastChannel('field-incident-sync')` propagates mode, simul
 
 ## Mobile Application Architecture
 
-### Authentication Flow
+### Authentication & Unit Selection Flow
 ```
 LoginScreen
   → POST /api/token/ { username, password }
-  → Response: { access, refresh, user_id, username, role }
+  → Response: { access, refresh, user_id, username, role, unit_id, unit_type }
   → token stored in App.js state (not persisted to disk)
-  → user context: { id, username, role } set via UserContext
+  → user context: { id, username, role, unit_type } set via UserContext
   → All subsequent requests: Authorization: Bearer <token>
                              X-User-ID: <id>
                              X-User-Role: <role>
+
+UnitSelectScreen  (shown after login, before main navigation)
+  → GET /api/mobile/units/?type=POLICE  (using unit_type from JWT)
+  → Shows same units as the War-Room Dashboard ("Unit 43", "Unit 7", etc.)
+  → User selects their specific unit
+  → registerPushToken(unit.id) → POST /api/push-token/ { mock_unit_id, token }
+  → onSelectUnit(unit) → selectedUnit = { id: 43, name: "Unit 43", type: "POLICE" }
+
+NavigationContainer (Tasks → Report → Sync → Map)
+  → All task fetches use: GET /api/tasks/?mock_unit=43
+  → Header shows selected unit name ("Unit 43")
+  → Menu allows: Incident Map, Sync, Change Unit, Disconnect
+```
+
+### Push Notification Flow
+```
+Registration (on unit select):
+  Notifications.requestPermissionsAsync()
+  Notifications.getExpoPushTokenAsync()
+  POST /api/push-token/ { mock_unit_id: 43, token: "ExponentPushToken[...]" }
+  → stored in PushToken table, keyed by mock_unit_id
+
+Dispatch trigger (from dashboard):
+  POST /api/mobile/dispatch/ receives unit { mock_unit_num: 43, type: "POLICE" }
+  → PushToken.objects.filter(mock_unit_id=43)
+  → POST to exp.host/--/api/v2/push/send (Expo Push API)
+  → Device receives alert: "New Dispatch — [incident title] — respond immediately"
+  → Tapping notification navigates to Tasks screen
 ```
 
 ### Polymorphic Report Submission
@@ -449,6 +515,8 @@ X-User-Role:  <role>
 | `0002_majorincident_incidentevent_sector_taskgroup` | MajorIncident, Sector, TaskGroup, IncidentEvent |
 | `0003_remove_incident_severity_incident_priority` | Replaced severity with priority on Incident |
 | `0004_reportmedia` | ReportMedia model (file, media_type, FK → IncidentEvent) |
+| `0005_user_unit_link_incident_mockid` | User.unit FK → Unit (OneToOne); Incident.mock_incident_id |
+| `0006_task_mock_unit_pushtoken` | Task.mock_unit_id; PushToken model |
 
 ---
 
@@ -480,8 +548,25 @@ X-User-Role:  <role>
 
 ---
 
-**Last Updated:** 2026-06-01
-**Architecture Version:** 3.0
+**Last Updated:** 2026-06-07
+**Architecture Version:** 3.1
+
+**Changelog v3.1:**
+- Mobile app: post-login `UnitSelectScreen` — user selects specific routine unit (e.g. "Unit 43")
+- Mobile app: `IncidentMapScreen` — Leaflet-style pin map of assigned incidents
+- Mobile app: menu (⋮) with Incident Map, Sync, Change Unit, Disconnect
+- Mobile app: background polling reduced to 8 s; flicker eliminated (no `setLoading(true)` on background polls)
+- Mobile app: Expo push notifications via `expo-notifications ~0.29.0`
+- Mobile app: `react-native-maps 1.20.1` for incident map
+- Backend: `User.unit` OneToOne FK to `Unit`; `unit_type` added to JWT response
+- Backend: `Incident.mock_incident_id`, `Task.mock_unit_id`, `PushToken` model (migrations 0005, 0006)
+- Backend: `POST /api/mobile/register-units/` — stores routine unit list in memory
+- Backend: `GET /api/mobile/units/` — serves routine units to mobile app for unit selection
+- Backend: `POST /api/mobile/dispatch/` — mirrors dashboard dispatch to DB Tasks + Expo push
+- Backend: `POST /api/push-token/` — registers device push token keyed by mock_unit_id
+- Frontend (`fieldIncident.js`): registers all 50 routine units on load; bridges dispatch to backend
+- 3 new sample accounts: `police/police123`, `ambulance/ambulance123`, `fire/fire123`
+
 **Changelog v3.0:**
 - `ecm-dispatch-assignments` migrated from `localStorage` → `sessionStorage` (session isolation for mock data)
 - `ReportMedia` model added with `IncidentEvent` FK for multi-file polymorphic reports

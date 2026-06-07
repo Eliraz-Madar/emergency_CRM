@@ -17,20 +17,24 @@ function getStatusCfg(status) {
   return STATUS_CONFIG[status] || STATUS_CONFIG.PENDING;
 }
 
-export default function TasksScreen({ token, onSelectTask }) {
+export default function TasksScreen({ token, selectedUnit, onSelectTask }) {
   const [tasks, setTasks] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const { user } = useUser();
 
-  const fetchTasks = async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
+  const fetchTasks = async (isPull = false) => {
+    if (isPull) setRefreshing(true);
+    // No setLoading(true) here — loading starts true from useState and is cleared
+    // after the first fetch. Background interval calls stay silent.
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${API_BASE_URL}/api/tasks/`, {
+      const url = selectedUnit?.id
+        ? `${API_BASE_URL}/api/tasks/?mock_unit=${selectedUnit.id}`
+        : `${API_BASE_URL}/api/tasks/`;
+      const res = await fetch(url, {
         headers: getAuthHeaders(token, user),
         signal: controller.signal,
       });
@@ -50,9 +54,9 @@ export default function TasksScreen({ token, onSelectTask }) {
   useEffect(() => {
     if (!token) return;
     fetchTasks();
-    const interval = setInterval(() => fetchTasks(), 30000);
+    const interval = setInterval(() => fetchTasks(), 8000); // 8s silent background poll
     return () => clearInterval(interval);
-  }, [token]);
+  }, [token, selectedUnit?.id]);
 
   if (loading) {
     return (
@@ -69,7 +73,7 @@ export default function TasksScreen({ token, onSelectTask }) {
         data={tasks}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={styles.list}
-        onRefresh={() => fetchTasks(true)}
+        onRefresh={() => fetchTasks(true /* isPull */)}
         refreshing={refreshing}
         ListHeaderComponent={
           <View style={styles.listHeader}>

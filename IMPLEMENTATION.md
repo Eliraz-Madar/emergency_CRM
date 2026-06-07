@@ -49,7 +49,8 @@ Field incident state lives in `src/store/fieldIncident.js` and adds:
 - **Field context**: `fieldId` for access scoping (also mirrored to `localStorage['fieldId']`)
 - **Unit routing**: road routes, on-scene behavior, station parking
 - **Cross-tab sync**: BroadcastChannel updates to keep Field/Regional views aligned
-- **Dispatch persistence**: writes assignments to `localStorage['ecm-dispatch-assignments']` on dispatch; removes them when units arrive on scene
+- **Dispatch persistence**: writes assignments to `sessionStorage['ecm-dispatch-assignments']` on dispatch; removes them when units arrive on scene
+- **Mobile bridge**: on module load, registers all 50 routine units with the backend (`POST /api/mobile/register-units/`); on dispatch, also calls `POST /api/mobile/dispatch/` so the mobile app sees the task
 
 ### Real-Time Connection
 Located in `src/services/realtime.js`:
@@ -260,24 +261,54 @@ GET   /mock/simulate/           → Trigger one random update (for testing)
 1. User selects units in IncidentDetailsPanel → clicks "Dispatch"
 2. dispatchUnitsToIncident() called in fieldIncident.js store
 3. Units set to EN_ROUTE; OSRM road routes fetched
-4. Assignment written to localStorage['ecm-dispatch-assignments']
+4. Assignment written to sessionStorage['ecm-dispatch-assignments']
 5. Map auto-zooms (flyToBounds) to incident + dispatched units
 6. Incident marker pulses with amber ring for 4 seconds
 7. IncidentDetailsPanel stays open (no auto-close)
 8. As units travel, moveUnits() advances positions along route
-9. On arrival: unit status → ON_SCENE; assignment removed from localStorage
+9. On arrival: unit status → ON_SCENE; assignment removed from sessionStorage
+10. (Parallel) POST /api/mobile/dispatch/ → backend creates DB Task per unit
+    → Push notifications sent to registered mobile devices for those unit IDs
 ```
 
 ### Dispatch Restore on Page Refresh
 ```
 1. Dashboard mounts → initializeData() fetches incidents + units from API
-2. After data loads, reads localStorage['ecm-dispatch-assignments']
+2. After data loads, reads sessionStorage['ecm-dispatch-assignments']
 3. Groups saved assignments by incidentId
 4. Calls dispatchUnitsToIncident({ ..., silent: true }) for each group
    - silent: true → suppresses voice synthesis and event-log entries
    - Units re-enter EN_ROUTE state with fresh routes from current positions
 5. Affected incidents set to IN_PROGRESS status
 6. Single "Restored N assignments" info event added to event log
+```
+
+### Mobile App Dispatch Sync
+```
+On dashboard load:
+  fieldIncident.js module initialises → POST /api/mobile/register-units/
+    → sends all 50 routine units (id, name, type) to the backend
+    → backend stores them in _routine_units_registry (in-memory)
+
+Mobile login flow:
+  LoginScreen → POST /api/token/ → receives { access, unit_type }
+  UnitSelectScreen → GET /api/mobile/units/?type=POLICE
+    → shows the same "Unit 43", "Unit 7" etc. seen in the dashboard
+  User selects unit → registerPushToken(unit.id) → POST /api/push-token/
+    → backend stores Expo push token keyed by mock_unit_id
+
+On dispatch:
+  dispatchUnitsToIncident() → POST /api/mobile/dispatch/
+    { incident_id, incident_title, location_lat, location_lng, units: [...] }
+  backend:
+    → update_or_create Incident (mock_incident_id = parsed incident key)
+    → get_or_create Task (mock_unit_id = unit numeric ID)
+    → send Expo push notification to registered tokens for that mock_unit_id
+
+Mobile app (polling every 8 s):
+  GET /api/tasks/?mock_unit=43
+    → lists all tasks where mock_unit_id = 43
+    → new task appears within one polling interval
 ```
 
 ## Key Design Decisions
@@ -411,20 +442,21 @@ if not user.can_modify_incident(incident):
 
 ⚠️ **This is a DEMO/MVP - NOT PRODUCTION READY**
 
-Issues to address for production:
-- ❌ No authentication (anyone can access)
-- ❌ No authorization (anyone can modify any incident)
-- ❌ Field access uses localStorage role stub (demo only)
+Status of security items:
+- ✅ JWT authentication implemented (simplejwt — access 8h / refresh 7d)
+- ✅ Role-based access control: `fieldunit` / `dispatcher` / `admin` enforced server-side
+- ✅ `TaskPermission` — fieldunit can only PATCH their own task status
 - ❌ No rate limiting (vulnerable to DOS)
 - ❌ No HTTPS/TLS
-- ❌ CORS allows all origins
-- ❌ No input validation
+- ❌ CORS allows all origins (development only)
+- ❌ No input validation on all endpoints
 - ❌ No audit logging
 - ❌ No data encryption
+- ❌ Mobile bridge endpoints (`/api/mobile/*`) are open (no auth required)
 
 ### Security Hardening Checklist
-- [ ] Implement JWT authentication
-- [ ] Add role-based access control (RBAC)
+- [x] Implement JWT authentication
+- [x] Add role-based access control (RBAC)
 - [ ] Validate all inputs (request body, query params)
 - [ ] Enable HTTPS with valid certificate
 - [ ] Restrict CORS to known domains
@@ -438,13 +470,13 @@ Issues to address for production:
 
 ### Phase 2 (Post-MVP)
 - [ ] Real database integration
-- [ ] User authentication & roles
+- [x] User authentication & roles (JWT + simplejwt)
 - [ ] Map clustering for 100+ incidents
-- [ ] Notification system (push, SMS, email)
+- [x] Push notifications (Expo push API)
 - [ ] Incident templates & quick create
 - [ ] Advanced analytics & reporting
-- [ ] Offline mode with sync
-- [ ] Mobile app integration
+- [x] Offline mode with sync (SQLite + SyncScreen)
+- [x] Mobile app integration (dispatch → mobile task sync)
 
 ### Phase 3 (Long-term)
 - [ ] AI-powered incident routing
@@ -458,4 +490,4 @@ Issues to address for production:
 
 ---
 
-**Dashboard Version:** 1.1 MVP | **Build Date:** 2026 | **Status:** Production Ready (for Demo)
+**Dashboard Version:** 1.2 | **Build Date:** 2026-06-07 | **Status:** Production Ready (for Demo)

@@ -278,7 +278,7 @@ class FieldIncidentDataService:
 
     def _generate_initial_events(self, incident_type):
         """Generate initial timeline events for the incident."""
-        now = datetime.now()
+        now = datetime.utcnow()
         events = [
             {
                 "event_type": "STATUS_CHANGE",
@@ -286,7 +286,7 @@ class FieldIncidentDataService:
                 "title": "Incident Declared",
                 "description": f"{incident_type.replace('_', ' ')} declared as major incident",
                 "created_by": "Command Center",
-                "created_at": now - timedelta(minutes=120),
+                "created_at": (now - timedelta(minutes=120)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             {
                 "event_type": "HAZARD_ALERT",
@@ -294,7 +294,7 @@ class FieldIncidentDataService:
                 "title": "Secondary Hazards Identified",
                 "description": "Structural damage and utility hazards confirmed across multiple sectors",
                 "created_by": "Damage Assessment Team",
-                "created_at": now - timedelta(minutes=90),
+                "created_at": (now - timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             {
                 "event_type": "RESOURCE_ARRIVAL",
@@ -302,7 +302,7 @@ class FieldIncidentDataService:
                 "title": "Rescue Teams Deployed",
                 "description": "First wave of search and rescue units arrived on scene",
                 "created_by": "Operations",
-                "created_at": now - timedelta(minutes=60),
+                "created_at": (now - timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             {
                 "event_type": "CASUALTY_UPDATE",
@@ -310,7 +310,7 @@ class FieldIncidentDataService:
                 "title": "Casualty Estimates Revised",
                 "description": "Initial assessment: 250+ casualties, 30+ confirmed deaths",
                 "created_by": "Medical Command",
-                "created_at": now - timedelta(minutes=45),
+                "created_at": (now - timedelta(minutes=45)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             {
                 "event_type": "EVACUATION",
@@ -318,7 +318,7 @@ class FieldIncidentDataService:
                 "title": "Evacuation Zones Established",
                 "description": "1000+ persons evacuated from unsafe areas",
                 "created_by": "Evacuation Coordinator",
-                "created_at": now - timedelta(minutes=30),
+                "created_at": (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
         ]
         return events
@@ -427,7 +427,7 @@ class FieldIncidentDataService:
                 ["Command Center", "Field Operations",
                     "Medical Team", "Safety Officer"]
             ),
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
 
