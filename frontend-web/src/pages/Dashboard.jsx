@@ -63,6 +63,7 @@ export default function Dashboard() {
     tickRoutinePatrol,
     setLiveIncident,
     setMode: setFieldMode,
+    cancelUnitDispatch,
   } = useFieldIncidentStore();
 
   const [isLoading, setIsLoading] = useState(true);
@@ -862,6 +863,74 @@ export default function Dashboard() {
                         <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned forces</div>
                       )}
                     </div>
+
+                    {(() => {
+                      const activeDispatches = (simulationUnits || []).filter(
+                        (u) => u.status === 'EN_ROUTE' || u.status === 'ON_SCENE'
+                      );
+                      return (
+                        <div style={{ marginTop: '10px' }}>
+                          <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>
+                            Active Dispatches
+                            {activeDispatches.length > 0 && (
+                              <span style={{
+                                marginLeft: '6px',
+                                background: '#1e3a5f',
+                                color: '#93c5fd',
+                                borderRadius: '999px',
+                                padding: '1px 7px',
+                                fontSize: '0.7rem',
+                                fontWeight: 'bold',
+                              }}>{activeDispatches.length}</span>
+                            )}
+                          </div>
+                          {activeDispatches.length ? (
+                            <div style={{ maxHeight: '140px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              {activeDispatches.map((unit) => {
+                                const isOnScene = unit.status === 'ON_SCENE';
+                                return (
+                                  <div key={unit.id} style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    background: '#0f172a',
+                                    border: '1px solid #1f2937',
+                                    borderRadius: '6px',
+                                    padding: '5px 8px',
+                                  }}>
+                                    <div>
+                                      <div style={{ fontSize: '0.8rem', color: '#e2e8f0', fontWeight: '600' }}>
+                                        {unit.name || `Unit ${unit.id}`}
+                                      </div>
+                                      <div style={{ fontSize: '0.7rem', color: isOnScene ? '#10b981' : '#f59e0b' }}>
+                                        {isOnScene ? 'On Scene' : 'En Route'}
+                                      </div>
+                                    </div>
+                                    <button
+                                      title="Cancel dispatch"
+                                      onClick={() => cancelUnitDispatch(unit.id, unit.assignedTo)}
+                                      style={{
+                                        background: 'transparent',
+                                        border: '1px solid #ef4444',
+                                        color: '#ef4444',
+                                        borderRadius: '4px',
+                                        padding: '2px 7px',
+                                        fontSize: '0.7rem',
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No active dispatches</div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
                       <button

@@ -3,6 +3,7 @@ from django.urls import path, include
 
 from .views import (
     IncidentViewSet, TaskViewSet, UnitViewSet,
+     unit_heartbeat,
     mock_incidents, mock_units, mock_events, mock_incident_detail,
     mock_incident_status, mock_incident_priority, mock_incident_assign,
      mock_incident_note, mock_simulate_update, mock_updates_stream,
@@ -13,7 +14,7 @@ from .views import (
     field_incident_casualty_update, field_incident_add_event, field_incident_simulate,
     field_incident_updates_stream,
     register_push_token,
-    mobile_register_units, mobile_units, mobile_dispatch,
+    mobile_register_units, mobile_units, mobile_dispatch, mobile_cancel_dispatch,
 )
 
 router = DefaultRouter()
@@ -24,9 +25,11 @@ router.register(r"units", UnitViewSet)
 urlpatterns = [
     path("", include(router.urls)),
     path("push-token/", register_push_token, name="register_push_token"),
+     path("units/heartbeat/", unit_heartbeat, name="unit_heartbeat"),
     path("mobile/register-units/", mobile_register_units, name="mobile_register_units"),
     path("mobile/units/", mobile_units, name="mobile_units"),
     path("mobile/dispatch/", mobile_dispatch, name="mobile_dispatch"),
+    path("mobile/cancel-dispatch/", mobile_cancel_dispatch, name="mobile_cancel_dispatch"),
     # Mock data API endpoints for regional dashboard demo
     path("mock/incidents/", mock_incidents, name="mock_incidents"),
     path("mock/units/", mock_units, name="mock_units"),

@@ -42,6 +42,7 @@ export function IncidentDetailsPanel() {
     incidents: fieldIncidents,
     units,
     dispatchUnitsToIncident,
+    cancelUnitDispatch,
     updateIncidentPriority,
     mode: fieldMode,
     majorIncident,
@@ -325,17 +326,35 @@ export function IncidentDetailsPanel() {
                         {unit.name}
                       </span>
                     </div>
-                    <span style={{
-                      background: statusBg,
-                      color: statusColor,
-                      border: `1px solid ${statusColor}`,
-                      borderRadius: '999px',
-                      padding: '2px 10px',
-                      fontSize: '0.75rem',
-                      fontWeight: 'bold',
-                    }}>
-                      {statusLabel}
-                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        background: statusBg,
+                        color: statusColor,
+                        border: `1px solid ${statusColor}`,
+                        borderRadius: '999px',
+                        padding: '2px 10px',
+                        fontSize: '0.75rem',
+                        fontWeight: 'bold',
+                      }}>
+                        {statusLabel}
+                      </span>
+                      <button
+                        title="Cancel dispatch"
+                        onClick={(e) => { e.stopPropagation(); cancelUnitDispatch(unit.id, incident.id); }}
+                        style={{
+                          background: 'transparent',
+                          border: '1px solid #ef4444',
+                          color: '#ef4444',
+                          borderRadius: '4px',
+                          padding: '1px 7px',
+                          fontSize: '0.7rem',
+                          cursor: 'pointer',
+                          lineHeight: '1.4',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 );
               })}

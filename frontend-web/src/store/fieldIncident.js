@@ -744,6 +744,71 @@ export const useFieldIncidentStore = create((set, get) => ({
     }
   },
 
+  cancelUnitDispatch: (unitId, incidentId) => {
+    const unitBefore = (get().units || []).find((u) => u.id === unitId);
+
+    set((state) => {
+      const releaseUnit = (u) => {
+        if (u.id !== unitId) return u;
+        return {
+          ...u,
+          status: 'PATROL',
+          assignedTo: null,
+          assignedTarget: null,
+          route: null,
+          routeIndex: 0,
+          routePending: false,
+          routeRetryAt: 0,
+          onSceneAt: null,
+          autoReleaseAt: null,
+          stopUntil: null,
+        };
+      };
+
+      const updatedUnits = (state.units || []).map(releaseUnit);
+      const updatedRoutineUnits = (state.routineUnits || []).map(releaseUnit);
+
+      const updatedIncidents = (state.incidents || []).map((incident) => {
+        if (String(incident.id) !== String(incidentId)) return incident;
+        return {
+          ...incident,
+          assignedUnits: (incident.assignedUnits || []).filter((u) => u.id !== unitId),
+        };
+      });
+
+      return { units: updatedUnits, routineUnits: updatedRoutineUnits, incidents: updatedIncidents };
+    });
+
+    try {
+      const existing = JSON.parse(sessionStorage.getItem('ecm-dispatch-assignments') || '[]');
+      sessionStorage.setItem('ecm-dispatch-assignments', JSON.stringify(existing.filter((a) => a.unitId !== unitId)));
+    } catch (_) {}
+
+    try {
+      const { addEvent } = useDashboardStore.getState();
+      const unitLabel = unitBefore?.name || String(unitId);
+      addEvent({
+        id: `cancel-${unitId}-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        entity_type: 'incident',
+        entity_id: incidentId,
+        message: `⛔ ${unitLabel} dispatch cancelled — returning to patrol`,
+        level: 'info',
+      });
+    } catch (_) {}
+
+    try {
+      const mockUnitNum = parseInt(String(unitId).replace('routine-', ''), 10);
+      if (Number.isFinite(mockUnitNum)) {
+        fetch(`${_BACKEND_BASE}/mobile/cancel-dispatch/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mock_unit_id: mockUnitNum, incident_id: incidentId }),
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  },
+
   tickRoutinePatrol: () => {
     const state = get();
     if (state.mode !== 'ROUTINE') {

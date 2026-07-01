@@ -60,6 +60,10 @@ class Unit(models.Model):
     location_lat = models.FloatField()
     location_lng = models.FloatField()
     availability_status = models.CharField(max_length=50, default="AVAILABLE")
+    # Last time this unit sent a heartbeat
+    last_seen = models.DateTimeField(null=True, blank=True)
+    # Convenience flag for quick filtering of online/offline units
+    is_online = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.name} ({self.type})"
@@ -70,6 +74,7 @@ class Task(models.Model):
         PENDING = "PENDING", "Pending"
         IN_PROGRESS = "IN_PROGRESS", "In Progress"
         DONE = "DONE", "Done"
+        CANCELLED = "CANCELLED", "Cancelled"
 
     incident = models.ForeignKey(
         Incident, related_name="tasks", on_delete=models.CASCADE)

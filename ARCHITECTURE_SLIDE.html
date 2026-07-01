@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Emergency Response System — Architecture v3.0</title>
+<style>
+  /* ── Reset & Base ───────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0b1120;
+    --surface:   #111827;
+    --surface2:  #1a2438;
+    --border:    rgba(99,179,237,0.18);
+    --cyan:      #22d3ee;
+    --cyan-dim:  rgba(34,211,238,0.12);
+    --blue:      #3b82f6;
+    --blue-dim:  rgba(59,130,246,0.12);
+    --green:     #10b981;
+    --green-dim: rgba(16,185,129,0.12);
+    --amber:     #f59e0b;
+    --amber-dim: rgba(245,158,11,0.12);
+    --red:       #ef4444;
+    --red-dim:   rgba(239,68,68,0.12);
+    --purple:    #a855f7;
+    --purple-dim:rgba(168,85,247,0.12);
+    --text:      #f1f5f9;
+    --text2:     #94a3b8;
+    --text3:     #64748b;
+    --mono:      'Courier New', monospace;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+
+  /* ── Slide wrapper ──────────────────────────────────────────── */
+  .slide {
+    min-height: 100vh;
+    padding: 32px 40px 48px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    max-width: 1440px;
+    margin: 0 auto;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 20px;
+  }
+  .header-left { display: flex; flex-direction: column; gap: 4px; }
+  .header-eyebrow {
+    font-size: 11px; font-weight: 700; letter-spacing: 2.5px;
+    color: var(--cyan); text-transform: uppercase;
+  }
+  .header-title {
+    font-size: 28px; font-weight: 800; color: var(--text);
+    letter-spacing: -0.5px;
+  }
+  .header-title span { color: var(--cyan); }
+  .version-badge {
+    background: var(--cyan-dim); border: 1px solid var(--cyan);
+    color: var(--cyan); font-size: 12px; font-weight: 700;
+    padding: 6px 14px; border-radius: 20px; letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+
+  /* ── Two-column main layout ─────────────────────────────────── */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 24px;
+    flex: 1;
+  }
+
+  /* ── Section labels ─────────────────────────────────────────── */
+  .section-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 2px;
+    text-transform: uppercase; color: var(--text3); margin-bottom: 12px;
+  }
+
+  /* ── Architecture layers ─────────────────────────────────────── */
+  .arch-column {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .layer {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    overflow: hidden;
+    position: relative;
+  }
+  .layer-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .layer-icon { font-size: 18px; flex-shrink: 0; }
+  .layer-name { font-size: 13px; font-weight: 700; color: var(--text); }
+  .layer-tech { font-size: 11px; color: var(--text3); margin-left: auto; font-family: var(--mono); }
+
+  .layer-body {
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .component-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .chip {
+    font-size: 11px; font-weight: 600; padding: 4px 10px;
+    border-radius: 6px; white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .chip-cyan   { background: var(--cyan-dim);   border-color: rgba(34,211,238,0.3);  color: var(--cyan);   }
+  .chip-blue   { background: var(--blue-dim);   border-color: rgba(59,130,246,0.3);  color: var(--blue);   }
+  .chip-green  { background: var(--green-dim);  border-color: rgba(16,185,129,0.3);  color: var(--green);  }
+  .chip-amber  { background: var(--amber-dim);  border-color: rgba(245,158,11,0.3);  color: var(--amber);  }
+  .chip-red    { background: var(--red-dim);    border-color: rgba(239,68,68,0.3);   color: var(--red);    }
+  .chip-purple { background: var(--purple-dim); border-color: rgba(168,85,247,0.3);  color: var(--purple); }
+
+  /* Layer accent bars */
+  .layer-mobile  { border-left: 3px solid var(--cyan);   }
+  .layer-web     { border-left: 3px solid var(--blue);   }
+  .layer-api     { border-left: 3px solid var(--amber);  }
+  .layer-data    { border-left: 3px solid var(--green);  }
+
+  /* ── Arrow connectors ───────────────────────────────────────── */
+  .connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+  .connector-line {
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+  }
+  .connector-label {
+    font-size: 10px; font-weight: 600; letter-spacing: 1px;
+    color: var(--text3); white-space: nowrap; font-family: var(--mono);
+    background: var(--bg); padding: 0 6px;
+  }
+  .connector-arrow {
+    font-size: 14px; color: var(--text3);
+    animation: pulse-arrow 2s ease-in-out infinite;
+  }
+  @keyframes pulse-arrow {
+    0%, 100% { opacity: 0.4; transform: translateY(0); }
+    50%       { opacity: 1;   transform: translateY(2px); }
+  }
+
+  /* ── Right panel ─────────────────────────────────────────────── */
+  .right-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* ── Feature cards ──────────────────────────────────────────── */
+  .feature-card {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .feature-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .feature-icon-wrap {
+    width: 38px; height: 38px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex-shrink: 0;
+  }
+  .feature-card-header-text { flex: 1; }
+  .feature-number {
+    font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+    color: var(--text3); text-transform: uppercase;
+  }
+  .feature-title {
+    font-size: 14px; font-weight: 700; color: var(--text); margin-top: 2px;
+  }
+  .feature-card-body {
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .feature-point {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text2);
+    line-height: 1.5;
+  }
+  .feature-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    flex-shrink: 0; margin-top: 6px;
+  }
+  .code-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--text2);
+    white-space: nowrap;
+  }
+
+  /* ── Data flow note ─────────────────────────────────────────── */
+  .flow-note {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface2);
+    padding: 10px 14px;
+    font-size: 11px;
+    color: var(--text2);
+    font-family: var(--mono);
+    line-height: 1.7;
+  }
+  .flow-note-title {
+    font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--cyan); margin-bottom: 6px;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  .flow-step { display: flex; gap: 8px; }
+  .flow-step-num {
+    color: var(--cyan); font-weight: 700; flex-shrink: 0; width: 16px;
+  }
+
+  /* ── Bottom bar ─────────────────────────────────────────────── */
+  .bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .stack-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .stack-pill {
+    font-size: 11px; font-weight: 600; padding: 4px 10px;
+    border-radius: 6px; background: var(--surface2);
+    border: 1px solid var(--border); color: var(--text2);
+  }
+  .bottom-meta { font-size: 11px; color: var(--text3); font-family: var(--mono); }
+
+  /* ── Media model detail ─────────────────────────────────────── */
+  .model-block {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+    line-height: 1.9;
+  }
+  .model-key   { color: var(--cyan);   }
+  .model-type  { color: var(--amber);  }
+  .model-new   { color: var(--green);  font-weight: 700; }
+
+  /* ── Responsive ─────────────────────────────────────────────── */
+  @media (max-width: 1024px) {
+    .main-grid { grid-template-columns: 1fr; }
+    .right-panel { flex-direction: row; flex-wrap: wrap; }
+    .feature-card { flex: 1; min-width: 280px; }
+  }
+  @media (max-width: 640px) {
+    .slide { padding: 20px 16px 32px; }
+    .header-title { font-size: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="slide">
+
+  <!-- ── HEADER ──────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-left">
+      <span class="header-eyebrow">Emergency Response Command System</span>
+      <h1 class="header-title">System <span>Architecture</span> Overview</h1>
+    </div>
+    <div class="version-badge">v3.0 &nbsp;·&nbsp; 2026-06-01</div>
+  </header>
+
+  <!-- ── MAIN GRID ────────────────────────────────────────────── -->
+  <div class="main-grid">
+
+    <!-- LEFT: Architecture Layers -->
+    <div class="arch-column">
+      <p class="section-label">System Layers &amp; Data Flow</p>
+
+      <!-- MOBILE LAYER -->
+      <div class="layer layer-mobile">
+        <div class="layer-header">
+          <span class="layer-icon">📱</span>
+          <span class="layer-name">Field Mobile Application</span>
+          <span class="layer-tech">React Native 0.81 · Expo 54</span>
+        </div>
+        <div class="layer-body">
+          <div class="component-row">
+            <span class="chip chip-cyan">🔐 Login (JWT)</span>
+            <span class="chip chip-cyan">📋 Task List</span>
+            <span class="chip chip-cyan">📝 Report: Text</span>
+            <span class="chip chip-cyan">📷 Report: Image</span>
+            <span class="chip chip-cyan">🎥 Report: Video</span>
+            <span class="chip chip-cyan">🔄 Sync</span>
+          </div>
+          <div class="component-row">
+            <span class="chip chip-blue">expo-image-picker v17</span>
+            <span class="chip chip-blue">react-native-paper</span>
+            <span class="chip chip-blue">SQLite offline DB</span>
+            <span class="chip chip-blue">NetInfo connectivity</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONNECTOR -->
+      <div class="connector">
+        <div class="connector-line"></div>
+        <span class="connector-label">JWT Bearer · multipart/form-data · JSON · HTTPS</span>
+        <span class="connector-arrow">↕</span>
+        <div class="connector-line"></div>
+      </div>
+
+      <!-- WEB FRONTEND LAYER -->
+      <div class="layer layer-web">
+        <div class="layer-header">
+          <span class="layer-icon">🖥</span>
+          <span class="layer-name">Web Frontend</span>
+          <span class="layer-tech">React 18 · Vite · Zustand · Leaflet</span>
+        </div>
+        <div class="layer-body">
+          <div class="component-row">
+            <span class="chip chip-blue">War-Room Dashboard /regional</span>
+            <span class="chip chip-blue">Field Command /field-incident</span>
+          </div>
+          <div class="component-row">
+            <span class="chip chip-purple">SSE real-time stream</span>
+            <span class="chip chip-purple">BroadcastChannel cross-tab sync</span>
+            <span class="chip chip-purple">Leaflet + OSRM routing</span>
+            <span class="chip chip-purple">sessionStorage dispatch state</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONNECTOR -->
+      <div class="connector">
+        <div class="connector-line"></div>
+        <span class="connector-label">DRF · MultiPartParser · JSONParser · SSE stream</span>
+        <span class="connector-arrow">↕</span>
+        <div class="connector-line"></div>
+      </div>
+
+      <!-- API LAYER -->
+      <div class="layer layer-api">
+        <div class="layer-header">
+          <span class="layer-icon">⚙️</span>
+          <span class="layer-name">Django REST API</span>
+          <span class="layer-tech">Python 3.9 · Django 5.0 · DRF · simplejwt</span>
+        </div>
+        <div class="layer-body">
+          <div class="component-row">
+            <span class="chip chip-amber">POST /api/token/ → JWT + role</span>
+            <span class="chip chip-amber">PATCH /api/tasks/&lt;id&gt;/</span>
+            <span class="chip chip-amber">POST /api/field/add-event/ ← multipart</span>
+            <span class="chip chip-amber">GET /api/field/updates/stream/ ← SSE</span>
+          </div>
+          <div class="component-row">
+            <span class="chip chip-red">TaskPermission: fieldunit only</span>
+            <span class="chip chip-red">ReadOnlyOrAdminDispatcher</span>
+            <span class="chip chip-red">X-User-ID · X-User-Role headers</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONNECTOR -->
+      <div class="connector">
+        <div class="connector-line"></div>
+        <span class="connector-label">ORM · FileField · MEDIA_ROOT</span>
+        <span class="connector-arrow">↕</span>
+        <div class="connector-line"></div>
+      </div>
+
+      <!-- DATA LAYER -->
+      <div class="layer layer-data">
+        <div class="layer-header">
+          <span class="layer-icon">🗄</span>
+          <span class="layer-name">Data Layer</span>
+          <span class="layer-tech">SQLite · MEDIA_ROOT filesystem</span>
+        </div>
+        <div class="layer-body">
+          <div class="component-row">
+            <span class="chip chip-green">IncidentEvent (text reports)</span>
+            <span class="chip chip-green">ReportMedia ← image / video files</span>
+            <span class="chip chip-green">MajorIncident / Sector / TaskGroup</span>
+            <span class="chip chip-green">/media/report_media/YYYY/MM/DD/</span>
+          </div>
+
+          <!-- Model diagram -->
+          <div class="model-block">
+<span class="model-key">IncidentEvent</span>
+  <span class="model-key">├── description</span>   <span class="model-type">TextField</span>        <span style="color:var(--text3)">← text report (optional)</span>
+  <span class="model-key">└── media</span>          <span class="model-new">→ ReportMedia[]</span>  <span style="color:var(--text3)">← NEW v3.0</span>
+
+<span class="model-new">ReportMedia</span>  <span style="color:var(--text3)">← NEW model (migration 0004)</span>
+  <span class="model-key">├── event</span>          <span class="model-type">FK → IncidentEvent</span>
+  <span class="model-key">├── file</span>           <span class="model-type">FileField(upload_to=...)</span>
+  <span class="model-key">├── media_type</span>     <span class="model-type">"image" | "video"</span>
+  <span class="model-key">└── uploaded_at</span>    <span class="model-type">DateTimeField</span>
+          </div>
+        </div>
+      </div>
+    </div><!-- /arch-column -->
+
+    <!-- RIGHT: Feature Highlights -->
+    <div class="right-panel">
+      <p class="section-label">Key System Behaviors — v3.0</p>
+
+      <!-- Feature 1: Autonomous Sync -->
+      <div class="feature-card">
+        <div class="feature-card-header">
+          <div class="feature-icon-wrap" style="background:var(--cyan-dim);">🔄</div>
+          <div class="feature-card-header-text">
+            <div class="feature-number">01 &nbsp;·&nbsp; Data Synchronization</div>
+            <div class="feature-title">Autonomous Session-Scoped Sync</div>
+          </div>
+        </div>
+        <div class="feature-card-body">
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--cyan)"></div>
+            Sync is <strong style="color:var(--text)">strictly conditional</strong> — dispatch assignments only restore when a valid matching incident exists in the current session.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--cyan)"></div>
+            Migrated from <span class="code-pill">localStorage</span> → <span class="code-pill">sessionStorage</span>. Assignments are wiped automatically when the browser tab closes — no ghost routes across sessions.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--cyan)"></div>
+            Mobile app uses <span class="code-pill">NetInfo</span> for connectivity detection. Offline reports queue to SQLite; auto-sync fires when connection restores.
+          </div>
+          <div class="flow-note">
+            <div class="flow-note-title">Sync Flow</div>
+            <div class="flow-step"><span class="flow-step-num">1.</span> Tab opens → sessionStorage read → restore if incidents exist</div>
+            <div class="flow-step"><span class="flow-step-num">2.</span> Unit arrives → remove from sessionStorage</div>
+            <div class="flow-step"><span class="flow-step-num">3.</span> Tab closes → sessionStorage cleared by browser</div>
+            <div class="flow-step"><span class="flow-step-num">4.</span> New tab → clean state, no stale routes</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Feature 2: Polymorphic Reports -->
+      <div class="feature-card">
+        <div class="feature-card-header">
+          <div class="feature-icon-wrap" style="background:var(--blue-dim);">📎</div>
+          <div class="feature-card-header-text">
+            <div class="feature-number">02 &nbsp;·&nbsp; Field Reporting</div>
+            <div class="feature-title">Polymorphic Media Attachments</div>
+          </div>
+        </div>
+        <div class="feature-card-body">
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--blue)"></div>
+            Reports natively support <strong style="color:var(--text)">Text, Images, and Videos</strong> independently or combined. No attachment is mandatory.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--blue)"></div>
+            Mobile uses <span class="code-pill">expo-image-picker v17</span> with Camera, Library, and Video pickers. Up to 5 files per report.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--blue)"></div>
+            API endpoint upgraded to <span class="code-pill">MultiPartParser + FormParser + JSONParser</span> — single endpoint handles both text-only JSON and file uploads.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--blue)"></div>
+            Response includes absolute <span class="code-pill">file_url</span> per attachment, built via <span class="code-pill">request.build_absolute_uri()</span>.
+          </div>
+          <div class="component-row" style="margin-top:4px">
+            <span class="chip chip-blue">📷 Camera capture</span>
+            <span class="chip chip-blue">🖼 Photo library</span>
+            <span class="chip chip-blue">🎥 Video library</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Feature 3: JWT Roles -->
+      <div class="feature-card">
+        <div class="feature-card-header">
+          <div class="feature-icon-wrap" style="background:var(--amber-dim);">🔐</div>
+          <div class="feature-card-header-text">
+            <div class="feature-number">03 &nbsp;·&nbsp; Security</div>
+            <div class="feature-title">Active JWT Role Mapping</div>
+          </div>
+        </div>
+        <div class="feature-card-body">
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--amber)"></div>
+            JWT now maps <strong style="color:var(--text)">functional operational roles</strong> directly to real-time client entities, replacing unlinked generic accounts.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--amber)"></div>
+            Token payload embeds <span class="code-pill">user_id</span>, <span class="code-pill">username</span>, and <span class="code-pill">role</span>. Every authenticated request forwards <span class="code-pill">X-User-ID</span> and <span class="code-pill">X-User-Role</span> headers.
+          </div>
+          <div class="feature-point">
+            <div class="feature-dot" style="background:var(--amber)"></div>
+            <span class="code-pill">TaskPermission</span> enforces <span class="code-pill">fieldunit</span>-only PATCH on tasks; <span class="code-pill">dispatcher</span> / <span class="code-pill">admin</span> have elevated rights enforced server-side.
+          </div>
+          <div class="flow-note" style="margin-top:4px">
+            <div class="flow-note-title">Role → Permission Matrix</div>
+            <div class="flow-step"><span class="flow-step-num" style="color:var(--red)">⬤</span> <strong>admin</strong> &nbsp;&nbsp;&nbsp;→ full CRUD all resources</div>
+            <div class="flow-step"><span class="flow-step-num" style="color:var(--amber)">⬤</span> <strong>dispatcher</strong> → read all + assign units</div>
+            <div class="flow-step"><span class="flow-step-num" style="color:var(--green)">⬤</span> <strong>fieldunit</strong> → read tasks + PATCH own status</div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /right-panel -->
+  </div><!-- /main-grid -->
+
+  <!-- ── BOTTOM BAR ────────────────────────────────────────────── -->
+  <footer class="bottom-bar">
+    <div class="stack-pills">
+      <span class="stack-pill">Python 3.9 · Django 5 · DRF</span>
+      <span class="stack-pill">React 18 · Vite · Zustand</span>
+      <span class="stack-pill">React Native 0.81 · Expo 54</span>
+      <span class="stack-pill">SQLite · MEDIA_ROOT</span>
+      <span class="stack-pill">JWT (simplejwt) · SSE</span>
+      <span class="stack-pill">Leaflet · OSRM</span>
+      <span class="stack-pill">expo-image-picker v17</span>
+      <span class="stack-pill">react-native-paper v5</span>
+    </div>
+    <div class="bottom-meta">Architecture v3.0 &nbsp;·&nbsp; Emergency Response Command System</div>
+  </footer>
+
+</div><!-- /slide -->
+
+</body>
+</html>

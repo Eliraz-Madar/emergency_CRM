@@ -1,8 +1,10 @@
 from rest_framework import viewsets, status
 from rest_framework.response import Response
-from rest_framework.decorators import action, api_view, parser_classes
+from rest_framework.decorators import action, api_view, parser_classes, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.http import JsonResponse, StreamingHttpResponse
+from django.utils import timezone
 import json
 import time
 import random
@@ -296,6 +298,23 @@ def register_push_token(request):
         defaults={"mock_unit_id": int(mock_unit_id)},
     )
     return Response({"status": "registered"})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def unit_heartbeat(request):
+    """Update the linked `Unit` last-seen timestamp and mark it online."""
+    user = request.user
+    unit = getattr(user, "unit", None)
+    if not unit:
+        return Response({"detail": "No unit linked to user."}, status=status.HTTP_400_BAD_REQUEST)
+
+    unit.last_seen = timezone.now()
+    unit.is_online = True
+    # Keep existing availability field in sync
+    unit.availability_status = "AVAILABLE"
+    unit.save(update_fields=["last_seen", "is_online", "availability_status"])
+    return Response({"ok": True})
 
 
 @api_view(["POST"])
@@ -894,3 +913,54 @@ def mobile_dispatch(request):
             )
 
     return Response({"status": "ok", "tasks_created": tasks_created})
+
+
+@api_view(["POST"])
+def mobile_cancel_dispatch(request):
+    """Cancel a dispatched unit's pending/in-progress task and notify the field device."""
+    mock_unit_id = request.data.get("mock_unit_id")
+    incident_id_raw = request.data.get("incident_id")
+
+    if not mock_unit_id:
+        return Response({"detail": "mock_unit_id required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        mock_unit_id = int(mock_unit_id)
+    except (ValueError, TypeError):
+        return Response({"detail": "Invalid mock_unit_id."}, status=status.HTTP_400_BAD_REQUEST)
+
+    tasks = Task.objects.filter(mock_unit_id=mock_unit_id, status__in=["PENDING", "IN_PROGRESS"])
+
+    if incident_id_raw is not None:
+        inc_key = _parse_incident_key(incident_id_raw)
+        if inc_key is not None:
+            tasks = tasks.filter(incident__mock_incident_id=inc_key)
+
+    cancelled_count = tasks.update(status="CANCELLED")
+
+    tokens = list(PushToken.objects.filter(mock_unit_id=mock_unit_id).values_list("token", flat=True))
+    _send_expo_push(
+        tokens,
+        title="Dispatch Cancelled",
+        body="Your dispatch has been cancelled. Return to patrol.",
+        data={"cancelled": True, "mock_unit_id": mock_unit_id},
+    )
+
+    return Response({"status": "cancelled", "tasks_cancelled": cancelled_count})
+
+
+@api_view(["POST"])
+def mobile_unit_heartbeat(request):
+    """Receive heartbeat from mobile app to update unit status."""
+    user = request.user
+    if not user.is_authenticated:
+        return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        unit = Unit.objects.get(app_user=user)
+        unit.is_online = True
+        unit.last_seen = timezone.now()
+        unit.save(update_fields=["is_online", "last_seen"])
+        return Response({"status": "ok", "unit_id": unit.id})
+    except Unit.DoesNotExist:
+        return Response({"detail": "Unit not found for user."}, status=status.HTTP_404_NOT_FOUND)
