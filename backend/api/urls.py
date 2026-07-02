@@ -15,6 +15,7 @@ from .views import (
     field_incident_updates_stream,
     register_push_token,
     mobile_register_units, mobile_units, mobile_dispatch, mobile_cancel_dispatch,
+    mobile_unit_status,
 )
 
 router = DefaultRouter()
@@ -30,6 +31,7 @@ urlpatterns = [
     path("mobile/units/", mobile_units, name="mobile_units"),
     path("mobile/dispatch/", mobile_dispatch, name="mobile_dispatch"),
     path("mobile/cancel-dispatch/", mobile_cancel_dispatch, name="mobile_cancel_dispatch"),
+    path("mobile/unit-status/", mobile_unit_status, name="mobile_unit_status"),
     # Mock data API endpoints for regional dashboard demo
     path("mock/incidents/", mock_incidents, name="mock_incidents"),
     path("mock/units/", mock_units, name="mock_units"),

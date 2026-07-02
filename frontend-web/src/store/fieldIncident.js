@@ -23,6 +23,17 @@ const _BACKEND_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VI
  * Maps scenario-specific unit types to the three standard types that
  * MapView's createUnitIcon() understands: POLICE | FIRE | MEDICAL.
  */
+const normalizeUnitType = (value) => {
+  const raw = String(value ?? '').trim().toUpperCase().replace(/[-\s]/g, '_');
+  if (['POLICE', 'POLICE_CAR', 'PATROL', 'COP'].includes(raw)) return 'POLICE';
+  if (['FIRE', 'FIRE_TRUCK', 'FIREFIGHTER', 'HAZMAT', 'RESCUE', 'TANKER'].includes(raw)) return 'FIRE';
+  if (['MEDICAL', 'MEDIC', 'MEDICINE', 'AMBULANCE', 'EMS', 'PARAMEDIC'].includes(raw)) return 'MEDICAL';
+  if (raw.startsWith('MED')) return 'MEDICAL';
+  if (raw.startsWith('FIRE') || raw.startsWith('HAZ') || raw.startsWith('RESC')) return 'FIRE';
+  if (raw.startsWith('POL') || raw.startsWith('PATR') || raw.startsWith('COP')) return 'POLICE';
+  return raw || 'POLICE';
+};
+
 const SCENARIO_UNIT_TYPE_MAP = {
   FIRE_TRUCK: 'FIRE',
   AMBULANCE: 'MEDICAL',
@@ -31,6 +42,9 @@ const SCENARIO_UNIT_TYPE_MAP = {
   RESCUE: 'FIRE',
   TANKER: 'FIRE',
   POLICE_CAR: 'POLICE',
+  MEDICAL: 'MEDICAL',
+  FIRE: 'FIRE',
+  POLICE: 'POLICE',
 };
 
 /**
@@ -42,7 +56,7 @@ const SCENARIO_UNIT_TYPE_MAP = {
  * - Clears stale routing state so the unit requests a fresh road route
  */
 const normalizeScenarioUnit = (u, simIncidentId, incLat, incLng) => {
-  const normalizedType = SCENARIO_UNIT_TYPE_MAP[u.type] || u.type;
+  const normalizedType = SCENARIO_UNIT_TYPE_MAP[normalizeUnitType(u.type)] || normalizeUnitType(u.type);
   const isMoving = u.status === 'MOVING' || u.status === 'EN_ROUTE';
   return {
     ...u,
@@ -241,7 +255,10 @@ const generateNationwideUnits = (count = 50) => {
 
     const [lat, lng] = clampToIsrael(city.lat + dLat, city.lng + dLng);
 
-    const type = types[Math.floor(Math.random() * types.length)];
+    // Type is keyed off the unit's fixed id (not randomized) so that "Unit N" is always
+    // the same department every time the roster is (re)generated — this is what the
+    // backend registers for the mobile app, so mobile and web must agree on unit N's type.
+    const type = normalizeUnitType(types[idx % types.length]);
     const station = randomStationForType(type);
     const isParked = false; // All vehicles start active on patrol
 
@@ -1296,6 +1313,8 @@ export const useFieldIncidentStore = create((set, get) => ({
     const nearestRequests = [];
     // Units that transition EN_ROUTE → ON_SCENE this tick
     const newArrivals = [];
+    // Live status transitions to mirror into the mobile unit registry (id -> Available/OnScene)
+    const statusSyncs = [];
 
     const updatedUnits = state.units.map((u) => {
       // Ambulance auto-release logic when ON_SCENE
@@ -1305,6 +1324,7 @@ export const useFieldIncidentStore = create((set, get) => ({
           : now + randomMsBetween(AUTO_RELEASE_MS);
 
         if (now >= autoReleaseAt) {
+          statusSyncs.push({ id: u.id, status: 'Available' });
           const [nextLat, nextLng] = randomLandPoint();
           return {
             ...u,
@@ -1422,6 +1442,7 @@ export const useFieldIncidentStore = create((set, get) => ({
           // Capture unit info BEFORE mutating status so we can log the transition
           if (arrived && u.status !== 'ON_SCENE') {
             newArrivals.push({ id: u.id, name: u.name, assignedTo: u.assignedTo, type: u.type });
+            statusSyncs.push({ id: u.id, status: 'OnScene' });
           }
           return {
             ...u,
@@ -1450,6 +1471,20 @@ export const useFieldIncidentStore = create((set, get) => ({
     // them alongside the new step's units and create duplicates in the store.
     const updatedRoutineUnits = updatedUnits.filter((u) => !u.isScenarioUnit);
     set({ units: updatedUnits, routineUnits: updatedRoutineUnits });
+
+    // Mirror OnScene/Available transitions into the mobile unit registry so the
+    // mobile app's unit list reflects the same live status as the web dashboard.
+    if (statusSyncs.length > 0) {
+      for (const { id, status: unitStatus } of statusSyncs) {
+        const mockUnitId = parseInt(String(id).replace('routine-', ''), 10);
+        if (!Number.isFinite(mockUnitId)) continue;
+        fetch(`${_BACKEND_BASE}/mobile/unit-status/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mock_unit_id: mockUnitId, status: unitStatus }),
+        }).catch(() => { /* non-critical */ });
+      }
+    }
 
     // Write arrival events into the War-Room event feed
     if (newArrivals.length > 0) {

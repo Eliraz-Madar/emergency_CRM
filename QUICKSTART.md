@@ -5,6 +5,11 @@
 ### Windows Users
 
 **Option 1: Automatic (Recommended)**
+
+First, update the IP address in `mobile-app/config.js`:
+
+Then run:
+
 ```cmd
 cd final_code
 run_project.bat

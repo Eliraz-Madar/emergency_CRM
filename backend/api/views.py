@@ -34,6 +34,28 @@ from simulated.field_incident_data import get_field_incident_service
 import time as _time
 
 
+def normalize_unit_type(unit_type):
+    """Return a canonical UI/dispatch type used by the web dashboard and mobile app."""
+    if unit_type is None:
+        return "POLICE"
+
+    raw = str(unit_type).strip().upper().replace("-", "_").replace(" ", "_")
+
+    if raw in {"POLICE", "POLICEMAN", "POLICE_CAR", "PATROL", "COP"}:
+        return "POLICE"
+    if raw in {"FIRE", "FIRE_TRUCK", "FIREFIGHTER", "HAZMAT", "RESCUE", "TANKER"}:
+        return "FIRE"
+    if raw in {"MEDICAL", "MEDIC", "MEDICINE", "AMBULANCE", "EMS", "PARAMEDIC"}:
+        return "MEDICAL"
+    if raw.startswith("MED"):
+        return "MEDICAL"
+    if raw.startswith("FIRE") or raw.startswith("HAZ") or raw.startswith("RESC"):
+        return "FIRE"
+    if raw.startswith("POL") or raw.startswith("PATR") or raw.startswith("COP"):
+        return "POLICE"
+    return "POLICE"
+
+
 class IncidentViewSet(viewsets.ModelViewSet):
     queryset = Incident.objects.all().order_by("-created_at")
     serializer_class = IncidentSerializer
@@ -235,16 +257,46 @@ def _send_expo_push(tokens, title, body, data=None):
         pass
 
 
+def _get_or_create_db_unit_for_routine_unit(unit_payload: dict):
+    """Create or reuse a DB Unit record for a web/mobile routine unit to keep assignments aligned."""
+    if not unit_payload:
+        return None
+
+    unit_name = str(unit_payload.get("name") or unit_payload.get("unit_name") or "").strip()
+    if not unit_name:
+        unit_id = unit_payload.get("id") or unit_payload.get("mock_unit_num")
+        unit_name = f"Unit {unit_id}" if unit_id not in {None, ""} else "Routine Unit"
+
+    normalized_type = normalize_unit_type(unit_payload.get("type"))
+    db_unit_type = _ROUTINE_TYPE_TO_DB.get(normalized_type)
+    if not db_unit_type:
+        return None
+
+    db_unit, _ = Unit.objects.get_or_create(
+        name=unit_name,
+        defaults={
+            "type": db_unit_type,
+            "location_lat": 0.0,
+            "location_lng": 0.0,
+            "availability_status": "AVAILABLE",
+        },
+    )
+    if db_unit.type != db_unit_type:
+        db_unit.type = db_unit_type
+        db_unit.save(update_fields=["type"])
+    return db_unit
+
+
 def _sync_dispatch_to_db(mock_incident: dict, mock_unit: dict) -> None:
     """Mirror a dashboard dispatch as a Task in the real DB and notify the field device."""
     if not mock_unit:
         return
-    db_unit_type = _MOCK_TYPE_TO_DB_TYPE.get(mock_unit.get("type"))
-    if not db_unit_type:
-        return
 
     try:
-        db_unit = Unit.objects.filter(type=db_unit_type, app_user__isnull=False).first()
+        db_unit = _get_or_create_db_unit_for_routine_unit({
+            "name": mock_unit.get("name") or f"Unit {mock_unit.get('id')}",
+            "type": mock_unit.get("type"),
+        })
         if not db_unit:
             return
 
@@ -793,6 +845,15 @@ def field_incident_updates_stream(request):
 # In-memory registry of routine units populated by the dashboard on load
 _routine_units_registry: dict = {}
 
+_VALID_MOBILE_STATUSES = {"Available", "Dispatched", "OnScene", "Offline"}
+
+
+def _set_registry_status(mock_unit_id, mobile_status):
+    """Mirror a unit's live status into the mobile registry, if it's registered."""
+    entry = _routine_units_registry.get(mock_unit_id)
+    if entry is not None and mobile_status in _VALID_MOBILE_STATUSES:
+        entry["status"] = mobile_status
+
 
 @api_view(["POST"])
 def mobile_register_units(request):
@@ -803,10 +864,16 @@ def mobile_register_units(request):
             num = int(str(raw_id).replace("routine-", ""))
         except (ValueError, TypeError):
             continue
+        normalized_type = normalize_unit_type(unit.get("type"))
+        _get_or_create_db_unit_for_routine_unit({
+            "id": num,
+            "name": unit.get("name", f"Unit {num}"),
+            "type": normalized_type,
+        })
         _routine_units_registry[num] = {
             "id":     num,
             "name":   unit.get("name", f"Unit {num}"),
-            "type":   unit.get("type", "POLICE"),
+            "type":   normalized_type,
             "status": "Available",
         }
     return Response({"status": "ok", "count": len(_routine_units_registry)})
@@ -815,7 +882,7 @@ def mobile_register_units(request):
 @api_view(["GET"])
 def mobile_units(request):
     """Returns registered routine units for mobile app unit selection, filtered by type."""
-    unit_type = request.query_params.get("type", "").upper()
+    unit_type = normalize_unit_type(request.query_params.get("type", ""))
     units = [u for u in _routine_units_registry.values()
              if not unit_type or u["type"] == unit_type]
     return Response(sorted(units, key=lambda u: u["id"]))
@@ -885,9 +952,12 @@ def mobile_dispatch(request):
         if not mock_unit_num:
             continue
 
-        db_unit_type = _ROUTINE_TYPE_TO_DB.get(str(unit_type_str).upper())
-        db_unit = (Unit.objects.filter(type=db_unit_type, app_user__isnull=False).first()
-                   if db_unit_type else None)
+        db_unit = _get_or_create_db_unit_for_routine_unit({
+            "id": mock_unit_num,
+            "name": unit.get("name") or f"Unit {mock_unit_num}",
+            "type": unit_type_str,
+        })
+        _set_registry_status(int(mock_unit_num), "Dispatched")
 
         _, created = Task.objects.get_or_create(
             incident=db_incident,
@@ -937,6 +1007,7 @@ def mobile_cancel_dispatch(request):
             tasks = tasks.filter(incident__mock_incident_id=inc_key)
 
     cancelled_count = tasks.update(status="CANCELLED")
+    _set_registry_status(mock_unit_id, "Available")
 
     tokens = list(PushToken.objects.filter(mock_unit_id=mock_unit_id).values_list("token", flat=True))
     _send_expo_push(
@@ -947,6 +1018,26 @@ def mobile_cancel_dispatch(request):
     )
 
     return Response({"status": "cancelled", "tasks_cancelled": cancelled_count})
+
+
+@api_view(["POST"])
+def mobile_unit_status(request):
+    """Web dashboard calls this to mirror a routine unit's live status (OnScene/Available)
+    into the mobile registry, so the mobile app's unit list matches what's on the map."""
+    mock_unit_id = request.data.get("mock_unit_id")
+    new_status = request.data.get("status")
+
+    if not mock_unit_id or new_status not in _VALID_MOBILE_STATUSES:
+        return Response({"detail": "mock_unit_id and a valid status are required."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        mock_unit_id = int(mock_unit_id)
+    except (ValueError, TypeError):
+        return Response({"detail": "Invalid mock_unit_id."}, status=status.HTTP_400_BAD_REQUEST)
+
+    _set_registry_status(mock_unit_id, new_status)
+    return Response({"status": "ok"})
 
 
 @api_view(["POST"])

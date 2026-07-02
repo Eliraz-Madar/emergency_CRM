@@ -13,6 +13,7 @@ const DB_TYPE_TO_DISPLAY = {
   Police: "Police",
   EMS:    "Ambulance",
   Fire:   "Fire",
+  MEDICAL: "Ambulance",
 };
 
 // Maps DB unit type to the routine type string used by the backend
@@ -20,6 +21,7 @@ const DB_TYPE_TO_ROUTINE = {
   Police: "POLICE",
   EMS:    "MEDICAL",
   Fire:   "FIRE",
+  MEDICAL: "MEDICAL",
 };
 
 const TYPE_COLOR = {

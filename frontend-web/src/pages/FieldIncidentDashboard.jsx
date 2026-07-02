@@ -296,7 +296,7 @@ const FieldIncidentDashboard = () => {
   if (!hasAccess) {
     return (
       <div className="field-incident-dashboard">
-        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100vh', fontSize: '1.2rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100dvh', fontSize: '1.2rem', padding: '2rem' }}>
           <div>🚫 Access denied</div>
           <div style={{ marginTop: '0.5rem', fontSize: '1rem' }}>
             Field ID: {fieldId || 'unknown'}
@@ -319,7 +319,7 @@ const FieldIncidentDashboard = () => {
   if (loading) {
     return (
       <div className="field-incident-dashboard">
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', fontSize: '1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100dvh', fontSize: '1.5rem', padding: '2rem' }}>
           Loading field incident data...
         </div>
       </div>
@@ -330,7 +330,7 @@ const FieldIncidentDashboard = () => {
   if (error) {
     return (
       <div className="field-incident-dashboard">
-        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100vh', fontSize: '1.2rem', color: '#ef4444' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100dvh', fontSize: '1.2rem', color: '#ef4444', padding: '2rem' }}>
           <div>⚠️ Error loading field incident data</div>
           <div style={{ fontSize: '1rem', marginTop: '1rem' }}>{error}</div>
           <button
