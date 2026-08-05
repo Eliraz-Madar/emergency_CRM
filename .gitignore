@@ -16,7 +16,7 @@ frontend-web/dist/
 mobile-app/node_modules/
 mobile-app/.expo/
 mobile-app/.expo-shared/
-mobile-app/config.js/
+mobile-app/config.js
 
 # OS
 .DS_Store
