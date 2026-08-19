@@ -14,7 +14,11 @@ export const useDashboardStore = create(
     (set, get) => ({
       // Data — NOT persisted (re-fetched from API on load)
       incidents: [],
-      units: [],
+      units: [], // mock/demo units — only used by the legacy Field Command "Assign Global Forces" list
+      // Real, DB-backed Unit rows (with a live is_online). This is what the
+      // map and Dispatch panel render — see
+      // final changes/05_user_unit_claiming_and_live_sync.md.
+      onlineUnits: [],
       events: [],
 
       // UI State
@@ -45,7 +49,20 @@ export const useDashboardStore = create(
       // Actions
       setIncidents: (incidents) => set({ incidents }),
       setUnits: (units) => set({ units }),
+      setOnlineUnits: (onlineUnits) => set({ onlineUnits }),
       setEvents: (events) => set({ events }),
+
+      // Merge a partial real-unit update (from an SSE broadcast) into
+      // onlineUnits by id — updates in place if known, inserts if new.
+      upsertOnlineUnit: (partial) => set((state) => {
+        const exists = state.onlineUnits.some((u) => u.id === partial.id);
+        return {
+          onlineUnits: exists
+            ? state.onlineUnits.map((u) => (u.id === partial.id ? { ...u, ...partial } : u))
+            : [...state.onlineUnits, partial],
+          lastUpdateTime: new Date(),
+        };
+      }),
 
       addIncident: (incident) => set((state) => ({
         incidents: [incident, ...state.incidents],

@@ -33,6 +33,10 @@ export default function Units() {
         {units.map((unit) => (
           <li key={unit.id}>
             <strong>{unit.name}</strong> - {unit.type} - {unit.availability_status}
+            {" "}
+            <span style={{ color: unit.is_online ? "green" : "gray" }}>
+              {unit.is_online ? "● online" : "○ offline"}
+            </span>
           </li>
         ))}
       </ul>

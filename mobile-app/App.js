@@ -10,6 +10,7 @@ import { PaperProvider } from "react-native-paper";
 import NetInfo from "@react-native-community/netinfo";
 import * as Notifications from "expo-notifications";
 import { UserProvider, useUser } from "./context/UserContext";
+import { startHeartbeatLoop, disconnectUnit } from "./utils/heartbeat";
 import LoginScreen        from "./screens/LoginScreen";
 import UnitSelectScreen   from "./screens/UnitSelectScreen";
 import TasksScreen        from "./screens/TasksScreen";
@@ -36,7 +37,7 @@ const NAV_HEADER = {
   headerBackTitle:  "",
 };
 
-function AppContent() {
+function AppContent() {  
   const [token,        setToken]        = useState(null);
   const [selectedUnit, setSelectedUnit] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
@@ -45,33 +46,38 @@ function AppContent() {
   const wasOnlineRef = useRef(true);
   const { user, setUser } = useUser();
 
-  // Network change listener
+  // Network change listener, alerts user if they go offline, and updates the `online` state.
   useEffect(() => {
-    const unsubscribe = NetInfo.addEventListener((state) => {
-      const connected = !!(state.isConnected && state.isInternetReachable !== false);
-      if (wasOnlineRef.current && !connected) {
-        Alert.alert(
-          "Connection Lost",
-          "You appear to be offline. How would you like to proceed?",
-          [
-            { text: "Continue Offline", style: "cancel", onPress: () => setOnline(false) },
-            {
-              text: "Retry",
-              onPress: () =>
-                NetInfo.fetch().then((s) =>
-                  setOnline(!!(s.isConnected && s.isInternetReachable !== false))
-                ),
-            },
-          ],
-          { cancelable: false }
-        );
-      } else {
-        setOnline(connected);
-      }
-      wasOnlineRef.current = connected;
+  function handleRetryConnection() {
+    NetInfo.fetch().then((state) => {
+      const isReachable = Boolean(state.isConnected && state.isInternetReachable !== false);
+      setOnline(isReachable);
     });
-    return unsubscribe;
-  }, []);
+  }
+
+  function handleNetworkChange(state) {
+    const connected = Boolean(state.isConnected && state.isInternetReachable !== false);
+
+    if (wasOnlineRef.current && !connected) {
+      Alert.alert(
+        "Connection Lost",
+        "You appear to be offline. How would you like to proceed?",
+        [
+          { text: "Continue Offline", style: "cancel", onPress: () => setOnline(false) },
+          { text: "Retry", onPress: handleRetryConnection },
+        ],
+        { cancelable: false }
+      );
+    } else {
+      setOnline(connected);
+    }
+
+    wasOnlineRef.current = connected;
+  }
+
+  const unsubscribe = NetInfo.addEventListener(handleNetworkChange);
+  return unsubscribe;
+}, []);
 
   // Foreground notification tap → navigate to Tasks and refresh
   useEffect(() => {
@@ -81,8 +87,20 @@ function AppContent() {
     return () => sub.remove();
   }, []);
 
+  // Live GPS heartbeat — starts as soon as a unit is claimed, stops on
+  // logout/unmount. See mobile-app/utils/heartbeat.js and
+  // final changes/05_user_unit_claiming_and_live_sync.md.
+  useEffect(() => {
+    if (!token || !selectedUnit) return undefined;
+    const stopHeartbeat = startHeartbeatLoop(token, user);
+    return stopHeartbeat;
+  }, [token, selectedUnit?.id]);
+
   const handleLogout = () => {
     setMenuVisible(false);
+    if (token && selectedUnit) {
+      disconnectUnit(token, user); // best-effort, fire-and-forget
+    }
     setToken(null);
     setUser(null);
     setSelectedUnit(null);
@@ -128,6 +146,10 @@ function AppContent() {
                   setSelectedTask(task);
                   props.navigation.navigate("Report");
                 }}
+                onViewRoute={(task) => {
+                  setSelectedTask(task);
+                  props.navigation.navigate("Map");
+                }}
               />
             )}
           </Stack.Screen>
@@ -152,7 +174,12 @@ function AppContent() {
 
           <Stack.Screen name="Map" options={{ title: "Incident Map" }}>
             {(props) => (
-              <IncidentMapScreen {...props} token={token} selectedUnit={selectedUnit} />
+              <IncidentMapScreen
+                {...props}
+                token={token}
+                selectedUnit={selectedUnit}
+                selectedTask={selectedTask}
+              />
             )}
           </Stack.Screen>
 

@@ -17,7 +17,7 @@ function getStatusCfg(status) {
   return STATUS_CONFIG[status] || STATUS_CONFIG.PENDING;
 }
 
-export default function TasksScreen({ token, selectedUnit, onSelectTask }) {
+export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewRoute }) {
   const [tasks, setTasks] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -106,13 +106,24 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask }) {
                 {item.incident ? (
                   <Text style={styles.incidentRef}>Incident #{item.incident}</Text>
                 ) : null}
-                <TouchableOpacity
-                  style={styles.reportBtn}
-                  onPress={() => onSelectTask(item)}
-                  activeOpacity={0.85}
-                >
-                  <Text style={styles.reportBtnText}>FILE REPORT  →</Text>
-                </TouchableOpacity>
+                <View style={styles.actionRow}>
+                  {onViewRoute && item.incident_lat != null && item.incident_lng != null && (
+                    <TouchableOpacity
+                      style={styles.routeBtn}
+                      onPress={() => onViewRoute(item)}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.routeBtnText}>🗺 ROUTE</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    style={styles.reportBtn}
+                    onPress={() => onSelectTask(item)}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.reportBtnText}>FILE REPORT  →</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </Surface>
           );
@@ -174,13 +185,24 @@ const styles = StyleSheet.create({
 
   incidentRef: { fontSize: 12, color: "#90A4AE", marginBottom: 12 },
 
+  actionRow: { flexDirection: "row", gap: 10 },
   reportBtn: {
+    flex: 1,
     backgroundColor: "#1565C0",
     borderRadius: 9,
     paddingVertical: 12,
     alignItems: "center",
   },
   reportBtnText: { color: "#FFFFFF", fontSize: 14, fontWeight: "700", letterSpacing: 0.5 },
+  routeBtn: {
+    backgroundColor: "#E3F2FD",
+    borderRadius: 9,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  routeBtnText: { color: "#1565C0", fontSize: 13, fontWeight: "700", letterSpacing: 0.3 },
 
   emptyBox: { alignItems: "center", paddingVertical: 64 },
   emptyIcon:  { fontSize: 48, marginBottom: 12 },

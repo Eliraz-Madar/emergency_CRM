@@ -8,11 +8,13 @@ import { getReports, clearReports } from "../storage/offlineDB";
 import { API_BASE_URL } from "../config";
 import { useUser } from "../context/UserContext";
 import { getAuthHeaders } from "../utils/apiClient";
+import { getDeviceLocation } from "../utils/location";
 
 export default function SyncScreen({ token, online, setOnline }) {
   const [reports, setReports] = useState([]);
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [locationNotice, setLocationNotice] = useState("");
   const isSyncingRef = useRef(false);
   const { user } = useUser();
 
@@ -31,6 +33,12 @@ export default function SyncScreen({ token, online, setOnline }) {
     setSyncing(true);
     setError("");
     try {
+      const location = await getDeviceLocation();
+      setLocationNotice(
+        location.isMock
+          ? "Live GPS unavailable — using default location for this sync."
+          : ""
+      );
       for (const report of toSync) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
@@ -40,8 +48,8 @@ export default function SyncScreen({ token, online, setOnline }) {
           body: JSON.stringify({
             title: `Offline ${report.title}`,
             description: report.details,
-            location_lat: 32.0,
-            location_lng: 34.0,
+            location_lat: location.latitude,
+            location_lng: location.longitude,
             severity: "LOW",
             status: "OPEN",
           }),
@@ -86,6 +94,12 @@ export default function SyncScreen({ token, online, setOnline }) {
       {error ? (
         <View style={styles.errorBox}>
           <Text style={styles.errorText}>⚠  {error}</Text>
+        </View>
+      ) : null}
+
+      {locationNotice ? (
+        <View style={styles.noticeBox}>
+          <Text style={styles.noticeText}>📍  {locationNotice}</Text>
         </View>
       ) : null}
 
@@ -184,6 +198,17 @@ const styles = StyleSheet.create({
     borderLeftColor: "#C62828",
   },
   errorText: { color: "#C62828", fontSize: 13, fontWeight: "500" },
+
+  // Location fallback notice
+  noticeBox: {
+    backgroundColor: "#FFF8E1",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+    borderLeftWidth: 3,
+    borderLeftColor: "#F9A825",
+  },
+  noticeText: { color: "#8D6E00", fontSize: 13, fontWeight: "500" },
 
   // Section label
   sectionLabel: {

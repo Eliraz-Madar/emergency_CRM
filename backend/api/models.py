@@ -1,5 +1,7 @@
+from datetime import timedelta
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 
 class User(AbstractUser):
@@ -30,8 +32,52 @@ class Incident(models.Model):
 
     class Status(models.TextChoices):
         OPEN = "OPEN", "Open"
+        PENDING = "PENDING", "Pending"
+        EN_ROUTE = "EN_ROUTE", "En Route"
+        ON_SCENE = "ON_SCENE", "On Scene"
+        # Legacy value predating the explicit pipeline below. Kept so existing
+        # rows and the mobile-dispatch bridge (api/views.py::mobile_dispatch,
+        # which writes this status directly and is intentionally NOT routed
+        # through the guarded state machine) keep working. New incidents are
+        # never created in this state.
         IN_PROGRESS = "IN_PROGRESS", "In Progress"
+        RESOLVED = "RESOLVED", "Resolved"
         CLOSED = "CLOSED", "Closed"
+
+    # "Commander" = dispatcher/admin acting from the war-room / command dashboard.
+    COMMANDER_ROLES = frozenset({"admin", "dispatcher"})
+    # Field personnel acting from the mobile app.
+    FIELD_ROLES = frozenset({"fieldunit"})
+
+    # Explicit forward-only state machine: {current_status: {next_status: {roles allowed to perform it}}}.
+    # Anything not listed here is an invalid transition and is rejected with a 400.
+    TRANSITIONS = {
+        Status.OPEN: {
+            Status.PENDING: COMMANDER_ROLES,       # Dispatch/Assignment
+        },
+        Status.PENDING: {
+            Status.EN_ROUTE: FIELD_ROLES,          # Mobile user accepts
+            Status.RESOLVED: COMMANDER_ROLES,      # Commander resolves (override)
+        },
+        Status.EN_ROUTE: {
+            Status.ON_SCENE: FIELD_ROLES,          # Mobile user arrives
+            Status.RESOLVED: COMMANDER_ROLES,      # Commander resolves (override)
+        },
+        Status.ON_SCENE: {
+            # Mobile user completes (gated below on all tasks being done) or Commander resolves.
+            Status.RESOLVED: FIELD_ROLES | COMMANDER_ROLES,
+        },
+        Status.IN_PROGRESS: {
+            # Migration path for incidents created by the legacy/mobile-dispatch bridge.
+            Status.EN_ROUTE: FIELD_ROLES,
+            Status.ON_SCENE: FIELD_ROLES,
+            Status.RESOLVED: FIELD_ROLES | COMMANDER_ROLES,
+        },
+        Status.RESOLVED: {
+            Status.CLOSED: COMMANDER_ROLES,        # Commander closes — the ONLY way to reach CLOSED
+        },
+        Status.CLOSED: {},
+    }
 
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
@@ -47,6 +93,49 @@ class Incident(models.Model):
     def __str__(self):
         return f"{self.title} ({self.status})"
 
+    def all_tasks_completed(self):
+        """True if every Task assigned to this incident is DONE or CANCELLED (vacuously true with no tasks)."""
+        return not self.tasks.exclude(
+            status__in=[Task.Status.DONE, Task.Status.CANCELLED]
+        ).exists()
+
+    def can_transition_to(self, target_status, role):
+        """
+        Validate a proposed status change against the explicit state machine.
+        Returns (True, None) if allowed, or (False, "reason") if rejected.
+        """
+        if target_status not in self.Status.values:
+            return False, f"'{target_status}' is not a valid incident status."
+        if target_status == self.status:
+            return True, None
+
+        # Incidents must NEVER be marked CLOSED except by an explicit Commander action,
+        # and only once RESOLVED — never as a side effect of any other request.
+        if target_status == self.Status.CLOSED:
+            if role not in self.COMMANDER_ROLES:
+                return False, "Only a Commander (admin/dispatcher) can close an incident."
+            if self.status != self.Status.RESOLVED:
+                return False, "Incidents can only be closed after they have been resolved."
+
+        allowed_roles = self.TRANSITIONS.get(self.status, {}).get(target_status)
+        if not allowed_roles or role not in allowed_roles:
+            return False, (
+                f"Cannot transition incident from '{self.status}' to "
+                f"'{target_status}' as role '{role or 'anonymous'}'."
+            )
+
+        # A field unit "completing" the incident requires every assigned task to
+        # be reported done first — this is the "all assigned units report
+        # completion" condition. A Commander can still resolve without it (override).
+        if target_status == self.Status.RESOLVED and role in self.FIELD_ROLES:
+            if not self.all_tasks_completed():
+                return False, (
+                    "All assigned tasks must be reported complete before a "
+                    "field unit can resolve this incident."
+                )
+
+        return True, None
+
 
 class Unit(models.Model):
     class UnitType(models.TextChoices):
@@ -55,6 +144,12 @@ class Unit(models.Model):
         EMS = "EMS", "EMS"
         HOMEFRONT = "HomeFront", "Home Front"
 
+    # A unit is only ever "actively online" while a real heartbeat has been
+    # seen within this window. Used at read-time (serializer) instead of a
+    # background job flipping is_online — this codebase deliberately has no
+    # timers mutating state (see final changes/01_disable_simulation_engine.md).
+    HEARTBEAT_STALE_AFTER = timedelta(seconds=60)
+
     name = models.CharField(max_length=200)
     type = models.CharField(max_length=50, choices=UnitType.choices)
     location_lat = models.FloatField()
@@ -62,11 +157,20 @@ class Unit(models.Model):
     availability_status = models.CharField(max_length=50, default="AVAILABLE")
     # Last time this unit sent a heartbeat
     last_seen = models.DateTimeField(null=True, blank=True)
-    # Convenience flag for quick filtering of online/offline units
-    is_online = models.BooleanField(default=True)
+    # Explicit flag: set True only by an authenticated user claiming this
+    # unit or sending a heartbeat; set False on logout/disconnect. A unit
+    # is never online by default — it must be claimed by a real device first.
+    is_online = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.name} ({self.type})"
+
+    @property
+    def is_actively_online(self):
+        """True only if explicitly online AND a heartbeat was seen recently."""
+        if not self.is_online or not self.last_seen:
+            return False
+        return timezone.now() - self.last_seen < self.HEARTBEAT_STALE_AFTER
 
 
 class Task(models.Model):
@@ -75,6 +179,9 @@ class Task(models.Model):
         IN_PROGRESS = "IN_PROGRESS", "In Progress"
         DONE = "DONE", "Done"
         CANCELLED = "CANCELLED", "Cancelled"
+
+    TERMINAL_STATUSES = frozenset({Status.DONE, Status.CANCELLED})
+    COMMANDER_ROLES = frozenset({"admin", "dispatcher"})
 
     incident = models.ForeignKey(
         Incident, related_name="tasks", on_delete=models.CASCADE)
@@ -88,6 +195,27 @@ class Task(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.status})"
+
+    def can_transition_to(self, target_status, role):
+        """
+        Lighter-weight guard than Incident's: field units and dispatchers may
+        freely move a task between PENDING/IN_PROGRESS/DONE in any order (the
+        mobile report flow can go straight to DONE without an IN_PROGRESS
+        checkpoint), but a task can never be edited again once it reaches a
+        terminal status, and only a Commander can cancel a task.
+        """
+        if target_status not in self.Status.values:
+            return False, f"'{target_status}' is not a valid task status."
+        if target_status == self.status:
+            return True, None
+        if self.status in self.TERMINAL_STATUSES:
+            return False, (
+                f"Task is already '{self.status}' and its status can no "
+                "longer be changed."
+            )
+        if target_status == self.Status.CANCELLED and role not in self.COMMANDER_ROLES:
+            return False, "Only a dispatcher or admin can cancel a task."
+        return True, None
 
 
 # ============================================
@@ -299,6 +427,10 @@ class IncidentEvent(models.Model):
 
     # Meta
     created_by = models.CharField(max_length=100, blank=True)
+    actor_id = models.IntegerField(
+        null=True, blank=True,
+        help_text="ID of the authenticated user who performed this action, if any.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

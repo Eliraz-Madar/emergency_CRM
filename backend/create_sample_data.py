@@ -39,9 +39,9 @@ for u in CANONICAL_UNITS:
 
 # ── 2. Field-unit users linked to their unit ──────────────────────────────────
 FIELD_USERS = [
-    {"username": "police",    "password": "police123",    "unit_type": "Police"},
-    {"username": "ambulance", "password": "ambulance123", "unit_type": "EMS"},
-    {"username": "fire",      "password": "fire123",      "unit_type": "Fire"},
+    {"username": "police",    "password": "Police123",    "unit_type": "Police"},
+    {"username": "ambulance", "password": "Ambulance123", "unit_type": "EMS"},
+    {"username": "fire",      "password": "Fire123",      "unit_type": "Fire"},
 ]
 
 for fu in FIELD_USERS:

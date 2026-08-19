@@ -24,9 +24,14 @@ router.register(r"tasks", TaskViewSet)
 router.register(r"units", UnitViewSet)
 
 urlpatterns = [
+    # Must precede the router include: DefaultRouter's detail route
+    # (units/<pk>/) uses the regex [^/.]+ for pk, which also matches the
+    # literal string "heartbeat" — if the router is included first it wins
+    # the match and this view becomes unreachable (405 on every request).
+    # See final changes/05_user_unit_claiming_and_live_sync.md.
+    path("units/heartbeat/", unit_heartbeat, name="unit_heartbeat"),
     path("", include(router.urls)),
     path("push-token/", register_push_token, name="register_push_token"),
-     path("units/heartbeat/", unit_heartbeat, name="unit_heartbeat"),
     path("mobile/register-units/", mobile_register_units, name="mobile_register_units"),
     path("mobile/units/", mobile_units, name="mobile_units"),
     path("mobile/dispatch/", mobile_dispatch, name="mobile_dispatch"),

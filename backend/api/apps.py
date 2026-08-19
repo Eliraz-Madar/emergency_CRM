@@ -6,7 +6,11 @@ class ApiConfig(AppConfig):
     name = "api"
 
     def ready(self):
-        # Start background polling thread when app loads
-        from utils.polling_service import start_polling_service
-
-        start_polling_service()
+        # Background mock polling thread disabled — it silently overwrote
+        # Incident/Unit rows every POLLING_INTERVAL seconds with data from
+        # simulated.mock_api_client, independent of any HTTP request.
+        # State transitions must now only happen via explicit API calls.
+        # See "final changes/01_disable_simulation_engine.md".
+        # from utils.polling_service import start_polling_service
+        # start_polling_service()
+        pass

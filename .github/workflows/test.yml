@@ -1,0 +1,44 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/test.yml"
+
+jobs:
+  backend-tests:
+    name: Django test suite (api app)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          # requirements.txt has a trailing human-readable usage note (not a
+          # package spec) that makes `pip install -r requirements.txt` fail
+          # outright. Filter to real "pkg==version" lines instead of editing
+          # that file, which is out of scope for this workflow change.
+          grep -E '==' requirements.txt > requirements-ci.txt
+          pip install -r requirements-ci.txt
+
+      - name: Run Django test suite
+        env:
+          DJANGO_SECRET_KEY: ci-test-secret-key
+          DJANGO_DEBUG: "0"
+        run: python manage.py test api -v 2

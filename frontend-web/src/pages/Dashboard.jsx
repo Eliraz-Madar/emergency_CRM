@@ -24,6 +24,8 @@ export default function Dashboard() {
   const {
     setIncidents,
     setUnits,
+    setOnlineUnits,
+    upsertOnlineUnit,
     setEvents,
     addIncident,
     updateIncident,
@@ -39,6 +41,7 @@ export default function Dashboard() {
     selectedUnitId,
     selectedUnitIds,
     units,
+    onlineUnits,
     activeFilter: storedActiveFilter,
     setActiveFilter: storeSetActiveFilter,
     zoomToIncidentId,
@@ -105,7 +108,14 @@ export default function Dashboard() {
 
   // Simulation override detection
   const isSimulation = fieldMode === 'SIMULATION';
-  const activeUnits = isSimulation ? simulationUnits : (routineUnits.length > 0 ? routineUnits : units);
+  // Only real, actively-connected units are shown outside of a drill — seeded
+  // "routine" demo units are no longer used as a fallback here. onlineUnits
+  // (destructured above) comes from GET /api/units/, the real Unit model —
+  // see final changes/04_disable_frontend_map_simulation.md and
+  // final changes/05_user_unit_claiming_and_live_sync.md.
+  const activeUnits = isSimulation
+    ? simulationUnits
+    : (Array.isArray(onlineUnits) ? onlineUnits.filter((u) => u.is_online === true) : []);
   const selectedUnit = Array.isArray(activeUnits) && selectedUnitId
     ? activeUnits.find((u) => String(u.id) === String(selectedUnitId))
     : null;
@@ -305,14 +315,16 @@ export default function Dashboard() {
         setConnectionStatus('CONNECTING');
 
         // Fetch initial data
-        const [incidents, units, events] = await Promise.all([
+        const [incidents, units, realUnits, events] = await Promise.all([
           api.getIncidents(),
           api.getUnits(),
+          api.getRealUnits(),
           api.getEvents(200),
         ]);
 
         setIncidents(incidents);
         setUnits(units);
+        setOnlineUnits(realUnits);
         setEvents(events);
         try {
           await refreshFieldCommands();
@@ -396,6 +408,24 @@ export default function Dashboard() {
               });
             } else if (update.type === 'unit_updated') {
               updateUnit(update.data.id, update.data);
+            } else if (update.type === 'user_action' && (
+              update.action === 'unit_claimed' ||
+              update.action === 'unit_location_update' ||
+              update.action === 'unit_heartbeat' ||
+              update.action === 'unit_disconnected'
+            )) {
+              // Live GPS/online-status push from a claimed unit's heartbeat,
+              // claim, or disconnect — see api/views.py::_broadcast_realtime
+              // calls in UnitViewSet/unit_heartbeat and
+              // final changes/05_user_unit_claiming_and_live_sync.md.
+              upsertOnlineUnit({
+                id: update.unit_id,
+                name: update.unit_name,
+                ...(update.location_lat != null && update.location_lng != null
+                  ? { location_lat: update.location_lat, location_lng: update.location_lng }
+                  : {}),
+                is_online: update.action !== 'unit_disconnected',
+              });
             }
           },
           (error) => {
@@ -435,13 +465,15 @@ export default function Dashboard() {
 
     const interval = setInterval(async () => {
       try {
-        const [incidents, units, events] = await Promise.all([
+        const [incidents, units, realUnits, events] = await Promise.all([
           api.getIncidents(),
           api.getUnits(),
+          api.getRealUnits(),
           api.getEvents(200),
         ]);
         setIncidents(incidents);
         setUnits(units);
+        setOnlineUnits(realUnits);
         setEvents(events);
         setIsLoading(false);
 
@@ -471,26 +503,31 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
-  // Unit movement loop — runs every 500 ms for smooth animation.
-  // Also handles routine patrol ticks in ROUTINE mode.
-  useEffect(() => {
-    const movementInterval = setInterval(() => {
-      const { moveUnits: latestMoveUnits, tickRoutinePatrol: latestTickPatrol, mode } = useFieldIncidentStore.getState();
-
-      if (mode === 'ROUTINE' && latestTickPatrol) {
-        latestTickPatrol();
-      }
-      if (latestMoveUnits) {
-        latestMoveUnits();
-      }
-    }, 500);
-
-    return () => clearInterval(movementInterval);
-  }, []);
+  // Unit movement / routine-patrol animation loop — DISABLED.
+  // This used to call moveUnits()/tickRoutinePatrol() every 500ms, sliding
+  // seeded demo units along fake routes regardless of whether any real
+  // device was connected. Units now render strictly at their last reported
+  // GPS coordinates. See final changes/04_disable_frontend_map_simulation.md.
+  //
+  // useEffect(() => {
+  //   const movementInterval = setInterval(() => {
+  //     const { moveUnits: latestMoveUnits, tickRoutinePatrol: latestTickPatrol, mode } = useFieldIncidentStore.getState();
+  //     if (mode === 'ROUTINE' && latestTickPatrol) {
+  //       latestTickPatrol();
+  //     }
+  //     if (latestMoveUnits) {
+  //       latestMoveUnits();
+  //     }
+  //   }, 500);
+  //   return () => clearInterval(movementInterval);
+  // }, []);
 
   // Simulation step loop — advances the active drill scenario every 2 500 ms.
   // Mirrors the timer in FieldIncidentDashboard so the drill keeps running
   // even when the user is on the War-Room and Field Command is not open.
+  // Kept intentionally: SIMULATION mode is an operator-initiated, clearly
+  // banner-labeled training drill — not the unsolicited demo-unit movement
+  // this task removes.
   useEffect(() => {
     const simInterval = setInterval(() => {
       const { mode, nextSimulationStep: latestNextStep } = useFieldIncidentStore.getState();
@@ -719,7 +756,6 @@ export default function Dashboard() {
               location_name: majorIncident.location_name || 'Field Location'
             } : null}
             simulationUnits={isSimulation ? simulationUnits : null}
-            routineUnits={!isSimulation ? routineUnits : null}
             selectedUnitIds={selectedUnitIds}
             fieldCommands={fieldCommands}
             selectedFieldCommandId={selectedFieldCommand?.id || null}

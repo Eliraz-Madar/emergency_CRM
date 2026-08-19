@@ -21,3 +21,6 @@ mobile-app/config.js
 # OS
 .DS_Store
 Thumbs.db
+
+# Local change documentation (not committed)
+final changes/

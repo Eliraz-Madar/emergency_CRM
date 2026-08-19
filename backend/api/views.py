@@ -4,6 +4,7 @@ from rest_framework.decorators import action, api_view, parser_classes, permissi
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.http import JsonResponse, StreamingHttpResponse
+from django.db.models import Q
 from django.utils import timezone
 import json
 import time
@@ -56,10 +57,90 @@ def normalize_unit_type(unit_type):
     return "POLICE"
 
 
+def _log_status_change(*, incident=None, actor, title, description, severity=None):
+    """Record a manual status transition into IncidentEvent, attributed to the acting user."""
+    IncidentEvent.objects.create(
+        incident=incident,
+        event_type=IncidentEvent.EventType.STATUS_CHANGE,
+        severity=severity or IncidentEvent.Severity.INFO,
+        title=title,
+        description=description,
+        created_by=getattr(actor, "username", "") or "system",
+        actor_id=getattr(actor, "id", None),
+    )
+
+
+def _broadcast_realtime(event: dict):
+    """
+    Push a real-time event to every client connected to /api/mock/updates/stream/.
+    Only ever called from request handlers reacting to a genuine, explicit
+    write — never from a timer or simulator (see "final changes/01_..." for
+    the background tickers that were removed for exactly that reason).
+    """
+    event.setdefault("timestamp", _time.time())
+    get_realtime_service().broadcast(event)
+
+
+def _actor_fields(actor):
+    return {
+        "user_id": getattr(actor, "id", None),
+        "username": getattr(actor, "username", "") or "system",
+        "role": getattr(actor, "role", "") or "",
+    }
+
+
 class IncidentViewSet(viewsets.ModelViewSet):
     queryset = Incident.objects.all().order_by("-created_at")
     serializer_class = IncidentSerializer
     permission_classes = [ReadOnlyOrAdminDispatcher]
+
+    def perform_create(self, serializer):
+        # IncidentSerializer.validate_status() already forces status=OPEN on create.
+        instance = serializer.save()
+        actor = self.request.user
+        _log_status_change(
+            incident=instance,
+            actor=actor,
+            title="Incident created",
+            description=f"Incident created with status {instance.status}.",
+        )
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "incident_created",
+            **_actor_fields(actor),
+            "incident_id": instance.id,
+            "incident_title": instance.title,
+            "status": instance.status,
+        })
+
+    def perform_update(self, serializer):
+        old_status = serializer.instance.status
+        instance = serializer.save()
+        if instance.status != old_status:
+            actor = self.request.user
+            _log_status_change(
+                incident=instance,
+                actor=actor,
+                title=f"Incident status changed: {old_status} → {instance.status}",
+                description=(
+                    f"Changed by {getattr(actor, 'username', 'unknown')} "
+                    f"(role={getattr(actor, 'role', '') or 'unknown'})."
+                ),
+                severity=(
+                    IncidentEvent.Severity.WARNING
+                    if instance.status == Incident.Status.CLOSED
+                    else IncidentEvent.Severity.INFO
+                ),
+            )
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "incident_status_update",
+                **_actor_fields(actor),
+                "incident_id": instance.id,
+                "incident_title": instance.title,
+                "old_status": old_status,
+                "new_status": instance.status,
+            })
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -84,10 +165,36 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def perform_update(self, serializer):
+        old_status = serializer.instance.status
+        instance = serializer.save()
+        if instance.status != old_status:
+            actor = self.request.user
+            _log_status_change(
+                incident=instance.incident,
+                actor=actor,
+                title=f"Task '{instance.title}' status changed",
+                description=(
+                    f"{old_status} → {instance.status} by "
+                    f"{getattr(actor, 'username', 'unknown')} "
+                    f"(role={getattr(actor, 'role', '') or 'unknown'})."
+                ),
+            )
+            # Fires for every caller (field unit accepting/arriving/completing,
+            # or a dispatcher/admin editing status directly) since both paths
+            # below funnel through perform_update().
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "task_status_update",
+                **_actor_fields(actor),
+                "task_id": instance.id,
+                "task_title": instance.title,
+                "old_status": old_status,
+                "new_status": instance.status,
+            })
+
     def partial_update(self, request, *args, **kwargs):
         user_role = getattr(request.user, "role", "")
-        user_id = getattr(request.user, "id", None)
-        username = getattr(request.user, "username", "unknown")
 
         if user_role == "fieldunit":
             status_value = request.data.get("status")
@@ -99,19 +206,6 @@ class TaskViewSet(viewsets.ModelViewSet):
                 instance, data={"status": status_value}, partial=True)
             serializer.is_valid(raise_exception=True)
             self.perform_update(serializer)
-
-            get_realtime_service().broadcast({
-                "type": "user_action",
-                "action": "task_status_update",
-                "user_id": user_id,
-                "username": username,
-                "role": user_role,
-                "task_id": instance.id,
-                "task_title": instance.title,
-                "new_status": status_value,
-                "timestamp": _time.time(),
-            })
-
             return Response(serializer.data)
         return super().partial_update(request, *args, **kwargs)
 
@@ -126,6 +220,135 @@ class UnitViewSet(viewsets.ModelViewSet):
     queryset = Unit.objects.all()
     serializer_class = UnitSerializer
     permission_classes = [ReadOnlyOrAdminDispatcher]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+        # Mobile unit-selection: only units nobody currently holds, or that
+        # are offline (never claimed, or a previous holder disconnected).
+        if params.get("claimable") == "true":
+            qs = qs.filter(Q(app_user__isnull=True) | Q(is_online=False))
+        if params.get("type"):
+            qs = qs.filter(type=params["type"])
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        # Optional distance sort for "nearby units" on mobile unit selection.
+        lat = request.query_params.get("lat")
+        lng = request.query_params.get("lng")
+        if lat is not None and lng is not None and isinstance(response.data, list):
+            try:
+                lat, lng = float(lat), float(lng)
+                response.data.sort(
+                    key=lambda u: (u["location_lat"] - lat) ** 2 + (u["location_lng"] - lng) ** 2
+                )
+            except (TypeError, ValueError, KeyError):
+                pass
+        return response
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated])
+    def claim(self, request):
+        """
+        Attach the authenticated user to a Unit: marks it online and sets its
+        location from the device's current GPS. Accepts either an existing
+        unit `id` (the normal mobile-selection path) or `name`/`type` to
+        find-or-create one — reusing the exact same matching the war-room
+        dispatch bridge uses (_get_or_create_db_unit_for_routine_unit), so a
+        unit claimed this way lines up with what a dispatcher later
+        dispatches by name. See final changes/05_user_unit_claiming_and_live_sync.md.
+        """
+        data = request.data
+        try:
+            lat = float(data.get("location_lat"))
+            lng = float(data.get("location_lng"))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "location_lat and location_lng are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        unit_id = data.get("id")
+        if unit_id:
+            try:
+                unit = Unit.objects.get(pk=unit_id)
+            except (Unit.DoesNotExist, ValueError, TypeError):
+                return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            unit = _get_or_create_db_unit_for_routine_unit({
+                "name": data.get("name"),
+                "type": data.get("type"),
+            })
+            if not unit:
+                return Response(
+                    {"detail": "id, or name and a valid type, are required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        existing_owner = getattr(unit, "app_user", None)
+        if existing_owner and existing_owner.id != request.user.id and unit.is_online:
+            return Response(
+                {"detail": f"Unit is already claimed by {existing_owner.username}."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Release any different unit this user previously held.
+        previous_unit = getattr(request.user, "unit", None)
+        if previous_unit and previous_unit.id != unit.id:
+            previous_unit.is_online = False
+            previous_unit.save(update_fields=["is_online"])
+
+        request.user.unit = unit
+        request.user.save(update_fields=["unit"])
+
+        unit.location_lat = lat
+        unit.location_lng = lng
+        unit.is_online = True
+        unit.last_seen = timezone.now()
+        unit.availability_status = "AVAILABLE"
+        unit.save(update_fields=[
+            "location_lat", "location_lng", "is_online", "last_seen", "availability_status",
+        ])
+
+        IncidentEvent.objects.create(
+            event_type=IncidentEvent.EventType.ASSIGNMENT,
+            severity=IncidentEvent.Severity.INFO,
+            title=f"Unit '{unit.name}' claimed",
+            description=f"Claimed by {request.user.username} at [{lat}, {lng}].",
+            created_by=request.user.username,
+            actor_id=request.user.id,
+        )
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "unit_claimed",
+            **_actor_fields(request.user),
+            "unit_id": unit.id,
+            "unit_name": unit.name,
+            "location_lat": lat,
+            "location_lng": lng,
+        })
+
+        return Response(self.get_serializer(unit).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated])
+    def disconnect(self, request):
+        """Mobile logout (or app-initiated release): mark the caller's claimed unit offline."""
+        unit = getattr(request.user, "unit", None)
+        if not unit:
+            return Response({"detail": "No unit linked to user."}, status=status.HTTP_400_BAD_REQUEST)
+
+        unit.is_online = False
+        unit.last_seen = timezone.now()
+        unit.save(update_fields=["is_online", "last_seen"])
+
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "unit_disconnected",
+            **_actor_fields(request.user),
+            "unit_id": unit.id,
+            "unit_name": unit.name,
+        })
+        return Response({"status": "disconnected"})
 
 
 # Mock Data API Endpoints (for dashboard demo)
@@ -355,18 +578,50 @@ def register_push_token(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def unit_heartbeat(request):
-    """Update the linked `Unit` last-seen timestamp and mark it online."""
+    """
+    Update the linked `Unit` last-seen timestamp, mark it online, and — if
+    the mobile app included them — update its live GPS coordinates.
+    Called periodically (~every 20-30s) while the mobile app is active; see
+    mobile-app/utils/heartbeat.js and final changes/05_....md.
+    """
     user = request.user
     unit = getattr(user, "unit", None)
     if not unit:
         return Response({"detail": "No unit linked to user."}, status=status.HTTP_400_BAD_REQUEST)
 
+    update_fields = ["last_seen", "is_online", "availability_status"]
     unit.last_seen = timezone.now()
     unit.is_online = True
     # Keep existing availability field in sync
     unit.availability_status = "AVAILABLE"
-    unit.save(update_fields=["last_seen", "is_online", "availability_status"])
-    return Response({"ok": True})
+
+    location_lat = request.data.get("location_lat")
+    location_lng = request.data.get("location_lng")
+    has_location = False
+    if location_lat is not None and location_lng is not None:
+        try:
+            location_lat = float(location_lat)
+            location_lng = float(location_lng)
+            unit.location_lat = location_lat
+            unit.location_lng = location_lng
+            update_fields += ["location_lat", "location_lng"]
+            has_location = True
+        except (TypeError, ValueError):
+            pass  # heartbeat is still valid without a usable location
+
+    unit.save(update_fields=update_fields)
+
+    _broadcast_realtime({
+        "type": "user_action",
+        "action": "unit_location_update" if has_location else "unit_heartbeat",
+        **_actor_fields(user),
+        "unit_id": unit.id,
+        "unit_name": unit.name,
+        "is_online": unit.is_online,
+        "location_lat": unit.location_lat if has_location else None,
+        "location_lng": unit.location_lng if has_location else None,
+    })
+    return Response({"ok": True, "location_updated": has_location})
 
 
 @api_view(["POST"])
@@ -645,6 +900,8 @@ def field_incident_sector_update(request, sector_id):
     if "estimated_survivors" in request.data:
         sector["estimated_survivors"] = request.data["estimated_survivors"]
 
+    _push_field_sse({"type": "incident_update", "data": {"sector_update": {"index": sector_id, "sector": sector}}})
+
     return Response(sector)
 
 
@@ -673,6 +930,8 @@ def field_incident_task_group_update(request, task_group_id):
     if "notes" in request.data:
         task_group["notes"] = request.data["notes"]
 
+    _push_field_sse({"type": "incident_update", "data": {"task_group_update": {"index": task_group_id, "task_group": task_group}}})
+
     return Response(task_group)
 
 
@@ -693,6 +952,8 @@ def field_incident_casualty_update(request):
         major_incident["confirmed_deaths"] = request.data["confirmed_deaths"]
     if "displaced_persons" in request.data:
         major_incident["displaced_persons"] = request.data["displaced_persons"]
+
+    _push_field_sse({"type": "incident_update", "data": {"casualty_update": major_incident}})
 
     return Response(major_incident)
 
@@ -808,13 +1069,18 @@ def field_incident_updates_stream(request):
                     except queue.Empty:
                         break
 
-                # Simulate update every 2-4 seconds
-                if random.random() < 0.3:
-                    field_service = get_field_incident_service()
-                    data = _get_field_incident_data(None) or {}
-                    update = field_service.simulate_update(data)
-                    if update.get("status") != "no_change":
-                        yield f"data: {json.dumps({'type': 'incident_update', 'data': update})}\n\n"
+                # Auto-simulation disabled — this used to call simulate_update()
+                # on a timer and could silently advance task/sector status
+                # (e.g. to COMPLETED) with no incoming API request. Task and
+                # incident state now only change via explicit calls to
+                # /api/field/simulate/, /api/tasks/<id>/, etc.
+                # See "final changes/01_disable_simulation_engine.md".
+                # if random.random() < 0.3:
+                #     field_service = get_field_incident_service()
+                #     data = _get_field_incident_data(None) or {}
+                #     update = field_service.simulate_update(data)
+                #     if update.get("status") != "no_change":
+                #         yield f"data: {json.dumps({'type': 'incident_update', 'data': update})}\n\n"
 
                 # Heartbeat every 10 seconds
                 if time.time() - last_heartbeat > 10:
@@ -982,6 +1248,16 @@ def mobile_dispatch(request):
                 data={"incident_key": inc_key},
             )
 
+    _broadcast_realtime({
+        "type": "user_action",
+        "action": "unit_dispatched",
+        **_actor_fields(request.user),
+        "incident_key": inc_key,
+        "incident_title": incident_title,
+        "tasks_created": tasks_created,
+        "unit_count": len(units),
+    })
+
     return Response({"status": "ok", "tasks_created": tasks_created})
 
 
@@ -1017,6 +1293,15 @@ def mobile_cancel_dispatch(request):
         data={"cancelled": True, "mock_unit_id": mock_unit_id},
     )
 
+    if cancelled_count > 0:
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "dispatch_cancelled",
+            **_actor_fields(request.user),
+            "mock_unit_id": mock_unit_id,
+            "tasks_cancelled": cancelled_count,
+        })
+
     return Response({"status": "cancelled", "tasks_cancelled": cancelled_count})
 
 
@@ -1037,6 +1322,13 @@ def mobile_unit_status(request):
         return Response({"detail": "Invalid mock_unit_id."}, status=status.HTTP_400_BAD_REQUEST)
 
     _set_registry_status(mock_unit_id, new_status)
+    _broadcast_realtime({
+        "type": "user_action",
+        "action": "unit_status_update",
+        **_actor_fields(request.user),
+        "mock_unit_id": mock_unit_id,
+        "new_status": new_status,
+    })
     return Response({"status": "ok"})
 
 

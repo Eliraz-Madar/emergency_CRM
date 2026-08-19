@@ -242,7 +242,12 @@ const FieldIncidentDashboard = () => {
     };
   }, [mode, addIncidentEvent]);
 
-  // Timer - advance simulation or routine patrol every ~2.5 seconds
+  // Timer - advance the drill scenario every ~2.5 seconds.
+  // The ROUTINE-mode branch used to call tickRoutinePatrol(), randomly
+  // walking seeded demo units around the map with no real device connected.
+  // That branch is disabled; SIMULATION mode is kept — it's an
+  // operator-initiated, clearly-labeled training drill, not unsolicited
+  // demo movement. See final changes/04_disable_frontend_map_simulation.md.
   useEffect(() => {
     if (simulationTimerRef.current) {
       clearInterval(simulationTimerRef.current);
@@ -251,9 +256,8 @@ const FieldIncidentDashboard = () => {
     simulationTimerRef.current = setInterval(() => {
       if (mode === 'SIMULATION') {
         nextSimulationStep();
-      } else if (mode === 'ROUTINE') {
-        tickRoutinePatrol();
       }
+      // else if (mode === 'ROUTINE') { tickRoutinePatrol(); } — disabled
     }, 2500);
 
     return () => {
@@ -263,24 +267,26 @@ const FieldIncidentDashboard = () => {
     };
   }, [mode, nextSimulationStep, tickRoutinePatrol]);
 
-  // Movement simulation loop - runs every 100ms for smooth animation
-  // Uses ref to avoid dependency issues while allowing access to latest moveUnits
-  useEffect(() => {
-    if (movementTimerRef.current) {
-      clearInterval(movementTimerRef.current);
-    }
-
-    movementTimerRef.current = setInterval(() => {
-      const { moveUnits: getMoveUnits } = useFieldIncidentStore.getState();
-      getMoveUnits();
-    }, 500); // 500ms interval for realistic movement speed
-
-    return () => {
-      if (movementTimerRef.current) {
-        clearInterval(movementTimerRef.current);
-      }
-    };
-  }, []); // Empty dependency array - getState() gets latest function
+  // Movement simulation loop — DISABLED.
+  // This used to call moveUnits() every 500ms, interpolating unit markers
+  // along fake routes. Unit markers now render strictly at their last
+  // reported GPS coordinates. See
+  // final changes/04_disable_frontend_map_simulation.md.
+  //
+  // useEffect(() => {
+  //   if (movementTimerRef.current) {
+  //     clearInterval(movementTimerRef.current);
+  //   }
+  //   movementTimerRef.current = setInterval(() => {
+  //     const { moveUnits: getMoveUnits } = useFieldIncidentStore.getState();
+  //     getMoveUnits();
+  //   }, 500);
+  //   return () => {
+  //     if (movementTimerRef.current) {
+  //       clearInterval(movementTimerRef.current);
+  //     }
+  //   };
+  // }, []);
 
   // Handlers for simulation buttons
   const handleStartSimulation = () => {

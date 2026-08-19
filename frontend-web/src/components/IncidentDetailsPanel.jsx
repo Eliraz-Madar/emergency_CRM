@@ -4,6 +4,8 @@ import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+
 const getDistanceKm = (lat1, lon1, lat2, lon2) => {
   const R = 6371;
   if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Infinity;
@@ -24,9 +26,24 @@ const TYPE_META = {
 
 const TYPE_ORDER = ['POLICE', 'FIRE', 'MEDICAL'];
 
+// Real backend Unit.type is Police/Fire/EMS/HomeFront; this panel's
+// filter tabs and TYPE_META use the POLICE/FIRE/MEDICAL scheme already
+// established by the mobile/dispatch bridge's normalize_unit_type(). This
+// only affects local display/filtering — the original type string is what
+// gets sent to the dispatch bridge.
+const normalizeUnitType = (type) => {
+  const t = (type || '').toUpperCase();
+  if (t === 'EMS' || t === 'AMBULANCE' || t === 'MEDICAL') return 'MEDICAL';
+  if (t === 'FIRE') return 'FIRE';
+  if (t === 'POLICE') return 'POLICE';
+  return 'POLICE';
+};
+
 export function IncidentDetailsPanel() {
   const {
     incidents: dashboardIncidents,
+    onlineUnits,
+    upsertOnlineUnit,
     selectedIncidentId,
     setSelectedIncident,
     updateIncident,
@@ -40,8 +57,7 @@ export function IncidentDetailsPanel() {
   // מושכים את המידע החי מה-Store המבצעי
   const {
     incidents: fieldIncidents,
-    units,
-    dispatchUnitsToIncident,
+    units, // legacy seeded/demo roster — still used by the SIMULATION-mode drill
     cancelUnitDispatch,
     updateIncidentPriority,
     mode: fieldMode,
@@ -80,19 +96,21 @@ export function IncidentDetailsPanel() {
   const incidentLat = incident?.location_lat ?? 31.77;
   const incidentLng = incident?.location_lng ?? 35.22;
 
+  // Dispatch panel must only ever offer real, actively-online units — never
+  // the seeded demo roster. See
+  // final changes/05_user_unit_claiming_and_live_sync.md.
   const availableUnits = useMemo(() => {
-    const base = Array.isArray(units) ? units : [];
+    const base = Array.isArray(onlineUnits) ? onlineUnits : [];
     return base
-      .filter((u) => u.status === 'PATROL' || u.status === 'AVAILABLE')
+      .filter((u) => u.is_online === true && !u.assignedTo)
       .map((u) => ({
         ...u,
-        distance: Array.isArray(u.position) && u.position.length >= 2
-          ? getDistanceKm(u.position[0], u.position[1], incidentLat, incidentLng)
-          : Infinity,
+        type: normalizeUnitType(u.type),
+        distance: getDistanceKm(u.location_lat, u.location_lng, incidentLat, incidentLng),
       }))
       .filter((u) => u.distance !== Infinity)
       .sort((a, b) => a.distance - b.distance);
-  }, [units, incidentLat, incidentLng]);
+  }, [onlineUnits, incidentLat, incidentLng]);
 
   const filteredUnits = availableUnits.filter((u) => u.type === selectedType);
 
@@ -108,14 +126,46 @@ export function IncidentDetailsPanel() {
     setSelectedIncident && setSelectedIncident(null);
   };
 
+  // Dispatches real, currently-online units by mirroring into the DB as
+  // Tasks (mobile_dispatch), the same bridge the mobile app's claim flow
+  // reconciles with by name — see
+  // final changes/05_user_unit_claiming_and_live_sync.md. Deliberately does
+  // NOT go through fieldIncident.js's dispatchUnitsToIncident(), which
+  // drives the fake-roster route/movement animation task 04 removed —
+  // a real unit's marker moves on its own via its live GPS heartbeat.
   const handleDispatch = async () => {
     if (!incident || selectedUnitIds.length === 0) return;
 
-    await dispatchUnitsToIncident({
-      incidentId: incident.id,
-      unitIds: selectedUnitIds,
-      targetPosition: [incidentLat, incidentLng],
-    });
+    const unitsToDispatch = selectedUnitIds
+      .map((id) => (onlineUnits || []).find((u) => String(u.id) === String(id)))
+      .filter(Boolean);
+    if (unitsToDispatch.length === 0) return;
+
+    try {
+      await fetch(`${API_BASE_URL}/mobile/dispatch/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          incident_id: incident.id,
+          incident_title: incident.title || `Incident ${incident.id}`,
+          location_lat: incidentLat,
+          location_lng: incidentLng,
+          priority: incident.priority || 'HIGH',
+          units: unitsToDispatch.map((u) => ({
+            mock_unit_num: u.id,
+            name: u.name,
+            type: u.type,
+          })),
+        }),
+      });
+    } catch (_) {
+      // non-critical — the incident is still marked in-progress locally below
+    }
+
+    // Tag each dispatched unit so it disappears from the "available" picker
+    // and shows up in "Dispatched Units" — its marker keeps rendering at
+    // its own live GPS position, no fake route is drawn.
+    unitsToDispatch.forEach((u) => upsertOnlineUnit({ id: u.id, assignedTo: incident.id, status: 'EN_ROUTE' }));
 
     updateIncident(incident.id, { status: 'IN_PROGRESS' });
     setSelectedUnitIds([]);
@@ -126,6 +176,15 @@ export function IncidentDetailsPanel() {
     setFlashingIncident?.(incident.id);
     // Stop flashing after 4 seconds
     setTimeout(() => clearFlashingIncident?.(), 4000);
+  };
+
+  const handleCancelDispatch = (unit) => {
+    // cancelUnitDispatch already extracts a numeric id and fires
+    // POST /api/mobile/cancel-dispatch/ regardless of source (see
+    // store/fieldIncident.js) — it just no-ops on the fake roster arrays
+    // for a real unit's id. Clear the real-unit tag here too.
+    cancelUnitDispatch(unit.id, incident.id);
+    upsertOnlineUnit({ id: unit.id, assignedTo: null, status: null });
   };
 
   const renderUnitCard = (unit) => {
@@ -161,19 +220,32 @@ export function IncidentDetailsPanel() {
     );
   };
 
-  // Live dispatched units — read directly from the units store (reliable regardless of incident source)
+  // Live dispatched units for this incident: real online units tagged by
+  // handleDispatch above, plus the legacy fake-roster units (still used by
+  // the SIMULATION-mode drill). See
+  // final changes/05_user_unit_claiming_and_live_sync.md.
   const dispatchedUnits = useMemo(() => {
     if (!incident?.id) return [];
-    const liveUnits = Array.isArray(units) ? units : [];
-    return liveUnits
+    const real = (Array.isArray(onlineUnits) ? onlineUnits : [])
+      .filter((u) => String(u.assignedTo) === String(incident.id))
+      .map((u) => ({
+        id: u.id,
+        name: u.name || String(u.id),
+        type: normalizeUnitType(u.type),
+        status: u.status || 'EN_ROUTE',
+        isReal: true,
+      }));
+    const fake = (Array.isArray(units) ? units : [])
       .filter((u) => String(u.assignedTo) === String(incident.id))
       .map((u) => ({
         id: u.id,
         name: u.name || String(u.id),
         type: u.type || 'POLICE',
         status: u.status || 'EN_ROUTE',
+        isReal: false,
       }));
-  }, [incident?.id, units]);
+    return [...real, ...fake];
+  }, [incident?.id, onlineUnits, units]);
 
   const headerIcon = (() => {
     const type = (incident?.incident_type || '').toUpperCase();
@@ -340,7 +412,7 @@ export function IncidentDetailsPanel() {
                       </span>
                       <button
                         title="Cancel dispatch"
-                        onClick={(e) => { e.stopPropagation(); cancelUnitDispatch(unit.id, incident.id); }}
+                        onClick={(e) => { e.stopPropagation(); handleCancelDispatch(unit); }}
                         style={{
                           background: 'transparent',
                           border: '1px solid #ef4444',

@@ -15,7 +15,6 @@ export function MapView({
   activeFilter = 'ALL',
   simulationIncident = null,
   simulationUnits = null,
-  routineUnits = null,
   isSimulation = false,
   selectedUnitIds = [],
   fieldCommands = [],
@@ -169,6 +168,7 @@ export function MapView({
     selectedIncidentId,
     setSelectedIncident,
     incidents: dashboardIncidents,
+    onlineUnits: dashboardOnlineUnits,
     selectedUnitId,
     setSelectedUnit,
     zoomToIncidentId,
@@ -178,8 +178,23 @@ export function MapView({
 
   // Subscribe directly to the field incident store for strict reactivity
   const fieldIncidents = useFieldIncidentStore((s) => s.incidents || []);
-  const units = useFieldIncidentStore((s) => s.units || []);
-  const storeRoutineUnits = useFieldIncidentStore((s) => s.routineUnits || []);
+
+  // Real, DB-backed units only, filtered to actively-connected devices.
+  // dashboardOnlineUnits comes from GET /api/units/ (real Unit rows, kept
+  // fresh by SSE unit_claimed/unit_location_update/unit_disconnected
+  // pushes) — never the seeded mock/demo roster. See
+  // final changes/04_disable_frontend_map_simulation.md and
+  // final changes/05_user_unit_claiming_and_live_sync.md.
+  const onlineUnits = React.useMemo(
+    () => (Array.isArray(dashboardOnlineUnits) ? dashboardOnlineUnits.filter((u) => u.is_online === true) : []),
+    [dashboardOnlineUnits]
+  );
+  // Single source of truth for "what units does this map render": the active
+  // simulation roster during a drill, real online units otherwise.
+  const activeUnits = React.useMemo(
+    () => (isSimulation ? (simulationUnits || []) : onlineUnits),
+    [isSimulation, simulationUnits, onlineUnits]
+  );
 
   // Combine incidents for display; in simulation show only the active simulation incident
   const incidents = React.useMemo(() => {
@@ -310,12 +325,6 @@ export function MapView({
     const map = mapInstanceRef.current;
     if (!map) return;
 
-    // Get fresh data from field incident store to ensure we have latest positions
-    // This is critical for EN_ROUTE units that may have been updated by moveUnits
-    const storeState = useFieldIncidentStore.getState();
-    const storeUnits = storeState.units || [];
-    const storeRoutineUnits = storeState.routineUnits || [];
-
     // Save which popups are currently open before clearing markers
     const openPopups = new Set();
     Object.entries(markersRef.current).forEach(([key, marker]) => {
@@ -332,9 +341,6 @@ export function MapView({
       }
     });
 
-    const activeUnits = isSimulation
-      ? simulationUnits
-      : (storeRoutineUnits.length > 0 ? storeRoutineUnits : storeUnits);
     // Simulation mode now relies on incidents array containing only the simulated incident
 
     // ROUTINE MODE: Add incident markers (with filtering)
@@ -472,7 +478,7 @@ export function MapView({
       markersRef.current[`field-command-${field.id}`] = marker;
     });
 
-    const renderedUnits = activeUnits && Array.isArray(activeUnits) ? activeUnits : units;
+    const renderedUnits = Array.isArray(activeUnits) ? activeUnits : [];
 
     const selectedUnitKey = selectedUnitId === null || selectedUnitId === undefined
       ? null
@@ -594,17 +600,14 @@ export function MapView({
         marker.openPopup();
       }
     });
-  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId]);
+  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, activeUnits]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!map || !units) return;
+    if (!map) return;
 
-    const activeUnits = isSimulation
-      ? simulationUnits
-      : (storeRoutineUnits.length > 0 ? storeRoutineUnits : units);
-    const renderedUnits = activeUnits && Array.isArray(activeUnits) ? activeUnits : units;
+    const renderedUnits = Array.isArray(activeUnits) ? activeUnits : [];
 
     // Update positions AND icons (to preserve selection circles)
     renderedUnits.forEach((unit, idx) => {
@@ -675,7 +678,7 @@ export function MapView({
         prevStatusRef.current.set(unit.id, unit.status);
       }
     });
-  }, [units, storeRoutineUnits, isSimulation, simulationUnits, selectedUnitIds]);
+  }, [activeUnits, selectedUnitIds]);
 
   // Fly to selected incident when changed from list selection
   useEffect(() => {
@@ -701,9 +704,6 @@ export function MapView({
     const map = mapInstanceRef.current;
     if (!map) return;
 
-    const activeUnits = isSimulation
-      ? (simulationUnits || [])
-      : (storeRoutineUnits.length > 0 ? storeRoutineUnits : units);
     const renderedUnits = Array.isArray(activeUnits) ? activeUnits : [];
 
     const enRouteUnits = renderedUnits.filter(u => u.status === 'EN_ROUTE');
@@ -739,7 +739,7 @@ export function MapView({
 
     const bounds = L.latLngBounds(points);
     map.fitBounds(bounds, { padding: [80, 80], maxZoom: 14, animate: true });
-  }, [units, storeRoutineUnits, isSimulation, simulationUnits, incidents]);
+  }, [activeUnits, incidents]);
 
   return (
     <div className="map-container">
@@ -784,7 +784,7 @@ export function MapView({
           );
         })}
 
-        {units.map((unit, idx) => {
+        {activeUnits.map((unit, idx) => {
           const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
           const unitLat = hasPosition ? unit.position[0] : unit.latitude;
           const unitLng = hasPosition ? unit.position[1] : unit.longitude;

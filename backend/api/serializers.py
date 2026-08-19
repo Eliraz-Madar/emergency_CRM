@@ -17,6 +17,17 @@ class TaskSerializer(serializers.ModelSerializer):
             "assigned_unit", "mock_unit_id", "title", "status", "timestamp",
         ]
 
+    def validate_status(self, value):
+        instance = self.instance
+        if instance is None or value == instance.status:
+            return value
+        request = self.context.get("request")
+        role = getattr(getattr(request, "user", None), "role", "")
+        allowed, error = instance.can_transition_to(value, role)
+        if not allowed:
+            raise serializers.ValidationError(error)
+        return value
+
 
 class IncidentSerializer(serializers.ModelSerializer):
     tasks = TaskSerializer(many=True, read_only=True)
@@ -35,8 +46,30 @@ class IncidentSerializer(serializers.ModelSerializer):
             "tasks",
         ]
 
+    def validate_status(self, value):
+        instance = self.instance
+        if instance is None:
+            # Incident creation -> OPEN, always. Ignore/override anything the client sent.
+            return Incident.Status.OPEN
+        if value == instance.status:
+            return value
+        request = self.context.get("request")
+        role = getattr(getattr(request, "user", None), "role", "")
+        allowed, error = instance.can_transition_to(value, role)
+        if not allowed:
+            raise serializers.ValidationError(error)
+        return value
+
 
 class UnitSerializer(serializers.ModelSerializer):
+    # Staleness-aware: True only if explicitly claimed/heartbeating AND the
+    # last heartbeat is recent (Unit.HEARTBEAT_STALE_AFTER). This lets a unit
+    # that stopped sending heartbeats stop appearing "online" to clients
+    # without any background job writing to the DB — see
+    # final changes/05_user_unit_claiming_and_live_sync.md.
+    is_online = serializers.SerializerMethodField()
+    assigned_username = serializers.SerializerMethodField()
+
     class Meta:
         model = Unit
         fields = [
@@ -46,7 +79,17 @@ class UnitSerializer(serializers.ModelSerializer):
             "location_lat",
             "location_lng",
             "availability_status",
+            "is_online",
+            "last_seen",
+            "assigned_username",
         ]
+
+    def get_is_online(self, obj):
+        return obj.is_actively_online
+
+    def get_assigned_username(self, obj):
+        user = getattr(obj, "app_user", None)
+        return user.username if user else None
 
 
 class ReportMediaSerializer(serializers.ModelSerializer):
@@ -77,6 +120,7 @@ class IncidentEventSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "created_by",
+            "actor_id",
             "created_at",
             "media",
         ]

@@ -60,6 +60,15 @@ export const getUnits = async (fieldId = null) => {
   return res.data;
 };
 
+// Real, DB-backed units (the actual Unit model) — carries a live, staleness
+// aware `is_online`. Used for the map/dispatch panel, which must only ever
+// show real, actively-connected units — never the seeded mock/demo roster.
+// See final changes/05_user_unit_claiming_and_live_sync.md.
+export const getRealUnits = async () => {
+  const res = await api.get("/units/");
+  return res.data;
+};
+
 // Mock Data API - Events
 export const getEvents = async (limit = 50, incidentId = null) => {
   const params = { limit };
