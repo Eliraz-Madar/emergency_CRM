@@ -26,9 +26,19 @@ def _push_field_sse(event: dict):
             except Exception:
                 pass
 
-from .models import Incident, Task, Unit, IncidentEvent, ReportMedia, PushToken
-from .serializers import IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer
+from .models import (
+    Incident, Task, Unit, IncidentEvent, ReportMedia, PushToken,
+    FieldCommand,
+)
+from .serializers import (
+    IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer,
+    FieldCommandSerializer,
+)
 from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission
+# Kept solely because field_incident_detail() below (part of the training
+# simulation, out of scope for the mock->real migration) still uses it for an
+# optional cosmetic location lookup. Every dashboard-facing mock_* endpoint
+# that used to depend on this service has been removed.
 from simulated.mock_data import get_mock_service
 from simulated.realtime import get_realtime_service
 from simulated.field_incident_data import get_field_incident_service
@@ -141,6 +151,49 @@ class IncidentViewSet(viewsets.ModelViewSet):
                 "old_status": old_status,
                 "new_status": instance.status,
             })
+
+    @action(detail=True, methods=["post"], url_path="assign-unit")
+    def assign_unit(self, request, pk=None):
+        """Assign a real Unit to this incident by creating a Task — the
+        dashboard's real equivalent of the old mock_incident_assign."""
+        incident = self.get_object()
+        unit_id = request.data.get("unit_id")
+        if not unit_id:
+            return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            unit = Unit.objects.get(pk=unit_id)
+        except (Unit.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        task, created = Task.objects.get_or_create(
+            incident=incident, assigned_unit=unit,
+            defaults={"title": f"Respond: {incident.title}", "status": Task.Status.PENDING},
+        )
+        actor = self.request.user
+        if created:
+            _log_status_change(
+                incident=incident, actor=actor,
+                title=f"Unit '{unit.name}' assigned",
+                description=f"Assigned by {getattr(actor, 'username', '') or 'command center'}.",
+            )
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "incident_unit_assigned",
+                **_actor_fields(actor),
+                "incident_id": incident.id,
+                "unit_id": unit.id,
+            })
+        return Response(self.get_serializer(incident).data)
+
+    @action(detail=True, methods=["post"], url_path="note")
+    def add_note(self, request, pk=None):
+        incident = self.get_object()
+        note = request.data.get("note")
+        if not note:
+            return Response({"detail": "note is required."}, status=status.HTTP_400_BAD_REQUEST)
+        actor = self.request.user
+        _log_status_change(incident=incident, actor=actor, title="Note added", description=note)
+        return Response(self.get_serializer(incident).data)
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -351,111 +404,103 @@ class UnitViewSet(viewsets.ModelViewSet):
         return Response({"status": "disconnected"})
 
 
-# Mock Data API Endpoints (for dashboard demo)
-@api_view(["GET"])
-def mock_incidents(request):
-    """Get mock incidents for dashboard."""
-    field_id = request.query_params.get("fieldId")
-    mock_service = get_mock_service()
-    return Response(mock_service.get_incidents(field_id=field_id))
+class FieldCommandViewSet(viewsets.ModelViewSet):
+    """
+    Real, DB-backed Field Command Post feature — replaces
+    MockDataService.field_commands / the mock_field_*/field_* endpoints
+    below. NOT the Field Incident Command Dashboard training simulation
+    (see simulated/field_incident_data.py), which this does not touch.
+    """
+    queryset = FieldCommand.objects.all().order_by("-created_at")
+    serializer_class = FieldCommandSerializer
+    permission_classes = [ReadOnlyOrAdminDispatcher]
+    lookup_field = "field_key"
+    lookup_value_regex = "[^/]+"
+
+    @action(detail=True, methods=["post"], url_path="assign-unit")
+    def assign_unit(self, request, field_key=None):
+        field_command = self.get_object()
+        unit_id = request.data.get("unit_id")
+        if not unit_id:
+            return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            unit = Unit.objects.get(pk=unit_id)
+        except (Unit.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
+        unit.field_command = field_command
+        unit.save(update_fields=["field_command"])
+        return Response(self.get_serializer(field_command).data)
+
+    @action(detail=True, methods=["post"], url_path="assign-incident")
+    def assign_incident(self, request, field_key=None):
+        """Link a regular Incident to this Field Command Post (operator-initiated)."""
+        field_command = self.get_object()
+        incident_id = request.data.get("incident_id")
+        if not incident_id:
+            return Response({"detail": "incident_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            incident = Incident.objects.get(pk=incident_id)
+        except (Incident.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Incident not found."}, status=status.HTTP_404_NOT_FOUND)
+        incident.field_command = field_command
+        incident.save(update_fields=["field_command"])
+        return Response(self.get_serializer(field_command).data)
+
+    @action(detail=True, methods=["patch"], url_path="metrics")
+    def metrics(self, request, field_key=None):
+        field_command = self.get_object()
+        serializer = self.get_serializer(field_command, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="close")
+    def close(self, request, field_key=None):
+        field_command = self.get_object()
+        data = {**request.data, "status": FieldCommand.Status.CLOSED}
+        serializer = self.get_serializer(field_command, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+_SEVERITY_TO_LEVEL = {"INFO": "info", "WARNING": "warn", "CRITICAL": "error"}
 
 
 @api_view(["GET"])
-def mock_units(request):
-    """Get mock units for dashboard."""
-    field_id = request.query_params.get("fieldId")
-    mock_service = get_mock_service()
-    return Response(mock_service.get_units(field_id=field_id))
-
-
-@api_view(["GET"])
-def mock_events(request):
-    """Get mock event log for dashboard. Supports ?incident_id=<id> filtering."""
+def incident_events(request):
+    """
+    Real event feed for the regional dashboard — replaces mock_events.
+    Backed by IncidentEvent rows already written by IncidentViewSet/UnitViewSet
+    for real incidents. Deliberately excludes rows with incident=None, which is
+    how the field-incident training simulation's add-event endpoint persists
+    its own timeline entries (see field_incident_add_event) — this keeps the
+    two systems' event streams from mixing.
+    """
     limit = request.query_params.get("limit", 50)
-    incident_id_param = request.query_params.get("incident_id", None)
+    incident_id_param = request.query_params.get("incident_id")
     try:
         limit = int(limit)
-    except ValueError:
+    except (TypeError, ValueError):
         limit = 50
-    mock_service = get_mock_service()
-    events = mock_service.get_events(limit=limit)
+
+    qs = IncidentEvent.objects.filter(
+        incident__isnull=False).order_by("-created_at")
     if incident_id_param:
-        try:
-            incident_id_int = int(incident_id_param)
-            events = [
-                e for e in events
-                if e.get("entity_type") == "incident"
-                and e.get("entity_id") == incident_id_int
-            ]
-        except (ValueError, TypeError):
-            pass
+        qs = qs.filter(incident_id=incident_id_param)
+
+    events = [
+        {
+            "id": e.id,
+            "timestamp": e.created_at.isoformat(),
+            "entity_type": "incident",
+            "entity_id": e.incident_id,
+            "message": e.title,
+            "level": _SEVERITY_TO_LEVEL.get(e.severity, "info"),
+        }
+        for e in qs[:limit]
+    ]
     return Response(events)
-
-
-@api_view(["GET"])
-def mock_incident_detail(request, incident_id):
-    """Get specific mock incident."""
-    mock_service = get_mock_service()
-    incident = mock_service.get_incident(int(incident_id))
-    if not incident:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(incident)
-
-
-@api_view(["PATCH"])
-def mock_incident_status(request, incident_id):
-    """Update mock incident status."""
-    new_status = request.data.get("status")
-    if not new_status:
-        return Response({"detail": "status is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    incident = mock_service.update_incident_status(
-        int(incident_id), new_status)
-    if not incident:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(incident)
-
-
-@api_view(["PATCH"])
-def mock_incident_priority(request, incident_id):
-    """Update mock incident priority."""
-    new_priority = request.data.get("priority")
-    if not new_priority:
-        return Response({"detail": "priority is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    incident = mock_service.update_incident_priority(
-        int(incident_id), new_priority)
-    if not incident:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(incident)
-
-
-@api_view(["POST"])
-def mock_incident_assign(request, incident_id):
-    """Assign unit to incident and mirror to real DB for the mobile app."""
-    unit_id = request.data.get("unit_id")
-    if not unit_id:
-        return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    incident = mock_service.assign_unit(int(incident_id), int(unit_id))
-    if not incident:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    mock_unit = mock_service.units.get(int(unit_id))
-    _sync_dispatch_to_db(incident, mock_unit)
-
-    return Response(incident)
-
-
-# Maps mock unit types → canonical DB unit types
-_MOCK_TYPE_TO_DB_TYPE = {
-    "Police":    "Police",
-    "Fire":      "Fire",
-    "Ambulance": "EMS",
-}
 
 
 def _send_expo_push(tokens, title, body, data=None):
@@ -508,57 +553,6 @@ def _get_or_create_db_unit_for_routine_unit(unit_payload: dict):
         db_unit.type = db_unit_type
         db_unit.save(update_fields=["type"])
     return db_unit
-
-
-def _sync_dispatch_to_db(mock_incident: dict, mock_unit: dict) -> None:
-    """Mirror a dashboard dispatch as a Task in the real DB and notify the field device."""
-    if not mock_unit:
-        return
-
-    try:
-        db_unit = _get_or_create_db_unit_for_routine_unit({
-            "name": mock_unit.get("name") or f"Unit {mock_unit.get('id')}",
-            "type": mock_unit.get("type"),
-        })
-        if not db_unit:
-            return
-
-        db_incident, _ = Incident.objects.update_or_create(
-            mock_incident_id=mock_incident["id"],
-            defaults={
-                "title":        mock_incident.get("title", "Incident"),
-                "description":  mock_incident.get("description", ""),
-                "location_lat": mock_incident["location_lat"],
-                "location_lng": mock_incident["location_lng"],
-                "priority":     mock_incident.get("priority", "LOW"),
-                "status":       "IN_PROGRESS",
-            },
-        )
-
-        _, created = Task.objects.get_or_create(
-            incident=db_incident,
-            mock_unit_id=mock_unit["id"],
-            defaults={
-                "assigned_unit": db_unit,
-                "title":         f"Respond: {mock_incident.get('title', 'Incident')}",
-                "status":        "PENDING",
-            },
-        )
-
-        if created:
-            tokens = list(
-                PushToken.objects.filter(mock_unit_id=mock_unit["id"])
-                .values_list("token", flat=True)
-            )
-            _send_expo_push(
-                tokens,
-                title="New Dispatch",
-                body=f"{mock_incident.get('title', 'Incident')} — respond immediately",
-                data={"mock_incident_id": mock_incident["id"]},
-            )
-
-    except Exception:
-        pass  # never crash the dispatch response over a sync failure
 
 
 @api_view(["POST"])
@@ -624,122 +618,13 @@ def unit_heartbeat(request):
     return Response({"ok": True, "location_updated": has_location})
 
 
-@api_view(["POST"])
-def mock_incident_note(request, incident_id):
-    """Add note to incident."""
-    note = request.data.get("note")
-    if not note:
-        return Response({"detail": "note is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    incident = mock_service.add_incident_note(int(incident_id), note)
-    if not incident:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(incident)
-
-
-@api_view(["GET"])
-def mock_simulate_update(request):
-    """Simulate a random update (for demo)."""
-    mock_service = get_mock_service()
-    update = mock_service.simulate_update()
-    return Response(update or {})
-
-
-@api_view(["GET"])
-def mock_fields(request):
-    """Get all field command metadata."""
-    mock_service = get_mock_service()
-    return Response(mock_service.get_fields())
-
-
-@api_view(["GET"])
-def mock_field_detail(request, field_id):
-    """Get field command metadata including assigned incidents and units."""
-    mock_service = get_mock_service()
-    summary = mock_service.get_field_summary(field_id)
-    if not summary:
-        # Field was created in a previous server session (persisted in the browser).
-        # Reconstruct it in memory using any available field-incident location data.
-        field_incident = _get_field_incident_data(field_id)
-        lat = lng = None
-        if field_incident:
-            mi = field_incident.get("major_incident", {})
-            lat = mi.get("location_lat")
-            lng = mi.get("location_lng")
-        mock_service.create_field_command({
-            "id": field_id,
-            "name": f"Field Command {field_id}",
-            "location_lat": lat,
-            "location_lng": lng,
-        })
-        summary = mock_service.get_field_summary(field_id)
-    return Response(summary)
-
-
-@api_view(["PATCH", "POST"])
-def mock_field_assign_unit(request, field_id):
-    """Assign a unit to a field command."""
-    unit_id = request.data.get("unit_id")
-    if not unit_id:
-        return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    unit = mock_service.assign_unit_to_field(int(unit_id), field_id)
-    if not unit:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(unit)
-
-
-@api_view(["POST"])
-def field_create(request):
-    """Create a new field command from war-room map."""
-    payload = request.data or {}
-    location_lat = payload.get("location_lat")
-    location_lng = payload.get("location_lng")
-    if location_lat is None or location_lng is None:
-        return Response({"detail": "location_lat and location_lng are required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    created = mock_service.create_field_command(payload)
-    return Response(created, status=status.HTTP_201_CREATED)
-
-
-@api_view(["PATCH"])
-def field_update_metrics(request):
-    """Update field command operational metrics from field side."""
-    payload = request.data or {}
-    field_id = payload.get("field_id") or request.query_params.get("fieldId")
-    if not field_id:
-        return Response({"detail": "field_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    updated = mock_service.update_field_metrics(field_id, payload)
-    if not updated:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(updated)
-
-
-@api_view(["POST"])
-def field_close(request):
-    """Close an active field command and release assigned resources."""
-    payload = request.data or {}
-    field_id = payload.get("field_id") or request.query_params.get("fieldId")
-    if not field_id:
-        return Response({"detail": "field_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    mock_service = get_mock_service()
-    result = mock_service.close_field_command(field_id)
-    if not result:
-        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    return Response({"status": "closed", "field_id": field_id})
-
-
-# Server-Sent Events endpoint for real-time updates
-def mock_updates_stream(request):
+# Server-Sent Events endpoint for real-time updates. NOT mock-specific
+# despite its old name/URL — relays get_realtime_service() broadcasts, which
+# every real viewset (Incident/Unit/Task) already pushes to via
+# _broadcast_realtime(). Kept (and moved out from under /mock/) even though
+# the rest of the mock endpoints were removed.
+def updates_stream(request):
     """Stream real-time updates using Server-Sent Events."""
-    mock_service = get_mock_service()
     realtime_service = get_realtime_service()
 
     def event_generator():

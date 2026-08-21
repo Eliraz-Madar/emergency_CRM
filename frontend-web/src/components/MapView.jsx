@@ -1,9 +1,23 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle } from 'react-leaflet';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
+
+function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return Infinity;
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
 
 /**
  * Map View Component - displays incidents and units on map
@@ -20,7 +34,9 @@ export function MapView({
   fieldCommands = [],
   onFieldCommandSelect = null,
   selectedFieldCommandId = null,
-  onMapCreateFieldCommand = null
+  onMapCreateFieldCommand = null,
+  onMapReportIncident = null,
+  onMapDispatchForce = null,
 }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -29,10 +45,106 @@ export function MapView({
   const arrivalAnnouncedRef = useRef(new Set());
   const prevEnRouteRef = useRef(new Set());
   const onMapCreateFieldCommandRef = useRef(onMapCreateFieldCommand);
+  const onMapReportIncidentRef = useRef(onMapReportIncident);
+  const onMapDispatchForceRef = useRef(onMapDispatchForce);
 
   useEffect(() => {
     onMapCreateFieldCommandRef.current = onMapCreateFieldCommand;
   }, [onMapCreateFieldCommand]);
+
+  useEffect(() => {
+    onMapReportIncidentRef.current = onMapReportIncident;
+  }, [onMapReportIncident]);
+
+  useEffect(() => {
+    onMapDispatchForceRef.current = onMapDispatchForce;
+  }, [onMapDispatchForce]);
+
+  // Right-click dropdown menu state: { lat, lng, x, y } | null
+  const [contextMenu, setContextMenu] = useState(null);
+  // Which action modal is open: null | 'INCIDENT' | 'FIELD_HQ' | 'DISPATCH'
+  const [activeModal, setActiveModal] = useState(null);
+  const [selectedPoint, setSelectedPoint] = useState(null);
+
+  const [incidentForm, setIncidentForm] = useState({
+    type: 'FIRE',
+    customType: '',
+    title: '',
+    priority: 'HIGH',
+    description: '',
+  });
+
+  const [fieldHqForm, setFieldHqForm] = useState({
+    name: '',
+    incidentType: 'MASS_CASUALTY',
+    activeForcesNotes: '',
+    status: 'Dispatching',
+  });
+
+  const [dispatchAgency, setDispatchAgency] = useState('POLICE');
+  const [dispatchCustomAgency, setDispatchCustomAgency] = useState('');
+  const [dispatchUnitId, setDispatchUnitId] = useState('');
+
+  const handleCloseContextMenu = useCallback(() => setContextMenu(null), []);
+
+  const handleCloseModal = useCallback(() => {
+    setActiveModal(null);
+    setSelectedPoint(null);
+    setIncidentForm({ type: 'FIRE', customType: '', title: '', priority: 'HIGH', description: '' });
+    setFieldHqForm({ name: '', incidentType: 'MASS_CASUALTY', activeForcesNotes: '', status: 'Dispatching' });
+    setDispatchAgency('POLICE');
+    setDispatchCustomAgency('');
+    setDispatchUnitId('');
+  }, []);
+
+  const handleSelectAction = useCallback((actionType) => {
+    if (!contextMenu) return;
+    setSelectedPoint({ lat: contextMenu.lat, lng: contextMenu.lng });
+    setActiveModal(actionType);
+    setContextMenu(null);
+  }, [contextMenu]);
+
+  const handleCreateIncidentSubmit = useCallback((e) => {
+    e.preventDefault();
+    if (!selectedPoint) return;
+    const finalType = incidentForm.type === 'OTHER' ? (incidentForm.customType || 'OTHER') : incidentForm.type;
+    onMapReportIncidentRef.current?.({
+      lat: selectedPoint.lat,
+      lng: selectedPoint.lng,
+      type: finalType,
+      title: incidentForm.title || finalType,
+      priority: incidentForm.priority,
+      description: incidentForm.description,
+    });
+    handleCloseModal();
+  }, [selectedPoint, incidentForm, handleCloseModal]);
+
+  const handleCreateFieldHqSubmit = useCallback((e) => {
+    e.preventDefault();
+    if (!selectedPoint) return;
+    onMapCreateFieldCommandRef.current?.({
+      lat: selectedPoint.lat,
+      lng: selectedPoint.lng,
+      name: fieldHqForm.name,
+      incidentType: fieldHqForm.incidentType,
+      activeForcesNotes: fieldHqForm.activeForcesNotes,
+      status: fieldHqForm.status,
+    });
+    handleCloseModal();
+  }, [selectedPoint, fieldHqForm, handleCloseModal]);
+
+  const handleDispatchSubmit = useCallback((e) => {
+    e.preventDefault();
+    if (!selectedPoint || !dispatchUnitId) return;
+    const agency = dispatchAgency === 'OTHER' ? (dispatchCustomAgency || 'OTHER') : dispatchAgency;
+    onMapDispatchForceRef.current?.({
+      lat: selectedPoint.lat,
+      lng: selectedPoint.lng,
+      agency,
+      unitId: dispatchUnitId,
+    });
+    handleCloseModal();
+  }, [selectedPoint, dispatchAgency, dispatchCustomAgency, dispatchUnitId, handleCloseModal]);
 
   const hasAssignedUnits = (incident) => {
     const assignedUnits = Array.isArray(incident?.assignedUnits)
@@ -234,22 +346,45 @@ export function MapView({
       maxZoom: 19,
     }).addTo(map);
 
-    map.on('click', (event) => {
-      if (onMapCreateFieldCommandRef.current && event?.latlng) {
-        onMapCreateFieldCommandRef.current({
-          lat: event.latlng.lat,
-          lng: event.latlng.lng,
-        });
-      }
+    map.on('click', () => {
+      // Left click is movement/selection only — it must never create anything.
+      // Marker-level click handlers (select incident, select field command)
+      // still work as before; this just closes any open popup/menu.
       if (map && map.closePopup) {
         map.closePopup();
       }
+      setContextMenu(null);
     });
+
+    map.on('contextmenu', (event) => {
+      // Right click opens the dedicated operator action menu instead of the
+      // browser's native context menu.
+      if (event?.originalEvent) {
+        event.originalEvent.preventDefault();
+        event.originalEvent.stopPropagation();
+      }
+      if (event?.latlng) {
+        setContextMenu({
+          lat: event.latlng.lat,
+          lng: event.latlng.lng,
+          x: event.containerPoint.x,
+          y: event.containerPoint.y,
+        });
+      }
+    });
+
+    // Belt-and-suspenders: Leaflet is supposed to call preventDefault
+    // internally whenever a 'contextmenu' listener is registered, but this
+    // has not been reliable across versions/timing — force it directly on
+    // the container so the OS/browser's own right-click menu never shows.
+    const suppressNativeMenu = (e) => e.preventDefault();
+    map.getContainer().addEventListener('contextmenu', suppressNativeMenu);
 
     mapInstanceRef.current = map;
 
     return () => {
       if (mapInstanceRef.current) {
+        mapInstanceRef.current.getContainer().removeEventListener('contextmenu', suppressNativeMenu);
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
       }
@@ -741,6 +876,30 @@ export function MapView({
     map.fitBounds(bounds, { padding: [80, 80], maxZoom: 14, animate: true });
   }, [activeUnits, incidents]);
 
+  // Units eligible for dispatch: matching agency, not already committed
+  // (EN_ROUTE / ON_SCENE), sorted nearest-first to the right-clicked point.
+  const sortedAvailableUnits = (() => {
+    if (!selectedPoint) return [];
+    const agency = dispatchAgency === 'OTHER' ? null : dispatchAgency;
+    const pool = (Array.isArray(activeUnits) ? activeUnits : []).filter((unit) => {
+      const status = (unit.status || '').toUpperCase();
+      if (status === 'EN_ROUTE' || status === 'ON_SCENE') return false;
+      if (agency && (unit.type || '').toUpperCase() !== agency) return false;
+      return true;
+    });
+    return pool
+      .map((unit) => {
+        const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
+        const uLat = hasPosition ? unit.position[0] : (unit.latitude ?? unit.location_lat);
+        const uLng = hasPosition ? unit.position[1] : (unit.longitude ?? unit.location_lng);
+        return {
+          ...unit,
+          distanceKm: calculateDistanceKm(selectedPoint.lat, selectedPoint.lng, uLat, uLng),
+        };
+      })
+      .sort((a, b) => a.distanceKm - b.distanceKm);
+  })();
+
   return (
     <div className="map-container">
       {/* React-leaflet render to force reactive marker updates */}
@@ -823,6 +982,318 @@ export function MapView({
           <span>Offline</span>
         </div>
       </div>
+
+      {/* Right-click operator action menu */}
+      {contextMenu && (
+        <>
+          <div
+            onClick={handleCloseContextMenu}
+            style={{ position: 'absolute', inset: 0, zIndex: 998 }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              top: contextMenu.y,
+              left: contextMenu.x,
+              zIndex: 999,
+              background: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: '8px',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+              minWidth: '230px',
+              overflow: 'hidden',
+              color: '#e2e8f0',
+              fontSize: '0.875rem',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => handleSelectAction('INCIDENT')}
+              style={menuItemStyle}
+            >
+              🚨 Report Standard Incident
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectAction('FIELD_HQ')}
+              style={menuItemStyle}
+            >
+              🏢 Open Field Command Post
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectAction('DISPATCH')}
+              style={{ ...menuItemStyle, borderBottom: 'none' }}
+            >
+              ⚡ Dispatch Force
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Action modals */}
+      {activeModal && (
+        <div
+          onClick={handleCloseModal}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0,0,0,0.55)',
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#0f172a',
+              border: '1px solid #334155',
+              borderRadius: '10px',
+              padding: '20px',
+              width: '360px',
+              maxWidth: '90%',
+              color: '#e2e8f0',
+            }}
+          >
+            {activeModal === 'INCIDENT' && (
+              <form onSubmit={handleCreateIncidentSubmit}>
+                <h3 style={{ margin: '0 0 12px 0', color: '#38bdf8' }}>🚨 Report Standard Incident</h3>
+                <label style={labelStyle}>Incident Type</label>
+                <select
+                  value={incidentForm.type}
+                  onChange={(e) => setIncidentForm({ ...incidentForm, type: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="FIRE">🔥 Fire</option>
+                  <option value="THEFT">🦹 Theft / Break-in</option>
+                  <option value="TRAFFIC_ACCIDENT">🚗 Traffic Accident</option>
+                  <option value="MEDICAL">🚑 Medical Emergency</option>
+                  <option value="OTHER">📝 Other (Specify)</option>
+                </select>
+
+                {incidentForm.type === 'OTHER' && (
+                  <>
+                    <label style={labelStyle}>Specify Type</label>
+                    <input
+                      type="text"
+                      placeholder="Specify type..."
+                      value={incidentForm.customType}
+                      onChange={(e) => setIncidentForm({ ...incidentForm, customType: e.target.value })}
+                      style={inputStyle}
+                      required
+                    />
+                  </>
+                )}
+
+                <label style={labelStyle}>Title</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Structure Fire on Main St."
+                  value={incidentForm.title}
+                  onChange={(e) => setIncidentForm({ ...incidentForm, title: e.target.value })}
+                  style={inputStyle}
+                  required
+                />
+
+                <label style={labelStyle}>Priority</label>
+                <select
+                  value={incidentForm.priority}
+                  onChange={(e) => setIncidentForm({ ...incidentForm, priority: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="LOW">Low</option>
+                  <option value="MED">Medium</option>
+                  <option value="HIGH">High</option>
+                  <option value="CRITICAL">Critical</option>
+                </select>
+
+                <label style={labelStyle}>Details</label>
+                <textarea
+                  placeholder="Additional details..."
+                  value={incidentForm.description}
+                  onChange={(e) => setIncidentForm({ ...incidentForm, description: e.target.value })}
+                  style={{ ...inputStyle, minHeight: '60px' }}
+                />
+
+                <div style={actionsRowStyle}>
+                  <button type="button" onClick={handleCloseModal} style={cancelButtonStyle}>Cancel</button>
+                  <button type="submit" style={{ ...submitButtonStyle, background: '#0284c7' }}>Create</button>
+                </div>
+              </form>
+            )}
+
+            {activeModal === 'FIELD_HQ' && (
+              <form onSubmit={handleCreateFieldHqSubmit}>
+                <h3 style={{ margin: '0 0 12px 0', color: '#fbbf24' }}>🏢 Open Field Command Post</h3>
+                <label style={labelStyle}>Command Name</label>
+                <input
+                  type="text"
+                  placeholder="Field Command Post Alpha"
+                  value={fieldHqForm.name}
+                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, name: e.target.value })}
+                  style={inputStyle}
+                  required
+                />
+
+                <label style={labelStyle}>Incident Classification</label>
+                <select
+                  value={fieldHqForm.incidentType}
+                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, incidentType: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="MASS_CASUALTY">Mass Casualty Incident (MCI)</option>
+                  <option value="WILDFIRE">Major Wildfire</option>
+                  <option value="EARTHQUAKE">Earthquake Disaster</option>
+                  <option value="HAZMAT">HAZMAT Emergency</option>
+                  <option value="OTHER">Other</option>
+                </select>
+
+                <label style={labelStyle}>Status of Forces Present / En Route</label>
+                <textarea
+                  placeholder="List active or responding units..."
+                  value={fieldHqForm.activeForcesNotes}
+                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, activeForcesNotes: e.target.value })}
+                  style={{ ...inputStyle, minHeight: '60px' }}
+                />
+
+                <label style={labelStyle}>Initial Status</label>
+                <select
+                  value={fieldHqForm.status}
+                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, status: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="Dispatching">Dispatching</option>
+                  <option value="Active">Active</option>
+                  <option value="Standby">Standby</option>
+                </select>
+
+                <div style={actionsRowStyle}>
+                  <button type="button" onClick={handleCloseModal} style={cancelButtonStyle}>Cancel</button>
+                  <button type="submit" style={{ ...submitButtonStyle, background: '#d97706' }}>Establish HQ</button>
+                </div>
+              </form>
+            )}
+
+            {activeModal === 'DISPATCH' && (
+              <form onSubmit={handleDispatchSubmit}>
+                <h3 style={{ margin: '0 0 12px 0', color: '#4ade80' }}>⚡ Dispatch Force to Point</h3>
+                <label style={labelStyle}>Select Service</label>
+                <select
+                  value={dispatchAgency}
+                  onChange={(e) => {
+                    setDispatchAgency(e.target.value);
+                    setDispatchUnitId('');
+                  }}
+                  style={inputStyle}
+                >
+                  <option value="POLICE">👮 Police</option>
+                  <option value="EMS">🚑 EMS</option>
+                  <option value="FIRE">🚒 Fire & Rescue</option>
+                  <option value="OTHER">📝 Other (Manual)</option>
+                </select>
+
+                {dispatchAgency === 'OTHER' && (
+                  <>
+                    <label style={labelStyle}>Service Name</label>
+                    <input
+                      type="text"
+                      placeholder="Specify service..."
+                      value={dispatchCustomAgency}
+                      onChange={(e) => setDispatchCustomAgency(e.target.value)}
+                      style={inputStyle}
+                      required
+                    />
+                  </>
+                )}
+
+                <label style={labelStyle}>Available Units (nearest first)</label>
+                <select
+                  value={dispatchUnitId}
+                  onChange={(e) => setDispatchUnitId(e.target.value)}
+                  style={inputStyle}
+                  required
+                >
+                  <option value="">-- Select Unit --</option>
+                  {sortedAvailableUnits.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name || `Unit #${u.id}`} ({Number.isFinite(u.distanceKm) ? `${u.distanceKm.toFixed(1)} km` : 'No GPS'})
+                    </option>
+                  ))}
+                </select>
+
+                {sortedAvailableUnits.length === 0 && (
+                  <div style={{ color: '#f87171', fontSize: '0.8rem', marginTop: '4px' }}>
+                    No available units found for the selected service.
+                  </div>
+                )}
+
+                <div style={actionsRowStyle}>
+                  <button type="button" onClick={handleCloseModal} style={cancelButtonStyle}>Cancel</button>
+                  <button
+                    type="submit"
+                    disabled={!dispatchUnitId}
+                    style={{
+                      ...submitButtonStyle,
+                      background: dispatchUnitId ? '#16a34a' : '#334155',
+                      cursor: dispatchUnitId ? 'pointer' : 'not-allowed',
+                    }}
+                  >
+                    Dispatch
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const menuItemStyle = {
+  display: 'block',
+  width: '100%',
+  textAlign: 'left',
+  padding: '10px 14px',
+  background: 'transparent',
+  border: 'none',
+  borderBottom: '1px solid #334155',
+  color: '#e2e8f0',
+  cursor: 'pointer',
+  fontSize: '0.875rem',
+};
+
+const labelStyle = { fontSize: '0.8rem', color: '#94a3b8', display: 'block', marginTop: '10px' };
+
+const inputStyle = {
+  width: '100%',
+  padding: '7px',
+  margin: '6px 0',
+  background: '#1e293b',
+  color: '#fff',
+  border: '1px solid #475569',
+  borderRadius: '6px',
+  boxSizing: 'border-box',
+};
+
+const actionsRowStyle = { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '14px' };
+
+const cancelButtonStyle = {
+  background: '#475569',
+  border: 'none',
+  color: '#fff',
+  padding: '7px 14px',
+  borderRadius: '6px',
+  cursor: 'pointer',
+};
+
+const submitButtonStyle = {
+  border: 'none',
+  color: '#fff',
+  padding: '7px 14px',
+  borderRadius: '6px',
+  cursor: 'pointer',
+  fontWeight: 'bold',
+};

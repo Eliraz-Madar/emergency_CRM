@@ -14,6 +14,16 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// No login is enforced for this dashboard — the backend has no way to know
+// who's calling otherwise, so closure/role-sensitive requests declare that
+// they're acting as command center via this header (see
+// api/permissions.py::effective_role). Only attached where the backend
+// actually reads it — everything else (plain GETs, priority/note/assign
+// writes with no role check) stays a simple, preflight-free request.
+const actorRoleHeaders = (role = "COMMAND_CENTER") => ({
+  headers: { "X-Actor-Role": role },
+});
+
 // Authentication
 export const login = async (username, password) => {
   const res = await api.post("/token/", { username, password });
@@ -21,42 +31,47 @@ export const login = async (username, password) => {
   return res.data;
 };
 
-// Mock Data API - Incidents
-export const getIncidents = async (fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.get("/mock/incidents/", { params });
+// Incidents — real, DB-backed IncidentViewSet.
+export const getIncidents = async () => {
+  const res = await api.get("/incidents/");
   return res.data;
 };
 
 export const getIncident = async (id) => {
-  const res = await api.get(`/mock/incidents/${id}/`);
+  const res = await api.get(`/incidents/${id}/`);
   return res.data;
 };
 
-export const updateIncidentStatus = async (id, status) => {
-  const res = await api.patch(`/mock/incidents/${id}/status/`, { status });
+export const createIncident = async (payload) => {
+  const res = await api.post("/incidents/", payload);
+  return res.data;
+};
+
+// Closing (status: "CLOSED") requires `reason` and `closedByRole`
+// ("UNIT" | "COMMAND_CENTER") in the same request — the backend rejects a
+// bare status update with no reason. Non-closing status changes ignore them.
+export const updateIncidentStatus = async (id, status, reason = null, closedByRole = null) => {
+  const body = { status };
+  if (status === "CLOSED") {
+    body.closed_reason = reason;
+    body.closed_by_role = closedByRole;
+  }
+  const res = await api.patch(`/incidents/${id}/`, body, actorRoleHeaders(closedByRole || "COMMAND_CENTER"));
   return res.data;
 };
 
 export const updateIncidentPriority = async (id, priority) => {
-  const res = await api.patch(`/mock/incidents/${id}/priority/`, { priority });
+  const res = await api.patch(`/incidents/${id}/`, { priority });
   return res.data;
 };
 
 export const assignUnitToIncident = async (incidentId, unitId) => {
-  const res = await api.post(`/mock/incidents/${incidentId}/assign/`, { unit_id: unitId });
+  const res = await api.post(`/incidents/${incidentId}/assign-unit/`, { unit_id: unitId });
   return res.data;
 };
 
 export const addIncidentNote = async (incidentId, note) => {
-  const res = await api.post(`/mock/incidents/${incidentId}/note/`, { note });
-  return res.data;
-};
-
-// Mock Data API - Units
-export const getUnits = async (fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.get("/mock/units/", { params });
+  const res = await api.post(`/incidents/${incidentId}/note/`, { note });
   return res.data;
 };
 
@@ -64,63 +79,73 @@ export const getUnits = async (fieldId = null) => {
 // aware `is_online`. Used for the map/dispatch panel, which must only ever
 // show real, actively-connected units — never the seeded mock/demo roster.
 // See final changes/05_user_unit_claiming_and_live_sync.md.
-export const getRealUnits = async () => {
+export const getUnits = async () => {
   const res = await api.get("/units/");
   return res.data;
 };
 
-// Mock Data API - Events
+export const getRealUnits = getUnits;
+
+// Real event feed — backed by IncidentEvent rows written by the Incident/Unit
+// viewsets. Only ever contains events tied to a real Incident.
 export const getEvents = async (limit = 50, incidentId = null) => {
   const params = { limit };
   if (incidentId) params.incident_id = incidentId;
-  const res = await api.get("/mock/events/", { params });
+  const res = await api.get("/events/", { params });
   return res.data;
 };
 
-// Field Command API
+// Field Command API — real, DB-backed FieldCommand model.
 export const getFieldCommands = async () => {
-  const res = await api.get("/mock/fields/");
+  const res = await api.get("/field-commands/");
   return res.data;
 };
 
 export const getFieldCommand = async (fieldId) => {
-  const res = await api.get(`/mock/fields/${fieldId}/`);
+  const res = await api.get(`/field-commands/${fieldId}/`);
   return res.data;
 };
 
 export const assignUnitToField = async (fieldId, unitId) => {
-  const res = await api.patch(`/mock/fields/${fieldId}/assign-unit/`, { unit_id: unitId });
+  const res = await api.post(`/field-commands/${fieldId}/assign-unit/`, { unit_id: unitId });
+  return res.data;
+};
+
+// Links a regular Incident to a Field Command Post (operator-initiated).
+export const assignIncidentToField = async (fieldId, incidentId) => {
+  const res = await api.post(`/field-commands/${fieldId}/assign-incident/`, { incident_id: incidentId });
   return res.data;
 };
 
 export const createFieldCommand = async (payload) => {
-  const res = await api.post("/field/create/", payload);
+  const res = await api.post("/field-commands/", payload);
   return res.data;
 };
 
-export const closeFieldCommand = async (fieldId) => {
-  const res = await api.post("/field/close/", { field_id: fieldId });
+// Closing requires `reason` and `closedByRole` ("FIELD_OPERATOR" | "COMMAND_CENTER").
+export const closeFieldCommand = async (fieldId, reason, closedByRole) => {
+  const res = await api.post(`/field-commands/${fieldId}/close/`, {
+    closed_reason: reason,
+    closed_by_role: closedByRole,
+  }, actorRoleHeaders(closedByRole || "COMMAND_CENTER"));
   return res.data;
 };
 
-export const updateFieldMetrics = async (payload, fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.patch("/field/metrics/", payload, { params });
-  return res.data;
-};
-
-// Mock Data API - Simulation
-export const simulateUpdate = async () => {
-  const res = await api.get("/mock/simulate/");
+export const updateFieldMetrics = async (payload, fieldId) => {
+  const res = await api.patch(`/field-commands/${fieldId}/metrics/`, payload);
   return res.data;
 };
 
 /**
- * Connect to Server-Sent Events stream for real-time updates.
- * Returns an EventSource instance that can be listened to.
+ * Connect to the real-time updates stream (Server-Sent Events). Despite the
+ * old "/mock/" path this used to live under, this relays genuine broadcasts
+ * from real writes (Incident/Unit/Task changes, dispatch, unit claims) — see
+ * api/views.py::_broadcast_realtime, which every real viewset calls. It has
+ * nothing to do with MockDataService and was NOT removed with the rest of
+ * the mock endpoints. Returns an EventSource instance that can be listened to.
  */
 export const connectToUpdatesStream = () => {
-  const url = `${API_BASE_URL}/mock/updates/stream/`;
+  const url = `${API_BASE_URL}/updates/stream/`;
   const eventSource = new EventSource(url);
   return eventSource;
 };

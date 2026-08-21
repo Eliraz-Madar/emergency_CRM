@@ -1,104 +1,103 @@
 #!/bin/bash
 
-# Emergency CRM - Field War-Room Dashboard
-# Start script for Linux/Mac
+# ==============================================================================
+# Emergency CRM - Full Stack Launcher (macOS / Linux)
+# Starts Backend (Django), Web Dashboard (Vite), and Mobile App (Expo)
+# ==============================================================================
 
 set -e
 
-echo ""
-echo "╔════════════════════════════════════════════════════╗"
-echo "║  Emergency CRM - Field War-Room Dashboard Demo    ║"
-echo "║  Starting Backend + Frontend Services...           ║"
-echo "╚════════════════════════════════════════════════════╝"
-echo ""
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
-# Check prerequisites
-echo "Checking prerequisites..."
+# Root directory
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if ! command -v python3 &> /dev/null; then
-    echo "✗ Python 3 not found. Please install Python 3.9+"
+echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║      Starting Emergency CRM Full Stack (Mac)       ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}\n"
+
+# 1. Check prerequisites
+echo -e "${YELLOW}Checking prerequisites...${NC}"
+if command -v python3 &> /dev/null; then
+    PY_CMD="python3"
+elif command -v python &> /dev/null; then
+    PY_CMD="python"
+else
+    echo -e "${RED}✗ Python not found. Please install Python 3.9+${NC}"
     exit 1
 fi
 
 if ! command -v node &> /dev/null; then
-    echo "✗ Node.js not found. Please install Node.js 16+"
+    echo -e "${RED}✗ Node.js not found. Please install Node.js 18+${NC}"
     exit 1
 fi
 
-echo "✓ Python 3 found"
-echo "✓ Node.js found"
-echo ""
+echo -e "${GREEN}✓ Using Python: $($PY_CMD --version)${NC}"
+echo -e "${GREEN}✓ Using Node:   $(node --version)${NC}\n"
 
-# Get root directory
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Set environment variables
-export DJANGO_DEBUG=1
-export DEMO_SEED=42
-export VITE_API_URL=http://localhost:8000/api
-
-# Function to cleanup on exit
+# Function to clean up all child processes on exit (Ctrl+C)
 cleanup() {
-    echo ""
-    echo "Shutting down services..."
-    kill %1 %2 2>/dev/null || true
-    wait %1 %2 2>/dev/null || true
+    echo -e "\n${YELLOW}Stopping all Emergency CRM services...${NC}"
+    kill 0 2>/dev/null || true
+    wait 2>/dev/null || true
+    echo -e "${GREEN}All services stopped cleanly.${NC}"
 }
+trap cleanup EXIT INT TERM
 
-trap cleanup EXIT
+# 2. Backend - Migrations & Sample Data
+echo -e "${BLUE}[1/3] Backend API - Preparing database...${NC}"
+cd "$ROOT/backend"
 
-# Start Backend
-echo "Starting Backend Service (Django)..."
-(
-    cd "$ROOT/backend"
-    echo "Installing dependencies..."
-    pip install -q -r requirements.txt 2>/dev/null || pip3 install -q -r requirements.txt
-    python manage.py migrate --noinput >/dev/null 2>&1 || python3 manage.py migrate --noinput >/dev/null 2>&1
-    echo ""
-    echo "[✓] Backend running at http://localhost:8000/api"
-    echo "[✓] Mock Data Endpoints:  GET /mock/incidents, /mock/units, /mock/events"
-    echo "[✓] Real-time Stream:      GET /mock/updates/stream (Server-Sent Events)"
-    echo ""
-    python manage.py runserver 0.0.0.0:8000 2>&1 || python3 manage.py runserver 0.0.0.0:8000 2>&1
-) &
+# Install requirements if not present / optional check
+if [ -f "requirements.txt" ]; then
+    pip install -q -r requirements.txt 2>/dev/null || pip3 install -q -r requirements.txt 2>/dev/null || true
+fi
+
+$PY_CMD manage.py migrate --noinput
+if [ -f "create_sample_data.py" ]; then
+    $PY_CMD create_sample_data.py
+fi
+
+echo -e "${BLUE}[1/3] Backend API - Starting Django server...${NC}"
+$PY_CMD manage.py runserver 0.0.0.0:8000 &
 BACKEND_PID=$!
+echo -e "${GREEN}   -> Backend running: http://localhost:8000${NC}\n"
 
-# Wait for backend to initialize
-sleep 3
-
-echo ""
-echo "Starting Frontend Dashboard (Vite)..."
-(
-    cd "$ROOT/frontend-web"
-    echo "Installing dependencies..."
-    if [ ! -d "node_modules" ]; then
-        npm install >/dev/null 2>&1
-    fi
-    echo ""
-    echo "[✓] Frontend running at http://localhost:5173"
-    echo "[✓] Dashboard Features:"
-    echo "    - Real-time incident tracking"
-    echo "    - Interactive map with units"
-    echo "    - Status workflow management"
-    echo "    - Live event feed"
-    echo ""
-    npm run dev 2>&1
-) &
+# 3. Web Dashboard (Vite)
+echo -e "${BLUE}[2/3] Web Dashboard - Starting Vite...${NC}"
+cd "$ROOT/frontend-web"
+if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}Installing web dependencies...${NC}"
+    npm install
+fi
+npm run dev &
 FRONTEND_PID=$!
+echo -e "${GREEN}   -> Frontend running: http://localhost:5173${NC}\n"
 
-echo ""
-echo "╔════════════════════════════════════════════════════╗"
-echo "║  ✓ Services Starting...                            ║"
-echo "║                                                    ║"
-echo "║  FRONTEND:  http://localhost:5173                  ║"
-echo "║  BACKEND:   http://localhost:8000/api              ║"
-echo "║                                                    ║"
-echo "║  Demo Mode: ENABLED (auto-generating incidents)    ║"
-echo "║  Seed:      42 (reproducible data)                 ║"
-echo "║                                                    ║"
-echo "║  Press Ctrl+C to stop all services.                ║"
-echo "╚════════════════════════════════════════════════════╝"
-echo ""
+# Open browser automatically on macOS
+sleep 2
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    open http://localhost:5173 || true
+elif command -v xdg-open &> /dev/null; then
+    xdg-open http://localhost:5173 || true
+fi
 
-# Wait for processes
-wait
+# 4. Mobile App (Expo)
+echo -e "${BLUE}[3/3] Mobile App - Starting Expo...${NC}"
+cd "$ROOT/mobile-app"
+if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}Installing mobile dependencies...${NC}"
+    npm install
+fi
+
+echo -e "${GREEN}====================================================${NC}"
+echo -e "${GREEN}✓ All services active! Scan QR code for Expo Go below${NC}"
+echo -e "${GREEN}  Press Ctrl+C at any time to shut down all services ${NC}"
+echo -e "${GREEN}====================================================${NC}\n"
+
+npx expo start

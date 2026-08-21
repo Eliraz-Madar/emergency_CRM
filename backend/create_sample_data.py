@@ -79,9 +79,9 @@ if created:
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print("\n── Field Unit Credentials ───────────────────────")
-print("  police    / police123")
-print("  ambulance / ambulance123")
-print("  fire      / fire123")
+print("  police    / Police123")
+print("  ambulance / Ambulance123")
+print("  fire      / Fire123")
 print("─────────────────────────────────────────────────")
 print(f"Units in DB : {Unit.objects.count()}")
 print(f"Users in DB : {User.objects.filter(role='fieldunit').count()} field-unit users")

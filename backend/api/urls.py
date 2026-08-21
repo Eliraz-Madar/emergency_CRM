@@ -2,13 +2,9 @@ from rest_framework.routers import DefaultRouter
 from django.urls import path, include
 
 from .views import (
-    IncidentViewSet, TaskViewSet, UnitViewSet,
+    IncidentViewSet, TaskViewSet, UnitViewSet, FieldCommandViewSet,
+    incident_events, updates_stream,
      unit_heartbeat,
-    mock_incidents, mock_units, mock_events, mock_incident_detail,
-    mock_incident_status, mock_incident_priority, mock_incident_assign,
-     mock_incident_note, mock_simulate_update, mock_updates_stream,
-     mock_fields, mock_field_detail, mock_field_assign_unit,
-    field_create, field_update_metrics, field_close,
     field_incident_detail, field_incident_sectors, field_incident_task_groups,
     field_incident_events, field_incident_sector_update, field_incident_task_group_update,
     field_incident_casualty_update, field_incident_add_event, field_incident_simulate,
@@ -22,6 +18,7 @@ router = DefaultRouter()
 router.register(r"incidents", IncidentViewSet)
 router.register(r"tasks", TaskViewSet)
 router.register(r"units", UnitViewSet)
+router.register(r"field-commands", FieldCommandViewSet)
 
 urlpatterns = [
     # Must precede the router include: DefaultRouter's detail route
@@ -30,6 +27,8 @@ urlpatterns = [
     # the match and this view becomes unreachable (405 on every request).
     # See final changes/05_user_unit_claiming_and_live_sync.md.
     path("units/heartbeat/", unit_heartbeat, name="unit_heartbeat"),
+    path("events/", incident_events, name="incident_events"),
+    path("updates/stream/", updates_stream, name="updates_stream"),
     path("", include(router.urls)),
     path("push-token/", register_push_token, name="register_push_token"),
     path("mobile/register-units/", mobile_register_units, name="mobile_register_units"),
@@ -37,31 +36,6 @@ urlpatterns = [
     path("mobile/dispatch/", mobile_dispatch, name="mobile_dispatch"),
     path("mobile/cancel-dispatch/", mobile_cancel_dispatch, name="mobile_cancel_dispatch"),
     path("mobile/unit-status/", mobile_unit_status, name="mobile_unit_status"),
-    # Mock data API endpoints for regional dashboard demo
-    path("mock/incidents/", mock_incidents, name="mock_incidents"),
-    path("mock/units/", mock_units, name="mock_units"),
-    path("mock/events/", mock_events, name="mock_events"),
-    path("mock/incidents/<int:incident_id>/",
-         mock_incident_detail, name="mock_incident_detail"),
-    path("mock/incidents/<int:incident_id>/status/",
-         mock_incident_status, name="mock_incident_status"),
-    path("mock/incidents/<int:incident_id>/priority/",
-         mock_incident_priority, name="mock_incident_priority"),
-    path("mock/incidents/<int:incident_id>/assign/",
-         mock_incident_assign, name="mock_incident_assign"),
-    path("mock/incidents/<int:incident_id>/note/",
-         mock_incident_note, name="mock_incident_note"),
-    path("mock/simulate/", mock_simulate_update, name="mock_simulate_update"),
-    path("mock/updates/stream/", mock_updates_stream, name="mock_updates_stream"),
-    path("mock/fields/", mock_fields, name="mock_fields"),
-    path("mock/fields/<str:field_id>/", mock_field_detail, name="mock_field_detail"),
-    path("mock/fields/<str:field_id>/assign-unit/",
-         mock_field_assign_unit, name="mock_field_assign_unit"),
-
-     # Field command creation and metrics
-     path("field/create/", field_create, name="field_create"),
-     path("field/metrics/", field_update_metrics, name="field_update_metrics"),
-     path("field/close/", field_close, name="field_close"),
 
     # Field Incident Command Dashboard endpoints
     path("field/incident/", field_incident_detail, name="field_incident_detail"),

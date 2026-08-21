@@ -3,6 +3,7 @@ import { EventFeed } from './EventFeed.jsx';
 import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
 import { useFieldIncidentStore } from '../store/fieldIncident.js';
+import { updateIncidentStatus } from '../api/client.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
@@ -80,9 +81,44 @@ export function IncidentDetailsPanel() {
 
   const [selectedType, setSelectedType] = useState('POLICE');
   const [activeTab, setActiveTab] = useState('dispatch');
+  const [closeReason, setCloseReason] = useState('');
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState('');
 
   // Reset to dispatch tab whenever a different incident is opened
-  useEffect(() => { setActiveTab('dispatch'); }, [incident?.id]);
+  useEffect(() => {
+    setActiveTab('dispatch');
+    setCloseReason('');
+    setCloseError('');
+  }, [incident?.id]);
+
+  // Closing is only for real, DB-backed incidents — never the training
+  // simulation's majorIncident, which has no Incident.status state machine.
+  const canClose = fieldMode !== 'SIMULATION' && incident?.status && incident.status !== 'CLOSED';
+
+  const handleCloseIncident = async () => {
+    const reason = closeReason.trim();
+    if (!incident?.id || !reason) return;
+    setClosing(true);
+    setCloseError('');
+    try {
+      const updated = await updateIncidentStatus(incident.id, 'CLOSED', reason, 'COMMAND_CENTER');
+      updateIncident(incident.id, {
+        status: 'CLOSED',
+        closed_reason: updated?.closed_reason ?? reason,
+        closed_by_role: updated?.closed_by_role ?? 'COMMAND_CENTER',
+        closed_at: updated?.closed_at ?? new Date().toISOString(),
+      });
+      setCloseReason('');
+    } catch (error) {
+      console.error('Failed to close incident:', error);
+      setCloseError(error?.response?.data?.closed_reason?.[0]
+        || error?.response?.data?.status?.[0]
+        || 'Failed to close incident.');
+    } finally {
+      setClosing(false);
+    }
+  };
 
   // פונקציית העדכון - משתמשת ב-Store החי
   const handlePriorityChange = (newPriority) => {
@@ -468,6 +504,52 @@ export function IncidentDetailsPanel() {
             })}
           </div>
         </div>
+
+        {/* ── Close Incident (Command Center) ── */}
+        {canClose && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Close Incident</div>
+            <textarea
+              value={closeReason}
+              onChange={(e) => setCloseReason(e.target.value)}
+              placeholder="Closure reason (required) — e.g. resolved by phone call, false alarm..."
+              rows={2}
+              style={{
+                width: '100%',
+                background: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: '6px',
+                color: '#e2e8f0',
+                fontSize: '0.8rem',
+                padding: '6px 8px',
+                resize: 'vertical',
+                marginBottom: '6px',
+              }}
+            />
+            {closeError && (
+              <div style={{ color: '#ef4444', fontSize: '0.78rem', marginBottom: '6px' }}>{closeError}</div>
+            )}
+            <button
+              type="button"
+              onClick={handleCloseIncident}
+              disabled={closing || !closeReason.trim()}
+              style={{
+                width: '100%',
+                background: '#ef4444',
+                border: '1px solid #ef4444',
+                color: 'white',
+                borderRadius: '6px',
+                padding: '8px',
+                fontSize: '0.82rem',
+                fontWeight: 600,
+                cursor: closing || !closeReason.trim() ? 'not-allowed' : 'pointer',
+                opacity: closing || !closeReason.trim() ? 0.6 : 1,
+              }}
+            >
+              {closing ? 'Closing…' : 'Close Incident'}
+            </button>
+          </div>
+        )}
 
         {/* ── Dispatch Forces ── */}
         <div className="cc-section flex flex-col">

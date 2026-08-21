@@ -6,6 +6,30 @@ class ReadOnlyOrAdminDispatcher(BasePermission):
         return True  # auth temporarily bypassed for MVP
 
 
+# No login is enforced for the regional/field-command dashboard (see
+# final changes notes) — the dashboard is never an authenticated
+# request.user. Rather than gate writes behind a login flow, the client
+# declares who it's acting as via this header, and it's trusted (there's no
+# auth boundary to check it against yet). Only used as a fallback when
+# request.user has no real role, so an authenticated caller (e.g. the mobile
+# app, which does log in) always wins on its actual role.
+ACTOR_ROLE_HEADER = "HTTP_X_ACTOR_ROLE"
+_ACTOR_ROLE_TO_USER_ROLE = {
+    "COMMAND_CENTER": "dispatcher",
+    "UNIT": "fieldunit",
+}
+
+
+def effective_role(request):
+    """Resolve the acting role for a request: real authenticated role first,
+    else whatever the client declared via X-Actor-Role."""
+    role = getattr(getattr(request, "user", None), "role", "") or ""
+    if role:
+        return role
+    declared = request.META.get(ACTOR_ROLE_HEADER, "")
+    return _ACTOR_ROLE_TO_USER_ROLE.get(declared, "")
+
+
 class TaskPermission(BasePermission):
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:

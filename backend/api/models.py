@@ -1,5 +1,6 @@
 from datetime import timedelta
 from django.contrib.auth.models import AbstractUser
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
@@ -79,6 +80,10 @@ class Incident(models.Model):
         Status.CLOSED: {},
     }
 
+    class ClosedBy(models.TextChoices):
+        UNIT = "UNIT", "Unit"
+        COMMAND_CENTER = "COMMAND_CENTER", "Command Center"
+
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     location_lat = models.FloatField()
@@ -88,7 +93,24 @@ class Incident(models.Model):
         max_length=10, choices=Priority.choices, default=Priority.LOW)
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.OPEN)
+    # Dispatch channel/agency this incident is routed through (Police/Fire/EMS/Civil
+    # Defense). Purely informational — used for dashboard filtering/badges.
+    channel = models.CharField(max_length=50, blank=True, default="")
+    field_command = models.ForeignKey(
+        "FieldCommand", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="incidents",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # Closure trail — required whenever status transitions to CLOSED (see
+    # can_transition_to / IncidentSerializer). No user FK: no login system is
+    # enforced for the dashboard, so who closed it is a role + optional free
+    # text name, not an authenticated identity.
+    closed_reason = models.TextField(null=True, blank=True)
+    closed_by = models.CharField(
+        max_length=20, choices=ClosedBy.choices, null=True, blank=True)
+    closed_by_name = models.CharField(max_length=150, blank=True, default="")
+    closed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.title} ({self.status})"
@@ -109,13 +131,16 @@ class Incident(models.Model):
         if target_status == self.status:
             return True, None
 
-        # Incidents must NEVER be marked CLOSED except by an explicit Commander action,
-        # and only once RESOLVED — never as a side effect of any other request.
+        # Incidents must NEVER be marked CLOSED except by an explicit Commander
+        # action — but that action is allowed directly from any open status
+        # (e.g. closing after a phone call, without ever dispatching), never
+        # as a side effect of any other request. This intentionally bypasses
+        # the generic TRANSITIONS table below, which only knows about
+        # RESOLVED -> CLOSED.
         if target_status == self.Status.CLOSED:
             if role not in self.COMMANDER_ROLES:
                 return False, "Only a Commander (admin/dispatcher) can close an incident."
-            if self.status != self.Status.RESOLVED:
-                return False, "Incidents can only be closed after they have been resolved."
+            return True, None
 
         allowed_roles = self.TRANSITIONS.get(self.status, {}).get(target_status)
         if not allowed_roles or role not in allowed_roles:
@@ -135,6 +160,27 @@ class Incident(models.Model):
                 )
 
         return True, None
+
+    def clean(self):
+        super().clean()
+        if self.status == self.Status.CLOSED:
+            errors = {}
+            if not (self.closed_reason or "").strip():
+                errors["closed_reason"] = "A closure reason is required to close an incident."
+            if self.closed_by not in self.ClosedBy.values:
+                errors["closed_by"] = "closed_by ('UNIT' or 'COMMAND_CENTER') is required to close an incident."
+            if errors:
+                raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        # Backstop for every path that isn't the DRF serializer (admin, shell,
+        # management commands, a future bulk operation calling .save()) — the
+        # serializer's validate() still runs first and produces a clean 400
+        # for normal API traffic; this is what actually fires when something
+        # bypasses DRF entirely. See IncidentSerializer.validate() for the
+        # equivalent (and first-line) check.
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class Unit(models.Model):
@@ -161,6 +207,10 @@ class Unit(models.Model):
     # unit or sending a heartbeat; set False on logout/disconnect. A unit
     # is never online by default — it must be claimed by a real device first.
     is_online = models.BooleanField(default=False)
+    field_command = models.ForeignKey(
+        "FieldCommand", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="units",
+    )
 
     def __str__(self):
         return f"{self.name} ({self.type})"
@@ -216,6 +266,91 @@ class Task(models.Model):
         if target_status == self.Status.CANCELLED and role not in self.COMMANDER_ROLES:
             return False, "Only a dispatcher or admin can cancel a task."
         return True, None
+
+
+# ============================================
+# FIELD COMMAND POST MODELS
+# ============================================
+# Real, DB-backed "Field Command Post" feature (the right-click "Open Field
+# Command Post" menu item on the regional map). NOT to be confused with the
+# "Field Incident Command Dashboard" models below, which back the separate,
+# intentionally-ephemeral training simulation.
+
+class FieldCommand(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        CLOSED = "CLOSED", "Closed"
+
+    class ClosedByRole(models.TextChoices):
+        FIELD_OPERATOR = "FIELD_OPERATOR", "Field Operator"
+        COMMAND_CENTER = "COMMAND_CENTER", "Command Center"
+
+    # Public, human-readable identifier (e.g. "field-1", "north"). Kept
+    # distinct from the numeric pk so URLs/localStorage values already in use
+    # by the field-incident simulation's cosmetic name lookup keep resolving.
+    # Null (not "") until auto-assigned in save() so two posts created
+    # without an explicit key never collide on the unique constraint.
+    field_key = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    name = models.CharField(max_length=200)
+    location_lat = models.FloatField(null=True, blank=True)
+    location_lng = models.FloatField(null=True, blank=True)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    incident_phase = models.CharField(max_length=100, default="Containment")
+    casualty_count = models.IntegerField(default=0)
+    evacuated_count = models.IntegerField(default=0)
+    unit_name = models.CharField(max_length=200, blank=True, default="")
+    incident_type = models.CharField(max_length=100, default="General Incident")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Closure trail — same rule as Incident: mandatory reason, no user FK.
+    closed_reason = models.TextField(null=True, blank=True)
+    closed_by_role = models.CharField(
+        max_length=20, choices=ClosedByRole.choices, null=True, blank=True)
+    closed_by_name = models.CharField(max_length=150, blank=True, default="")
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.status})"
+
+    def clean(self):
+        super().clean()
+        if self.status == self.Status.CLOSED:
+            errors = {}
+            if not (self.closed_reason or "").strip():
+                errors["closed_reason"] = "A closure reason is required to close a field command."
+            if self.closed_by_role not in self.ClosedByRole.values:
+                errors["closed_by_role"] = "closed_by_role ('FIELD_OPERATOR' or 'COMMAND_CENTER') is required to close a field command."
+            if errors:
+                raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        # Backstop for every path that isn't the DRF serializer — see
+        # Incident.save() for the same reasoning. Runs once, before the
+        # existing two-step field_key auto-assignment below (which uses
+        # super().save() directly so it isn't re-validated redundantly).
+        self.full_clean()
+        # Auto-assign a stable public key for posts created without one, once
+        # the pk is known (mirrors MockDataService._next_field_command_id).
+        is_new = self._state.adding
+        super().save(*args, **kwargs)
+        if is_new and not self.field_key:
+            self.field_key = f"field-{self.pk}"
+            super().save(update_fields=["field_key"])
+
+
+class FieldCommandNote(models.Model):
+    field_command = models.ForeignKey(
+        FieldCommand, related_name="notes", on_delete=models.CASCADE)
+    message = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Note on {self.field_command_id}: {self.message[:40]}"
 
 
 # ============================================

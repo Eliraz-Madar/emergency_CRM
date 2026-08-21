@@ -11,6 +11,5 @@ class ApiConfig(AppConfig):
         # simulated.mock_api_client, independent of any HTTP request.
         # State transitions must now only happen via explicit API calls.
         # See "final changes/01_disable_simulation_engine.md".
-        # from utils.polling_service import start_polling_service
-        # start_polling_service()
+        # (its module, utils/polling_service.py, has since been removed)
         pass

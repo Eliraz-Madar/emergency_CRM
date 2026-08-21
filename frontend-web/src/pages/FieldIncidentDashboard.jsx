@@ -308,8 +308,9 @@ const FieldIncidentDashboard = () => {
             Field ID: {fieldId || 'unknown'}
           </div>
           <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#94a3b8' }}>
-            TODO(auth): replace with real login + role validation
+            TODO(auth): replace with real login + role validation 
           </div>
+          {/* update file: /src/pages/FieldIncidentDashboard.jsx and add login functionality in file  */}
           <button
             onClick={() => window.history.back()}
             style={{ marginTop: '1.5rem', padding: '0.5rem 1rem', fontSize: '1rem', cursor: 'pointer' }}

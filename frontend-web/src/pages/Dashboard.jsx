@@ -90,9 +90,10 @@ export default function Dashboard() {
     unitName: '',
     incidentType: '',
     notes: '',
-    status: 'DISPATCHING',
     incidentPhase: 'Containment',
   });
+  const [closeFieldReason, setCloseFieldReason] = useState('');
+  const [closeFieldRole, setCloseFieldRole] = useState('COMMAND_CENTER');
 
   // Load the selected control-center name from localStorage on mount
   useEffect(() => {
@@ -147,6 +148,7 @@ export default function Dashboard() {
   const handleFieldCommandSelect = async (field) => {
     if (!field?.id) return;
     setSelectedFieldCommand(field);
+    setCloseFieldReason('');
     setFieldCommandLoading(true);
     setFieldCommandError('');
     try {
@@ -186,6 +188,66 @@ export default function Dashboard() {
     setIsCreateFieldOpen(true);
   };
 
+  // MapView's "Report Standard Incident" context-menu action already collects
+  // and submits the full form itself — this just persists it to the real DB
+  // and updates the store directly so the marker appears immediately, rather
+  // than waiting on the SSE round-trip.
+  const handleMapReportIncident = async (payload) => {
+    try {
+      const created = await api.createIncident({
+        title: payload.title,
+        description: payload.description,
+        location_lat: payload.lat,
+        location_lng: payload.lng,
+        priority: payload.priority,
+        channel: payload.type,
+      });
+      addIncident(created);
+      addEvent({
+        id: Math.random(),
+        timestamp: new Date().toISOString(),
+        entity_type: 'incident',
+        entity_id: created.id,
+        message: `New incident reported: ${created.title}`,
+        level: 'warn',
+      });
+    } catch (error) {
+      console.error('Failed to report incident:', error);
+    }
+  };
+
+  // MapView's "Dispatch Force to Point" isn't tied to an existing incident —
+  // it dispatches a real, currently-online unit (payload.unitId is a real
+  // Unit PK, sourced from onlineUnits) straight to an arbitrary point. There's
+  // no "assign unit to raw coordinates" primitive in the real API, so this
+  // creates a minimal incident at that point and then assigns the unit to it
+  // via the same real endpoints IncidentDetailsPanel/MapView already rely on.
+  const handleMapDispatchForce = async (payload) => {
+    try {
+      const created = await api.createIncident({
+        title: `${payload.agency} Dispatch`,
+        description: 'Force dispatched directly from the map.',
+        location_lat: payload.lat,
+        location_lng: payload.lng,
+        priority: 'HIGH',
+        channel: payload.agency,
+      });
+      addIncident(created);
+      const updated = await api.assignUnitToIncident(created.id, payload.unitId);
+      updateIncident(created.id, updated);
+      addEvent({
+        id: Math.random(),
+        timestamp: new Date().toISOString(),
+        entity_type: 'incident',
+        entity_id: created.id,
+        message: `Unit dispatched to point: ${created.title}`,
+        level: 'warn',
+      });
+    } catch (error) {
+      console.error('Failed to dispatch force:', error);
+    }
+  };
+
   const handleCreateFieldChange = (field, value) => {
     setCreateFieldForm((prev) => ({ ...prev, [field]: value }));
   };
@@ -195,7 +257,6 @@ export default function Dashboard() {
       unitName: '',
       incidentType: '',
       notes: '',
-      status: 'DISPATCHING',
       incidentPhase: 'Containment',
     });
     setCreateFieldLocation(null);
@@ -211,8 +272,7 @@ export default function Dashboard() {
         name: createFieldForm.unitName || 'Field Command',
         unit_name: createFieldForm.unitName || 'Field Unit',
         incident_type: createFieldForm.incidentType || 'General Incident',
-        initial_report: createFieldForm.notes,
-        status: createFieldForm.status,
+        note: createFieldForm.notes,
         incident_phase: createFieldForm.incidentPhase,
         location_lat: createFieldLocation.lat,
         location_lng: createFieldLocation.lng,
@@ -238,17 +298,36 @@ export default function Dashboard() {
   };
 
   const handleCloseFieldCommand = async () => {
-    if (!selectedFieldCommand?.id) return;
+    const reason = closeFieldReason.trim();
+    if (!selectedFieldCommand?.id || !reason) return;
     setFieldCommandLoading(true);
     setFieldCommandError('');
     try {
-      await api.closeFieldCommand(selectedFieldCommand.id);
+      await api.closeFieldCommand(selectedFieldCommand.id, reason, closeFieldRole);
       setSelectedFieldCommand(null);
       setFieldCommandSummary(null);
+      setCloseFieldReason('');
       await refreshFieldCommands();
     } catch (error) {
       console.error('Failed to close field command:', error);
       setFieldCommandError('Failed to close the field command.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
+  };
+
+  const handleAssignIncidentToField = async (incidentId) => {
+    if (!selectedFieldCommand?.id || !incidentId) return;
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      await api.assignIncidentToField(selectedFieldCommand.id, incidentId);
+      const updatedSummary = await api.getFieldCommand(selectedFieldCommand.id);
+      setFieldCommandSummary(updatedSummary);
+      await refreshFieldCommands();
+    } catch (error) {
+      console.error('Failed to link incident to field command:', error);
+      setFieldCommandError('Failed to link incident.');
     } finally {
       setFieldCommandLoading(false);
     }
@@ -761,6 +840,8 @@ export default function Dashboard() {
             selectedFieldCommandId={selectedFieldCommand?.id || null}
             onFieldCommandSelect={handleFieldCommandSelect}
             onMapCreateFieldCommand={handleMapCreateFieldCommand}
+            onMapReportIncident={handleMapReportIncident}
+            onMapDispatchForce={handleMapDispatchForce}
           />
         </div>
 
@@ -968,22 +1049,77 @@ export default function Dashboard() {
                       );
                     })()}
 
-                    <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
-                      <button
-                        type="button"
-                        className="feed-toggle"
-                        onClick={handleCloseFieldCommand}
+                    <div style={{ marginTop: '12px' }}>
+                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Close Field Command Post</div>
+                      <textarea
+                        value={closeFieldReason}
+                        onChange={(e) => setCloseFieldReason(e.target.value)}
+                        placeholder="Closure reason (required)..."
+                        rows={2}
                         style={{
-                          backgroundColor: '#ef4444',
-                          borderColor: '#ef4444',
+                          width: '100%',
+                          background: '#0f172a',
+                          border: '1px solid #334155',
+                          borderRadius: '6px',
+                          color: '#e2e8f0',
                           fontSize: '0.8rem',
-                          padding: '0.5rem 0.75rem',
+                          padding: '6px 8px',
+                          resize: 'vertical',
+                          marginBottom: '6px',
                         }}
+                      />
+                      <select
+                        value={closeFieldRole}
+                        onChange={(e) => setCloseFieldRole(e.target.value)}
+                        style={{ width: '100%', padding: '5px', borderRadius: '6px', marginBottom: '8px', fontSize: '0.78rem' }}
                       >
-                        Close Camp
-                      </button>
+                        <option value="COMMAND_CENTER">Closed by: Command Center</option>
+                        <option value="FIELD_OPERATOR">Closed by: Field Operator</option>
+                      </select>
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        <button
+                          type="button"
+                          className="feed-toggle"
+                          onClick={handleCloseFieldCommand}
+                          disabled={fieldCommandLoading || !closeFieldReason.trim()}
+                          style={{
+                            backgroundColor: '#ef4444',
+                            borderColor: '#ef4444',
+                            fontSize: '0.8rem',
+                            padding: '0.5rem 0.75rem',
+                            opacity: !closeFieldReason.trim() ? 0.6 : 1,
+                            cursor: !closeFieldReason.trim() ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Close Camp
+                        </button>
+                      </div>
                     </div>
                   </>
+                )}
+
+                {selectedFieldCommand && (
+                  <div style={{ marginTop: '12px' }}>
+                    <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Link Incident</div>
+                    {Array.isArray(incidents) && incidents.filter((inc) => !inc.field_command).length ? (
+                      <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
+                        {incidents.filter((inc) => !inc.field_command).slice(0, 10).map((inc) => (
+                          <div key={inc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                            <span style={{ fontSize: '0.8rem' }}>{inc.title || `Incident ${inc.id}`}</span>
+                            <button
+                              className="feed-toggle"
+                              style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
+                              onClick={() => handleAssignIncidentToField(inc.id)}
+                            >
+                              Link
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>No unlinked incidents</div>
+                    )}
+                  </div>
                 )}
 
                 <div style={{ marginTop: '12px' }}>
@@ -1069,18 +1205,6 @@ export default function Dashboard() {
                 style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px', minHeight: '70px' }}
                 placeholder="Initial situation report..."
               />
-              <label style={{ fontSize: '0.8rem' }}>Initial Status</label>
-              <select
-                value={createFieldForm.status}
-                onChange={(e) => handleCreateFieldChange('status', e.target.value)}
-                style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
-              >
-                <option value="DISPATCHING">Dispatching</option>
-                <option value="ACTIVE">Active</option>
-                <option value="CONTAINMENT">Containment</option>
-                <option value="EVACUATION">Evacuation</option>
-                <option value="CLEANUP">Cleanup</option>
-              </select>
               <label style={{ fontSize: '0.8rem' }}>Incident Phase</label>
               <input
                 type="text"
