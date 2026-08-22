@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     Incident, Task, Unit, IncidentEvent, ReportMedia,
     FieldCommand, FieldCommandNote,
+    MajorIncident, Sector, TaskGroup, Perimeter,
 )
 from .permissions import effective_role
 
@@ -47,6 +48,11 @@ class IncidentSerializer(serializers.ModelSerializer):
         required=False,
     )
 
+    # Lets the regional dashboard know an Incident has gone live straight
+    # from the normal incident list/detail fetch, without depending on any
+    # client-side store to carry that state. None if it hasn't gone live.
+    major_incident = serializers.SerializerMethodField()
+
     class Meta:
         model = Incident
         fields = [
@@ -67,6 +73,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             "closed_by_role",
             "closed_by_name",
             "closed_at",
+            "major_incident",
         ]
         read_only_fields = ["field_command", "closed_at"]
 
@@ -74,6 +81,11 @@ class IncidentSerializer(serializers.ModelSerializer):
         return sorted({
             t.assigned_unit_id for t in obj.tasks.all() if t.assigned_unit_id
         })
+
+    def get_major_incident(self, obj):
+        if not hasattr(obj, "major_incident"):
+            return None
+        return {"id": obj.major_incident.id, "status": obj.major_incident.status}
 
     def validate_status(self, value):
         instance = self.instance
@@ -191,6 +203,7 @@ class IncidentEventSerializer(serializers.ModelSerializer):
             "severity",
             "title",
             "description",
+            "source",
             "created_by",
             "actor_id",
             "created_at",
@@ -317,3 +330,192 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             Unit.objects.filter(field_command=instance).update(field_command=None)
             Incident.objects.filter(field_command=instance).update(field_command=None)
         return instance
+
+
+# ============================================
+# REAL MAJOR INCIDENT / SECTOR / TASK GROUP / PERIMETER
+# ============================================
+# Backs the real "go live" flow (api/views.py's major_incident_* endpoints).
+# NOT the mock field-incident dashboard (simulated/field_incident_data.py,
+# api/views.py's field_incident_* endpoints) — that stays untouched.
+
+class MajorIncidentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MajorIncident
+        fields = [
+            "id",
+            "incident",
+            "title",
+            "incident_type",
+            "description",
+            "status",
+            "location_lat",
+            "location_lng",
+            "radius_meters",
+            "estimated_casualties",
+            "confirmed_deaths",
+            "displaced_persons",
+            "command_post_lat",
+            "command_post_lng",
+            "created_at",
+            "declared_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class MajorIncidentGoLiveSerializer(serializers.Serializer):
+    """
+    Input-only serializer for POST /api/major-incidents/go-live/. Everything
+    but incident_type is copied from the source Incident server-side (see
+    Incident model at api/models.py:27) rather than accepted from the client
+    — Incident has no equivalent "type" field, so incident_type is the one
+    piece of new information this call actually needs.
+    """
+    incident_id = serializers.IntegerField()
+    incident_type = serializers.ChoiceField(choices=MajorIncident.IncidentType.choices)
+
+    def validate_incident_id(self, value):
+        try:
+            incident = Incident.objects.get(pk=value)
+        except Incident.DoesNotExist:
+            raise serializers.ValidationError("Incident not found.")
+        if hasattr(incident, "major_incident"):
+            raise serializers.ValidationError(
+                f"Incident {incident.id} has already gone live as "
+                f"MajorIncident {incident.major_incident.id}."
+            )
+        self._incident = incident
+        return value
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        role = effective_role(request) if request else ""
+        if role not in Incident.COMMANDER_ROLES:
+            raise serializers.ValidationError(
+                {"detail": "Only COMMAND_CENTER (dispatcher/admin) can declare a major incident."})
+        return attrs
+
+    def create(self, validated_data):
+        incident = self._incident
+        return MajorIncident.objects.create(
+            incident=incident,
+            title=incident.title,
+            incident_type=validated_data["incident_type"],
+            description=incident.description,
+            status=MajorIncident.Status.DECLARED,
+            location_lat=incident.location_lat,
+            location_lng=incident.location_lng,
+            declared_at=timezone.now(),
+        )
+
+
+class PerimeterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Perimeter
+        fields = ["id", "major_incident", "points", "submitted_by_role", "created_at"]
+        read_only_fields = ["id", "major_incident", "created_at"]
+
+    def validate_points(self, value):
+        if not isinstance(value, list) or len(value) < 3:
+            raise serializers.ValidationError(
+                "points must be a list of at least 3 {lat, lng} objects.")
+        for point in value:
+            if not isinstance(point, dict) or "lat" not in point or "lng" not in point:
+                raise serializers.ValidationError(
+                    "Each point must be an object with 'lat' and 'lng' keys.")
+        return value
+
+    def validate(self, attrs):
+        # Strictly FIELD_OPERATOR-only for this endpoint (not COMMAND_CENTER,
+        # even though the model's SubmittedByRole choices still allow it —
+        # this is an endpoint-level restriction, not a schema change).
+        request = self.context.get("request")
+        role = effective_role(request) if request else ""
+        declared = attrs.get("submitted_by_role")
+        if not declared:
+            raise serializers.ValidationError(
+                {"submitted_by_role": "submitted_by_role ('FIELD_OPERATOR') is required."})
+        if role != "fieldunit" or declared != Perimeter.SubmittedByRole.FIELD_OPERATOR:
+            raise serializers.ValidationError(
+                {"submitted_by_role": "Only a field operator (FIELD_OPERATOR) may submit a perimeter."})
+        return attrs
+
+
+class SectorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Sector
+        fields = [
+            "id",
+            "major_incident",
+            "name",
+            "location_lat",
+            "location_lng",
+            "hazard_level",
+            "status",
+            "hazard_description",
+            "estimated_survivors",
+            "access_status",
+            "primary_responder",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "major_incident", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        role = effective_role(request) if request else ""
+        if role not in Incident.COMMANDER_ROLES:
+            raise serializers.ValidationError(
+                {"detail": "Only COMMAND_CENTER (dispatcher/admin) can create a sector."})
+        return attrs
+
+
+class TaskGroupSerializer(serializers.ModelSerializer):
+    # Accepts existing Sector ids to link via the M2M on create; read side
+    # exposes the linked sectors as plain ids (matches this codebase's other
+    # M2M-adjacent fields, e.g. IncidentSerializer.assigned_unit_ids).
+    sector_ids = serializers.PrimaryKeyRelatedField(
+        source="sectors", queryset=Sector.objects.all(), many=True,
+        required=False, write_only=True,
+    )
+    sectors = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+
+    class Meta:
+        model = TaskGroup
+        fields = [
+            "id",
+            "major_incident",
+            "sectors",
+            "sector_ids",
+            "title",
+            "category",
+            "description",
+            "status",
+            "priority",
+            "progress_percent",
+            "assigned_units_count",
+            "completed_subtasks",
+            "total_subtasks",
+            "commander_name",
+            "notes",
+            "created_at",
+            "started_at",
+            "completed_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "major_incident", "sectors", "created_at", "updated_at"]
+
+    def validate_sector_ids(self, value):
+        # Guard against linking a Sector that belongs to a different
+        # MajorIncident than the one this TaskGroup is being created under —
+        # not explicitly requested, but the M2M would otherwise silently
+        # allow cross-incident links with no error. Flagged here rather than
+        # added silently.
+        major_incident = self.context.get("major_incident")
+        if major_incident is not None:
+            mismatched = [s.id for s in value if s.major_incident_id != major_incident.id]
+            if mismatched:
+                raise serializers.ValidationError(
+                    f"Sectors {mismatched} do not belong to this MajorIncident.")
+        return value

@@ -29,12 +29,15 @@ def _push_field_sse(event: dict):
 from .models import (
     Incident, Task, Unit, IncidentEvent, ReportMedia, PushToken,
     FieldCommand,
+    MajorIncident, Sector, TaskGroup, Perimeter,
 )
 from .serializers import (
     IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer,
     FieldCommandSerializer,
+    MajorIncidentSerializer, MajorIncidentGoLiveSerializer,
+    PerimeterSerializer, SectorSerializer, TaskGroupSerializer,
 )
-from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission
+from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission, effective_role, ACTOR_ROLE_HEADER
 # Kept solely because field_incident_detail() below (part of the training
 # simulation, out of scope for the mock->real migration) still uses it for an
 # optional cosmetic location lookup. Every dashboard-facing mock_* endpoint
@@ -857,13 +860,33 @@ def field_incident_add_event(request):
     if data is None:
         return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
 
-    # Persist the event to the database
+    # `source` identifies which of the three timeline contributors logged
+    # this event. Read directly off the declared X-Actor-Role header rather
+    # than effective_role() — that helper collapses FIELD_OPERATOR and UNIT
+    # onto the same underlying "fieldunit" User.Roles value (see
+    # permissions.py), which would make the two indistinguishable here.
+    declared_source = request.META.get(ACTOR_ROLE_HEADER, "")
+    if declared_source not in IncidentEvent.Source.values:
+        return Response(
+            {"detail": (
+                f"X-Actor-Role header is required and must be one of "
+                f"{IncidentEvent.Source.values}."
+            )},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Persist the event to the database. created_by/actor_id follow
+    # _log_status_change's pattern (views.py) — the resolved real actor, not
+    # a client-supplied "created_by" string from the request body.
+    actor = request.user
     event_obj = IncidentEvent.objects.create(
         event_type=request.data.get("event_type", "UPDATE"),
         severity=request.data.get("severity", "INFO"),
         title=request.data.get("title", "Event"),
         description=request.data.get("description", ""),
-        created_by=request.data.get("created_by", "User"),
+        source=declared_source,
+        created_by=getattr(actor, "username", "") or "system",
+        actor_id=getattr(actor, "id", None),
     )
 
     # Persist any uploaded files as ReportMedia records
@@ -886,6 +909,7 @@ def field_incident_add_event(request):
         "severity": event_obj.severity,
         "title": event_obj.title,
         "description": event_obj.description,
+        "source": event_obj.source,
         "created_by": event_obj.created_by,
         "created_at": event_obj.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "media": response_data["media"],
@@ -1232,3 +1256,90 @@ def mobile_unit_heartbeat(request):
         return Response({"status": "ok", "unit_id": unit.id})
     except Unit.DoesNotExist:
         return Response({"detail": "Unit not found for user."}, status=status.HTTP_404_NOT_FOUND)
+
+
+# ============================================
+# REAL MAJOR INCIDENT / SECTOR / TASK GROUP / PERIMETER ENDPOINTS
+# ============================================
+# These back the real "go live" flow and are entirely separate from the
+# FIELD INCIDENT COMMAND DASHBOARD ENDPOINTS section above (the
+# _field_incident_data mock dict, /field/... routes, simulated/
+# field_incident_data.py) — that section is untouched and stays the
+# training-simulation backend. Role gating here follows IncidentSerializer's
+# pattern: permission_classes stays permissive (ReadOnlyOrAdminDispatcher,
+# effectively a no-op — see permissions.py), and the actual role check
+# happens in the serializer's validate(), using effective_role(), returning
+# a 400 on mismatch — not a 403 from permission_classes.
+
+def _get_major_incident_or_404(major_incident_id):
+    try:
+        return MajorIncident.objects.get(pk=major_incident_id)
+    except (MajorIncident.DoesNotExist, ValueError, TypeError):
+        return None
+
+
+@api_view(["POST"])
+def major_incident_go_live(request):
+    """Declare a MajorIncident from an existing (real) Incident. COMMAND_CENTER only."""
+    serializer = MajorIncidentGoLiveSerializer(data=request.data, context={"request": request})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    major_incident = serializer.save()
+    return Response(MajorIncidentSerializer(major_incident).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "POST"])
+def major_incident_perimeter(request, major_incident_id):
+    """GET the latest submitted Perimeter (or null); POST a new one. FIELD_OPERATOR only for POST."""
+    major_incident = _get_major_incident_or_404(major_incident_id)
+    if major_incident is None:
+        return Response({"detail": "MajorIncident not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        latest = major_incident.perimeters.first()  # Meta.ordering = ["-created_at"]
+        return Response(PerimeterSerializer(latest).data if latest else None)
+
+    serializer = PerimeterSerializer(data=request.data, context={"request": request})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    perimeter = serializer.save(major_incident=major_incident)
+    return Response(PerimeterSerializer(perimeter).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "POST"])
+def major_incident_sectors(request, major_incident_id):
+    """GET all Sectors for a MajorIncident; POST creates one (name + hazard_level). COMMAND_CENTER only for POST."""
+    major_incident = _get_major_incident_or_404(major_incident_id)
+    if major_incident is None:
+        return Response({"detail": "MajorIncident not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        sectors = major_incident.sectors.all()
+        return Response(SectorSerializer(sectors, many=True).data)
+
+    serializer = SectorSerializer(data=request.data, context={"request": request})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    sector = serializer.save(major_incident=major_incident)
+    return Response(SectorSerializer(sector).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "POST"])
+def major_incident_task_groups(request, major_incident_id):
+    """GET all TaskGroups for a MajorIncident; POST creates one, optionally linking existing Sectors."""
+    major_incident = _get_major_incident_or_404(major_incident_id)
+    if major_incident is None:
+        return Response({"detail": "MajorIncident not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        task_groups = major_incident.task_groups.all()
+        return Response(TaskGroupSerializer(task_groups, many=True).data)
+
+    serializer = TaskGroupSerializer(
+        data=request.data,
+        context={"request": request, "major_incident": major_incident},
+    )
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    task_group = serializer.save(major_incident=major_incident)
+    return Response(TaskGroupSerializer(task_group).data, status=status.HTTP_201_CREATED)

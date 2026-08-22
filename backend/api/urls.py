@@ -12,6 +12,8 @@ from .views import (
     register_push_token,
     mobile_register_units, mobile_units, mobile_dispatch, mobile_cancel_dispatch,
     mobile_unit_status,
+    major_incident_go_live, major_incident_perimeter, major_incident_sectors,
+    major_incident_task_groups,
 )
 
 router = DefaultRouter()
@@ -56,4 +58,16 @@ urlpatterns = [
          name="field_incident_simulate"),
     path("field/updates/stream/", field_incident_updates_stream,
          name="field_incident_updates_stream"),
+
+    # Real Major Incident / Sector / TaskGroup / Perimeter endpoints (the
+    # "go live" flow). Deliberately under a different prefix than field/...
+    # above, which stays the mock/training-simulation backend.
+    path("major-incidents/go-live/", major_incident_go_live,
+         name="major_incident_go_live"),
+    path("major-incidents/<int:major_incident_id>/perimeter/",
+         major_incident_perimeter, name="major_incident_perimeter"),
+    path("major-incidents/<int:major_incident_id>/sectors/",
+         major_incident_sectors, name="major_incident_sectors"),
+    path("major-incidents/<int:major_incident_id>/task-groups/",
+         major_incident_task_groups, name="major_incident_task_groups"),
 ]

@@ -17,6 +17,11 @@ ACTOR_ROLE_HEADER = "HTTP_X_ACTOR_ROLE"
 _ACTOR_ROLE_TO_USER_ROLE = {
     "COMMAND_CENTER": "dispatcher",
     "UNIT": "fieldunit",
+    # Alias for "UNIT" used by the MajorIncident/Perimeter/Sector endpoints,
+    # which speak FieldCommand.ClosedByRole's vocabulary (FIELD_OPERATOR/
+    # COMMAND_CENTER) rather than Incident.ClosedBy's (UNIT/COMMAND_CENTER).
+    # Both resolve to the same underlying "fieldunit" User.Roles value.
+    "FIELD_OPERATOR": "fieldunit",
 }
 
 

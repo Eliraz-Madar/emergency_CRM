@@ -377,6 +377,19 @@ class MajorIncident(models.Model):
         STABILIZING = "STABILIZING", "Stabilizing"
         RECOVERY = "RECOVERY", "Recovery"
 
+    # Link back to the regional-dashboard Incident this was declared from.
+    # OneToOne: an Incident can go live at most once. SET_NULL (not CASCADE)
+    # so this row survives if the source Incident is ever deleted, matching
+    # the SET_NULL convention used elsewhere for audit-trail FKs (see
+    # Incident.field_command, Task.assigned_unit). The "go live" view is
+    # responsible for rejecting a second attempt on the same Incident
+    # (see api/views.py) — this field alone only prevents it at the DB level
+    # once both rows exist.
+    incident = models.OneToOneField(
+        Incident, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="major_incident",
+    )
+
     # Basic info
     title = models.CharField(max_length=300)
     incident_type = models.CharField(
@@ -431,8 +444,11 @@ class Sector(models.Model):
 
     # Identity
     name = models.CharField(max_length=100)  # e.g., "North Zone", "Sector A"
-    location_lat = models.FloatField()
-    location_lng = models.FloatField()
+    # Nullable: this phase creates sectors as label + hazard_level only, with
+    # no map position. Left as FloatField (not removed) so a position can be
+    # attached later without another migration touching this pair.
+    location_lat = models.FloatField(null=True, blank=True)
+    location_lng = models.FloatField(null=True, blank=True)
 
     # Assessment
     hazard_level = models.CharField(
@@ -526,6 +542,40 @@ class TaskGroup(models.Model):
         return f"{self.major_incident.title} - {self.title}"
 
 
+class Perimeter(models.Model):
+    """
+    Field-submitted danger-zone/perimeter boundary for a MajorIncident.
+    No uniqueness constraint — a resubmission is inserted as a new row so
+    history is kept; callers wanting the active boundary take the latest by
+    created_at (see Meta.ordering).
+    """
+
+    # Mirrors FieldCommand.ClosedByRole's two values rather than inventing a
+    # new enum — there is no existing single COMMAND_CENTER/FIELD_OPERATOR/
+    # UNIT choice set in this codebase to reuse verbatim (Incident.ClosedBy
+    # is UNIT/COMMAND_CENTER; FieldCommand.ClosedByRole is FIELD_OPERATOR/
+    # COMMAND_CENTER). This picks the FieldCommand pair since a perimeter is
+    # always submitted by a field operator or, on their behalf, command
+    # center — never a generic "unit".
+    class SubmittedByRole(models.TextChoices):
+        FIELD_OPERATOR = "FIELD_OPERATOR", "Field Operator"
+        COMMAND_CENTER = "COMMAND_CENTER", "Command Center"
+
+    major_incident = models.ForeignKey(
+        MajorIncident, related_name="perimeters", on_delete=models.CASCADE)
+    points = models.JSONField(
+        help_text="Ordered list of {lat, lng} objects tracing the boundary.")
+    submitted_by_role = models.CharField(
+        max_length=20, choices=SubmittedByRole.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.major_incident.title} perimeter @ {self.created_at:%Y-%m-%d %H:%M}"
+
+
 class IncidentEvent(models.Model):
     """
     Timestamped event log entry for both regular incidents and major incidents.
@@ -547,6 +597,17 @@ class IncidentEvent(models.Model):
         WARNING = "WARNING", "Warning"
         CRITICAL = "CRITICAL", "Critical"
 
+    # Who logged this event. Same three-way vocabulary as the X-Actor-Role
+    # header itself (see ACTOR_ROLE_HEADER in permissions.py) and matches
+    # this codebase's existing "UNIT" (not "MOBILE_UNIT") convention from
+    # Incident.ClosedBy. Nullable/blank: only field_incident_add_event sets
+    # this today (see api/views.py); events logged elsewhere (e.g.
+    # _log_status_change for regular Incident transitions) don't populate it.
+    class Source(models.TextChoices):
+        COMMAND_CENTER = "COMMAND_CENTER", "Command Center"
+        FIELD_OPERATOR = "FIELD_OPERATOR", "Field Operator"
+        UNIT = "UNIT", "Unit"
+
     # Context
     incident = models.ForeignKey(
         Incident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
@@ -559,6 +620,8 @@ class IncidentEvent(models.Model):
         max_length=20, choices=Severity.choices, default=Severity.INFO)
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
+    source = models.CharField(
+        max_length=20, choices=Source.choices, null=True, blank=True)
 
     # Meta
     created_by = models.CharField(max_length=100, blank=True)
