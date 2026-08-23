@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { formatTime } from '../utils/time.js';
 import { useDashboardStore } from '../store/dashboard.js';
+import { getSortedAvailableUnits } from '../utils/units.js';
 import { RealtimeService } from '../services/realtime.js';
 import { KPICards } from '../components/KPICards.jsx';
 import { FilterBar } from '../components/FilterBar.jsx';
@@ -10,6 +11,21 @@ import { MapView } from '../components/MapView.jsx';
 import { IncidentDetailsPanel } from '../components/IncidentDetailsPanel.jsx';
 import { EventFeed } from '../components/EventFeed.jsx';
 import * as api from '../api/client.js';
+
+// Field Command creation modal — mandatory incident-classification dropdown.
+// "Other" reveals a required free-text field; the typed value is submitted
+// as incident_type, never the literal string "Other" (see
+// handleCreateFieldSubmit).
+const FIELD_INCIDENT_TYPES = [
+  'Hazmat',
+  'Earthquake',
+  'Shooting',
+  'Tsunami',
+  'Terror Attack',
+  'Wildfire',
+  'Mass Casualty',
+  'Other',
+];
 
 /**
  * Dashboard Page - Main operational dashboard (War-Room)
@@ -29,7 +45,6 @@ export default function Dashboard() {
     setEvents,
     addIncident,
     updateIncident,
-    updateUnit,
     addEvent,
     setConnectionStatus,
     connectionStatus,
@@ -42,6 +57,9 @@ export default function Dashboard() {
     selectedUnitIds,
     units,
     onlineUnits,
+    fieldCommands,
+    setFieldCommands,
+    upsertFieldCommand,
     activeFilter: storedActiveFilter,
     setActiveFilter: storeSetActiveFilter,
     zoomToIncidentId,
@@ -51,14 +69,21 @@ export default function Dashboard() {
   } = useDashboardStore();
 
   const [isLoading, setIsLoading] = useState(true);
-  const [realtimeService, setRealtimeService] = useState(null);
+  // A ref, not state: the effect's cleanup below needs to read whichever
+  // connection was most recently assigned at the moment cleanup actually
+  // runs, not whatever `realtimeService` happened to be at the time the
+  // effect body itself last executed (state read via closure would be
+  // stale here, since the connection isn't created until deep inside an
+  // async initializeData() call — a plain useState value captured by the
+  // effect's own closure would still be the initial `null` when cleanup
+  // fires).
+  const realtimeServiceRef = useRef(null);
   const [showEventFeed, setShowEventFeed] = useState(false);
   // activeFilter is persisted in the store so it survives page refresh
   const activeFilter = storedActiveFilter;
   const setActiveFilter = storeSetActiveFilter;
   const [activeFieldId, setActiveFieldId] = useState('');
   const [activeFieldName, setActiveFieldName] = useState('');
-  const [fieldCommands, setFieldCommands] = useState([]);
   const [selectedFieldCommand, setSelectedFieldCommand] = useState(null);
   const [fieldCommandSummary, setFieldCommandSummary] = useState(null);
   const [fieldCommandLoading, setFieldCommandLoading] = useState(false);
@@ -66,11 +91,14 @@ export default function Dashboard() {
   const [isCreateFieldOpen, setIsCreateFieldOpen] = useState(false);
   const [createFieldLocation, setCreateFieldLocation] = useState(null);
   const [createFieldForm, setCreateFieldForm] = useState({
-    unitName: '',
+    name: '',
     incidentType: '',
+    incidentTypeOther: '',
+    selectedUnitIds: [],
     notes: '',
     incidentPhase: 'Containment',
   });
+  const [showCreateFieldAdvanced, setShowCreateFieldAdvanced] = useState(false);
   const [closeFieldReason, setCloseFieldReason] = useState('');
   const [closeFieldRole, setCloseFieldRole] = useState('COMMAND_CENTER');
 
@@ -91,6 +119,35 @@ export default function Dashboard() {
   // final changes/04_disable_frontend_map_simulation.md and
   // final changes/05_user_unit_claiming_and_live_sync.md.
   const activeUnits = Array.isArray(onlineUnits) ? onlineUnits.filter((u) => u.is_online === true) : [];
+
+  // Field Command creation modal's unit checklist: any available unit
+  // (no agency-type filter, unlike MapView's Dispatch modal), sorted
+  // nearest-first to the right-clicked point. getSortedAvailableUnits
+  // already excludes units already attached to a FieldCommand.
+  const sortedAvailableFieldUnits = useMemo(
+    () => getSortedAvailableUnits(activeUnits, createFieldLocation, null),
+    [activeUnits, createFieldLocation],
+  );
+
+  // Field Command Overview's "Assign Global Forces" list: previously just
+  // `units.filter(u => !u.field_id)` with no is_online/EN_ROUTE/ON_SCENE
+  // check at all — unlike every other "available units" surface in the
+  // app. FieldCommandSerializer (backend/api/serializers.py) exposes
+  // location_lat/location_lng directly (no source= remapping), and
+  // selectedFieldCommand carries the same shape as the list endpoint, so
+  // it's available immediately with no loading-race gap. Sorted
+  // nearest-first as a consequence of using the shared helper.
+  const sortedAssignableUnits = useMemo(
+    () => getSortedAvailableUnits(
+      units,
+      selectedFieldCommand
+        ? { lat: selectedFieldCommand.location_lat, lng: selectedFieldCommand.location_lng }
+        : null,
+      null,
+    ),
+    [units, selectedFieldCommand],
+  );
+
   const selectedUnit = Array.isArray(activeUnits) && selectedUnitId
     ? activeUnits.find((u) => String(u.id) === String(selectedUnitId))
     : null;
@@ -216,38 +273,94 @@ export default function Dashboard() {
     setCreateFieldForm((prev) => ({ ...prev, [field]: value }));
   };
 
+  const handleToggleCreateFieldUnit = (unitId) => {
+    setCreateFieldForm((prev) => ({
+      ...prev,
+      selectedUnitIds: prev.selectedUnitIds.includes(unitId)
+        ? prev.selectedUnitIds.filter((id) => id !== unitId)
+        : [...prev.selectedUnitIds, unitId],
+    }));
+  };
+
   const resetCreateFieldForm = () => {
     setCreateFieldForm({
-      unitName: '',
+      name: '',
       incidentType: '',
+      incidentTypeOther: '',
+      selectedUnitIds: [],
       notes: '',
       incidentPhase: 'Containment',
     });
+    setShowCreateFieldAdvanced(false);
     setCreateFieldLocation(null);
   };
 
   const handleCreateFieldSubmit = async (event) => {
     event.preventDefault();
     if (!createFieldLocation) return;
+
+    const trimmedName = createFieldForm.name.trim();
+    const resolvedIncidentType = createFieldForm.incidentType === 'Other'
+      ? createFieldForm.incidentTypeOther.trim()
+      : createFieldForm.incidentType;
+    // Backstop only — the name input and the type dropdown/Other field
+    // already carry `required`, so this shouldn't normally fire.
+    if (!trimmedName || !resolvedIncidentType) return;
+
     setFieldCommandLoading(true);
     setFieldCommandError('');
+
+    // unit_name is still required by the backend serializer even though the
+    // modal no longer collects it directly — derive a readable summary from
+    // the checklist instead. Zero units selected is allowed (a post can be
+    // staffed later via the existing assign-unit flow), rendered as
+    // "Unassigned".
+    const selectedUnits = sortedAvailableFieldUnits.filter((u) => createFieldForm.selectedUnitIds.includes(u.id));
+    const unitNames = selectedUnits.map((u) => u.name || `Unit #${u.id}`);
+    const unitNameSummary = unitNames.length === 0
+      ? 'Unassigned'
+      : unitNames.length <= 4
+        ? unitNames.join(', ')
+        : `${unitNames.slice(0, 3).join(', ')} +${unitNames.length - 3} more`;
+
     try {
       const payload = {
-        name: createFieldForm.unitName || 'Field Command',
-        unit_name: createFieldForm.unitName || 'Field Unit',
-        incident_type: createFieldForm.incidentType || 'General Incident',
+        name: trimmedName,
+        unit_name: unitNameSummary,
+        incident_type: resolvedIncidentType,
         note: createFieldForm.notes,
         incident_phase: createFieldForm.incidentPhase,
         location_lat: createFieldLocation.lat,
         location_lng: createFieldLocation.lng,
       };
+      // FieldCommandSerializer's "id" is the field_key (see
+      // FieldCommandViewSet.perform_create) — the create response already
+      // carries it, so assign-unit calls below can fire immediately with no
+      // re-fetch.
       const created = await api.createFieldCommand(payload);
-      await refreshFieldCommands();
+
+      const failedUnitNames = [];
+      for (const unitId of createFieldForm.selectedUnitIds) {
+        try {
+          await api.assignUnitToField(created.id, unitId);
+        } catch (assignError) {
+          console.error(`Failed to assign unit ${unitId} to new field command ${created.id}:`, assignError);
+          const unit = selectedUnits.find((u) => u.id === unitId);
+          failedUnitNames.push(unit?.name || `Unit #${unitId}`);
+        }
+      }
+
+      const [realUnits] = await Promise.all([api.getRealUnits(), refreshFieldCommands()]);
+      setOnlineUnits(realUnits || []);
       if (created?.id) {
         await handleFieldCommandSelect(created);
       }
       setIsCreateFieldOpen(false);
       resetCreateFieldForm();
+
+      if (failedUnitNames.length > 0) {
+        setFieldCommandError(`Field command created, but failed to assign: ${failedUnitNames.join(', ')}.`);
+      }
     } catch (error) {
       console.error('Failed to create field command:', error);
       setFieldCommandError('Failed to create field command.');
@@ -311,6 +424,16 @@ export default function Dashboard() {
 
   // Initialize data and realtime connection
   useEffect(() => {
+    // React.StrictMode (main.jsx) intentionally runs this effect
+    // mount->cleanup->mount once in dev. The first pass's cleanup fires
+    // synchronously, before its own initializeData() has gotten anywhere
+    // near the `await Promise.all(...)` below, let alone the realtime
+    // connect() call — so a ref alone doesn't stop the first pass's async
+    // work from eventually opening its own SSE connection too. This flag
+    // lets each pass's own async closure recognize it's been cleaned up
+    // and bail out before ever calling connect(), so only the surviving
+    // (second) pass ends up with a live connection.
+    let cancelled = false;
     const initializeData = async () => {
       try {
         setConnectionStatus('CONNECTING');
@@ -345,34 +468,27 @@ export default function Dashboard() {
         setConnectionStatus('CONNECTED');
         setIsLoading(false);
 
-        // Connect to realtime updates
+        // This pass was already cleaned up (StrictMode's synthetic first
+        // pass, or a genuine unmount) while the fetches above were in
+        // flight — don't open a connection nobody will ever close.
+        if (cancelled) return;
+
+        // Connect to realtime updates.
+        // Every real broadcast from the backend arrives as a flat payload
+        // with type: 'user_action' and an 'action' sub-field (see
+        // api/views.py::_broadcast_realtime call sites) — there is no bare
+        // update.type === 'incident_created'/'incident_updated'/
+        // 'unit_updated' shape broadcast anywhere by the real backend
+        // (those only ever existed in backend/simulated/mock_data.py, a
+        // different, unrelated stream this dashboard isn't connected to).
+        // The branches below were previously dead for exactly that reason
+        // and have been removed rather than fixed to match a shape nothing
+        // sends.
         const realtime = new RealtimeService(
           (update) => {
             if (update.type === 'connected') {
               console.log('Connected to real-time updates');
               setConnectionStatus('CONNECTED');
-            } else if (update.type === 'incident_created') {
-              addIncident(update.data);
-              addEvent({
-                id: Math.random(),
-                timestamp: new Date().toISOString(),
-                entity_type: 'incident',
-                entity_id: update.data.id,
-                message: `New incident: ${update.data.title}`,
-                level: 'warn',
-              });
-            } else if (update.type === 'incident_updated') {
-              updateIncident(update.data.id, update.data);
-              addEvent({
-                id: Math.random(),
-                timestamp: new Date().toISOString(),
-                entity_type: 'incident',
-                entity_id: update.data.id,
-                message: `Incident updated`,
-                level: 'info',
-              });
-            } else if (update.type === 'unit_updated') {
-              updateUnit(update.data.id, update.data);
             } else if (update.type === 'user_action' && (
               update.action === 'unit_claimed' ||
               update.action === 'unit_location_update' ||
@@ -391,6 +507,48 @@ export default function Dashboard() {
                   : {}),
                 is_online: update.action !== 'unit_disconnected',
               });
+            } else if (update.type === 'user_action' && update.action === 'incident_status_update') {
+              updateIncident(update.incident_id, { status: update.new_status });
+            } else if (update.type === 'user_action' && update.action === 'incident_created') {
+              // update itself is the full IncidentSerializer shape (see
+              // IncidentViewSet.perform_create) — safe to insert as-is.
+              addIncident(update);
+              addEvent({
+                id: Math.random(),
+                timestamp: new Date().toISOString(),
+                entity_type: 'incident',
+                entity_id: update.id,
+                message: `New incident: ${update.title}`,
+                level: 'warn',
+              });
+            } else if (update.type === 'user_action' && (
+              update.action === 'field_command_created' ||
+              update.action === 'field_command_closed' ||
+              update.action === 'field_command_unit_assigned' ||
+              update.action === 'field_command_incident_assigned'
+            )) {
+              // update itself is the full FieldCommandSerializer shape (see
+              // FieldCommandViewSet's perform_create/assign_unit/
+              // assign_incident/close) — safe to merge as-is. A closed
+              // entry isn't evicted here; MapView.jsx's field-command
+              // marker loop and DashboardSelector.jsx already filter out
+              // status === 'CLOSED' client-side, so merging the new status
+              // in is sufficient to hide it everywhere that matters.
+              upsertFieldCommand(update);
+            } else if (update.type === 'user_action' && (
+              update.action === 'task_status_update' ||
+              update.action === 'incident_unit_assigned'
+            )) {
+              // Known gap, not silently dropped: this dashboard holds no
+              // standalone Task state (useDashboardStore has no `tasks`
+              // array/updateTask action) — the only task-derived data an
+              // Incident carries is its serializer-computed
+              // assigned_unit_ids, which these two events would affect but
+              // which this handler has no accurate way to recompute
+              // without re-fetching the incident. Logged so the gap is
+              // visible rather than invisible; not wired to any store
+              // mutation this stage.
+              console.log(`[Realtime] ${update.action} received but not yet consumed (no task state on this dashboard):`, update);
             }
           },
           (error) => {
@@ -407,7 +565,7 @@ export default function Dashboard() {
         );
 
         realtime.connect();
-        setRealtimeService(realtime);
+        realtimeServiceRef.current = realtime;
       } catch (error) {
         console.error('Failed to initialize dashboard:', error);
         setConnectionStatus('OFFLINE');
@@ -418,7 +576,9 @@ export default function Dashboard() {
     initializeData();
 
     return () => {
-      realtimeService?.disconnect();
+      cancelled = true;
+      realtimeServiceRef.current?.disconnect();
+      realtimeServiceRef.current = null;
     };
   }, []);
 
@@ -458,7 +618,7 @@ export default function Dashboard() {
             }
           );
           realtime.connect();
-          setRealtimeService(realtime);
+          realtimeServiceRef.current = realtime;
         }
       } catch (error) {
         console.error('Polling error:', error);
@@ -805,9 +965,11 @@ export default function Dashboard() {
                 {selectedFieldCommand && (
                   <div style={{ marginTop: '12px' }}>
                     <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Link Incident</div>
-                    {Array.isArray(incidents) && incidents.filter((inc) => !inc.field_command).length ? (
+                    {/* Closed incidents are never linkable — they're done,
+                        not a target for further field-command coordination. */}
+                    {Array.isArray(incidents) && incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED').length ? (
                       <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
-                        {incidents.filter((inc) => !inc.field_command).slice(0, 10).map((inc) => (
+                        {incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED').slice(0, 10).map((inc) => (
                           <div key={inc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                             <span style={{ fontSize: '0.8rem' }}>{inc.title || `Incident ${inc.id}`}</span>
                             <button
@@ -827,12 +989,14 @@ export default function Dashboard() {
                 )}
 
                 <div style={{ marginTop: '12px' }}>
-                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assign Global Forces</div>
-                  {Array.isArray(units) && units.filter((u) => !u.field_id).length ? (
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assign Global Forces (nearest first)</div>
+                  {sortedAssignableUnits.length ? (
                     <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
-                      {units.filter((u) => !u.field_id).slice(0, 10).map((unit) => (
+                      {sortedAssignableUnits.slice(0, 10).map((unit) => (
                         <div key={unit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                          <span style={{ fontSize: '0.8rem' }}>{unit.name || `Unit ${unit.id}`}</span>
+                          <span style={{ fontSize: '0.8rem' }}>
+                            {unit.name || `Unit ${unit.id}`} ({Number.isFinite(unit.distanceKm) ? `${unit.distanceKm.toFixed(1)} km` : 'No GPS'})
+                          </span>
                           <button
                             className="feed-toggle"
                             style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
@@ -877,46 +1041,110 @@ export default function Dashboard() {
               border: '1px solid #334155',
               borderRadius: '12px',
               padding: '16px',
-              width: '360px',
+              width: '420px',
+              maxHeight: '85vh',
+              overflowY: 'auto',
               color: '#e2e8f0',
             }}
             onClick={(event) => event.stopPropagation()}
           >
-            <h3 style={{ marginTop: 0 }}>Create Field Command</h3>
+            <h3 style={{ marginTop: 0 }}>🏢 Open Field Command Post</h3>
             <form onSubmit={handleCreateFieldSubmit}>
-              <label style={{ fontSize: '0.8rem' }}>Unit Name</label>
+              <label style={{ fontSize: '0.8rem' }}>Command Name</label>
               <input
                 type="text"
-                value={createFieldForm.unitName}
-                onChange={(e) => handleCreateFieldChange('unitName', e.target.value)}
+                value={createFieldForm.name}
+                onChange={(e) => handleCreateFieldChange('name', e.target.value)}
                 style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
-                placeholder="Field Command Alpha"
+                placeholder="Field Command Post Alpha"
                 required
               />
+
               <label style={{ fontSize: '0.8rem' }}>Incident Type</label>
-              <input
-                type="text"
+              <select
                 value={createFieldForm.incidentType}
                 onChange={(e) => handleCreateFieldChange('incidentType', e.target.value)}
                 style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
-                placeholder="Wildfire"
                 required
-              />
-              <label style={{ fontSize: '0.8rem' }}>Initial Report / Notes</label>
-              <textarea
-                value={createFieldForm.notes}
-                onChange={(e) => handleCreateFieldChange('notes', e.target.value)}
-                style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px', minHeight: '70px' }}
-                placeholder="Initial situation report..."
-              />
-              <label style={{ fontSize: '0.8rem' }}>Incident Phase</label>
-              <input
-                type="text"
-                value={createFieldForm.incidentPhase}
-                onChange={(e) => handleCreateFieldChange('incidentPhase', e.target.value)}
-                style={{ width: '100%', margin: '6px 0 12px', padding: '6px', borderRadius: '6px' }}
-                placeholder="Containment"
-              />
+              >
+                <option value="" disabled>-- Select Type --</option>
+                {FIELD_INCIDENT_TYPES.map((type) => (
+                  <option key={type} value={type}>{type}</option>
+                ))}
+              </select>
+
+              {createFieldForm.incidentType === 'Other' && (
+                <input
+                  type="text"
+                  value={createFieldForm.incidentTypeOther}
+                  onChange={(e) => handleCreateFieldChange('incidentTypeOther', e.target.value)}
+                  style={{ width: '100%', margin: '0 0 10px', padding: '6px', borderRadius: '6px' }}
+                  placeholder="Specify incident type"
+                  required
+                />
+              )}
+
+              <label style={{ fontSize: '0.8rem' }}>Units (nearest first)</label>
+              <div
+                style={{
+                  maxHeight: '160px',
+                  overflowY: 'auto',
+                  margin: '6px 0 10px',
+                  padding: '6px',
+                  borderRadius: '6px',
+                  border: '1px solid #334155',
+                  background: '#111827',
+                }}
+              >
+                {sortedAvailableFieldUnits.length === 0 && (
+                  <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                    No available units found near this location.
+                  </div>
+                )}
+                {sortedAvailableFieldUnits.map((u) => (
+                  <label
+                    key={u.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', padding: '3px 0', cursor: 'pointer' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={createFieldForm.selectedUnitIds.includes(u.id)}
+                      onChange={() => handleToggleCreateFieldUnit(u.id)}
+                    />
+                    {u.name || `Unit #${u.id}`} ({Number.isFinite(u.distanceKm) ? `${u.distanceKm.toFixed(1)} km` : 'No GPS'})
+                  </label>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                className="feed-toggle"
+                onClick={() => setShowCreateFieldAdvanced((prev) => !prev)}
+                style={{ marginBottom: '10px' }}
+              >
+                {showCreateFieldAdvanced ? '▾ Optional Details' : '▸ Optional Details'}
+              </button>
+
+              {showCreateFieldAdvanced && (
+                <>
+                  <label style={{ fontSize: '0.8rem' }}>Initial Report / Notes</label>
+                  <textarea
+                    value={createFieldForm.notes}
+                    onChange={(e) => handleCreateFieldChange('notes', e.target.value)}
+                    style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px', minHeight: '70px' }}
+                    placeholder="Initial situation report..."
+                  />
+                  <label style={{ fontSize: '0.8rem' }}>Incident Phase</label>
+                  <input
+                    type="text"
+                    value={createFieldForm.incidentPhase}
+                    onChange={(e) => handleCreateFieldChange('incidentPhase', e.target.value)}
+                    style={{ width: '100%', margin: '6px 0 12px', padding: '6px', borderRadius: '6px' }}
+                    placeholder="Containment"
+                  />
+                </>
+              )}
+
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
                 <button
                   type="button"

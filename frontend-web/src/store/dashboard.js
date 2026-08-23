@@ -15,8 +15,9 @@ const DEFAULT_FILTERS = {
  * Dashboard state management using Zustand.
  * Handles incidents, units, events, filters, and real-time updates.
  *
- * UI preferences (selectedIncidentId, filters, sortBy, activeFilter) are
- * persisted to localStorage so they survive page refreshes.
+ * UI preferences (filters, sortBy, activeFilter) are persisted to
+ * localStorage so they survive page refreshes. selectedIncidentId is
+ * deliberately excluded — see partialize below.
  * Live data (incidents, units, events) is always re-fetched from the backend.
  */
 export const useDashboardStore = create(
@@ -30,6 +31,10 @@ export const useDashboardStore = create(
       // final changes/05_user_unit_claiming_and_live_sync.md.
       onlineUnits: [],
       events: [],
+      // Real, DB-backed FieldCommand rows. Was local useState in
+      // Dashboard.jsx; moved here so the SSE handler can merge remote
+      // field_command_* broadcasts into it the same way onlineUnits works.
+      fieldCommands: [],
 
       // UI State
       selectedIncidentId: null,
@@ -56,6 +61,7 @@ export const useDashboardStore = create(
       setUnits: (units) => set({ units }),
       setOnlineUnits: (onlineUnits) => set({ onlineUnits }),
       setEvents: (events) => set({ events }),
+      setFieldCommands: (fieldCommands) => set({ fieldCommands }),
 
       // Merge a partial real-unit update (from an SSE broadcast) into
       // onlineUnits by id — updates in place if known, inserts if new.
@@ -69,10 +75,34 @@ export const useDashboardStore = create(
         };
       }),
 
-      addIncident: (incident) => set((state) => ({
-        incidents: [incident, ...state.incidents],
-        lastUpdateTime: new Date(),
-      })),
+      // Same merge-by-id/insert-if-unknown shape as upsertOnlineUnit, keyed
+      // on id (== FieldCommand.field_key, e.g. "field-2" — confirmed in
+      // Stage 2, never the internal numeric pk). Closed entries are not
+      // evicted here — MapView.jsx's field-command marker loop and
+      // DashboardSelector.jsx already filter out status === 'CLOSED'
+      // client-side, so merging a closed status in is sufficient to hide it
+      // everywhere that matters without a separate remove action.
+      upsertFieldCommand: (partial) => set((state) => {
+        const exists = state.fieldCommands.some((f) => f.id === partial.id);
+        return {
+          fieldCommands: exists
+            ? state.fieldCommands.map((f) => (f.id === partial.id ? { ...f, ...partial } : f))
+            : [...state.fieldCommands, partial],
+          lastUpdateTime: new Date(),
+        };
+      }),
+
+      // Defense-in-depth against duplicate delivery (e.g. a stray second SSE
+      // connection, a retried broadcast) — a true "add," not a merge like
+      // upsertOnlineUnit/upsertFieldCommand: if this id is already present,
+      // do nothing (updateIncident/incident_status_update already own real
+      // field updates, so silently overwriting here would be the wrong
+      // behavior even if it weren't a duplicate).
+      addIncident: (incident) => set((state) => (
+        state.incidents.some((inc) => inc.id === incident.id)
+          ? state
+          : { incidents: [incident, ...state.incidents], lastUpdateTime: new Date() }
+      )),
 
       updateIncident: (incidentId, updates) => set((state) => ({
         incidents: state.incidents.map(inc =>
@@ -170,9 +200,13 @@ export const useDashboardStore = create(
     }),
     {
       name: 'ecm-dashboard-ui',
-      // Only persist UI preferences — live data always comes from the API
+      // Only persist UI preferences — live data always comes from the API.
+      // selectedIncidentId is deliberately NOT persisted: the incident
+      // panel should never silently reopen on a fresh page load pointing
+      // at whatever was last selected — every dismiss path (X, Escape,
+      // empty-map click, selecting a different incident) should be a real,
+      // durable "closed" state, not something a reload can undo.
       partialize: (state) => ({
-        selectedIncidentId: state.selectedIncidentId,
         activeFilter: state.activeFilter,
         filters: state.filters,
         sortBy: state.sortBy,
@@ -188,7 +222,6 @@ export const useDashboardStore = create(
       migrate: (persistedState) => {
         const old = (persistedState && typeof persistedState === 'object') ? persistedState : {};
         return {
-          selectedIncidentId: old.selectedIncidentId ?? null,
           activeFilter: 'ALL',
           filters: DEFAULT_FILTERS,
           sortBy: old.sortBy ?? 'severity',

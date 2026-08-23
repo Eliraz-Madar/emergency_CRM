@@ -3,20 +3,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle } from 'react-leaflet';
 import { useDashboardStore } from '../store/dashboard.js';
-
-function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return Infinity;
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
+import { getSortedAvailableUnits } from '../utils/units.js';
 
 /**
  * Map View Component - displays incidents and units on map (regional
@@ -73,13 +60,6 @@ export function MapView({
   // channel value). Not itself sent in the payload.
   const [titleType, setTitleType] = useState('Fire');
 
-  const [fieldHqForm, setFieldHqForm] = useState({
-    name: '',
-    incidentType: 'MASS_CASUALTY',
-    activeForcesNotes: '',
-    status: 'Dispatching',
-  });
-
   const [dispatchAgency, setDispatchAgency] = useState('POLICE');
   const [dispatchUnitId, setDispatchUnitId] = useState('');
 
@@ -90,14 +70,23 @@ export function MapView({
     setSelectedPoint(null);
     setIncidentForm({ type: 'POLICE', title: '', priority: 'HIGH', description: '' });
     setTitleType('Fire');
-    setFieldHqForm({ name: '', incidentType: 'MASS_CASUALTY', activeForcesNotes: '', status: 'Dispatching' });
     setDispatchAgency('POLICE');
     setDispatchUnitId('');
   }, []);
 
   const handleSelectAction = useCallback((actionType) => {
     if (!contextMenu) return;
-    setSelectedPoint({ lat: contextMenu.lat, lng: contextMenu.lng });
+    const point = { lat: contextMenu.lat, lng: contextMenu.lng };
+    if (actionType === 'FIELD_HQ') {
+      // No intermediate popup — this used to open its own modal whose
+      // submit discarded everything typed and only ever forwarded the
+      // coordinates anyway (see Stage 2 diagnosis). Dashboard.jsx's own
+      // Create Field Command modal opens immediately with just the point.
+      onMapCreateFieldCommandRef.current?.(point);
+      setContextMenu(null);
+      return;
+    }
+    setSelectedPoint(point);
     setActiveModal(actionType);
     setContextMenu(null);
   }, [contextMenu]);
@@ -115,20 +104,6 @@ export function MapView({
     });
     handleCloseModal();
   }, [selectedPoint, incidentForm, handleCloseModal]);
-
-  const handleCreateFieldHqSubmit = useCallback((e) => {
-    e.preventDefault();
-    if (!selectedPoint) return;
-    onMapCreateFieldCommandRef.current?.({
-      lat: selectedPoint.lat,
-      lng: selectedPoint.lng,
-      name: fieldHqForm.name,
-      incidentType: fieldHqForm.incidentType,
-      activeForcesNotes: fieldHqForm.activeForcesNotes,
-      status: fieldHqForm.status,
-    });
-    handleCloseModal();
-  }, [selectedPoint, fieldHqForm, handleCloseModal]);
 
   const handleDispatchSubmit = useCallback((e) => {
     e.preventDefault();
@@ -315,11 +290,16 @@ export function MapView({
     map.on('click', () => {
       // Left click is movement/selection only — it must never create anything.
       // Marker-level click handlers (select incident, select field command)
-      // still work as before; this just closes any open popup/menu.
+      // still work as before — L.Marker defaults to bubblingMouseEvents:
+      // false, so a marker click never reaches this handler, only genuine
+      // empty-space clicks do. This just closes any open popup/menu, and
+      // also closes the incident details panel the same way the X
+      // button/Escape do.
       if (map && map.closePopup) {
         map.closePopup();
       }
       setContextMenu(null);
+      setSelectedIncident(null);
     });
 
     map.on('contextmenu', (event) => {
@@ -441,10 +421,15 @@ export function MapView({
 
     // Simulation mode now relies on incidents array containing only the simulated incident
 
-    // ROUTINE MODE: Add incident markers (with filtering)
+    // ROUTINE MODE: Add incident markers (with filtering).
+    // Closed incidents never get a marker — the GET /api/incidents/ list
+    // itself stays unfiltered (sidebar/KPI counts need every row), this is
+    // purely a map-rendering exclusion. "CLOSED" matches Incident.Status.CLOSED
+    // exactly (backend/api/models.py).
+    const openIncidents = incidents.filter(inc => inc.status !== 'CLOSED');
     const filteredIncidents = activeFilter === 'ALL'
-      ? incidents
-      : incidents.filter(inc => {
+      ? openIncidents
+      : openIncidents.filter(inc => {
         const channel = inc.channel?.toUpperCase() || '';
         return channel.includes(activeFilter);
       });
@@ -526,7 +511,10 @@ export function MapView({
       markersRef.current[`incident-${incident.id}`] = marker;
     });
 
-    const fieldList = Array.isArray(fieldCommands) ? fieldCommands : [];
+    // Closed field command posts never get a marker either — same rationale
+    // as openIncidents above. "CLOSED" matches FieldCommand.Status.CLOSED
+    // exactly (backend/api/models.py).
+    const fieldList = (Array.isArray(fieldCommands) ? fieldCommands : []).filter((f) => f.status !== 'CLOSED');
     fieldList.forEach((field) => {
       const lat = field.location_lat ?? field.lat;
       const lng = field.location_lng ?? field.lng;
@@ -838,27 +826,14 @@ export function MapView({
   }, [activeUnits, incidents]);
 
   // Units eligible for dispatch: matching agency, not already committed
-  // (EN_ROUTE / ON_SCENE), sorted nearest-first to the right-clicked point.
-  const sortedAvailableUnits = (() => {
-    if (!selectedPoint) return [];
-    const pool = (Array.isArray(activeUnits) ? activeUnits : []).filter((unit) => {
-      const status = (unit.status || '').toUpperCase();
-      if (status === 'EN_ROUTE' || status === 'ON_SCENE') return false;
-      if ((unit.type || '').toUpperCase() !== dispatchAgency) return false;
-      return true;
-    });
-    return pool
-      .map((unit) => {
-        const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
-        const uLat = hasPosition ? unit.position[0] : (unit.latitude ?? unit.location_lat);
-        const uLng = hasPosition ? unit.position[1] : (unit.longitude ?? unit.location_lng);
-        return {
-          ...unit,
-          distanceKm: calculateDistanceKm(selectedPoint.lat, selectedPoint.lng, uLat, uLng),
-        };
-      })
-      .sort((a, b) => a.distanceKm - b.distanceKm);
-  })();
+  // (EN_ROUTE / ON_SCENE), not already attached to a FieldCommand, sorted
+  // nearest-first to the right-clicked point. Shared with the FieldCommand
+  // creation modal's unit checklist (Dashboard.jsx) — see utils/units.js.
+  const sortedAvailableUnits = getSortedAvailableUnits(
+    activeUnits,
+    selectedPoint,
+    (unit) => (unit.type || '').toUpperCase() === dispatchAgency,
+  );
 
   return (
     <div className="map-container">
@@ -1082,58 +1057,6 @@ export function MapView({
                 <div style={actionsRowStyle}>
                   <button type="button" onClick={handleCloseModal} style={cancelButtonStyle}>Cancel</button>
                   <button type="submit" style={{ ...submitButtonStyle, background: '#0284c7' }}>Create</button>
-                </div>
-              </form>
-            )}
-
-            {activeModal === 'FIELD_HQ' && (
-              <form onSubmit={handleCreateFieldHqSubmit}>
-                <h3 style={{ margin: '0 0 12px 0', color: '#fbbf24' }}>🏢 Open Field Command Post</h3>
-                <label style={labelStyle}>Command Name</label>
-                <input
-                  type="text"
-                  placeholder="Field Command Post Alpha"
-                  value={fieldHqForm.name}
-                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, name: e.target.value })}
-                  style={inputStyle}
-                  required
-                />
-
-                <label style={labelStyle}>Incident Classification</label>
-                <select
-                  value={fieldHqForm.incidentType}
-                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, incidentType: e.target.value })}
-                  style={inputStyle}
-                >
-                  <option value="MASS_CASUALTY">Mass Casualty Incident (MCI)</option>
-                  <option value="WILDFIRE">Major Wildfire</option>
-                  <option value="EARTHQUAKE">Earthquake Disaster</option>
-                  <option value="HAZMAT">HAZMAT Emergency</option>
-                  <option value="OTHER">Other</option>
-                </select>
-
-                <label style={labelStyle}>Status of Forces Present / En Route</label>
-                <textarea
-                  placeholder="List active or responding units..."
-                  value={fieldHqForm.activeForcesNotes}
-                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, activeForcesNotes: e.target.value })}
-                  style={{ ...inputStyle, minHeight: '60px' }}
-                />
-
-                <label style={labelStyle}>Initial Status</label>
-                <select
-                  value={fieldHqForm.status}
-                  onChange={(e) => setFieldHqForm({ ...fieldHqForm, status: e.target.value })}
-                  style={inputStyle}
-                >
-                  <option value="Dispatching">Dispatching</option>
-                  <option value="Active">Active</option>
-                  <option value="Standby">Standby</option>
-                </select>
-
-                <div style={actionsRowStyle}>
-                  <button type="button" onClick={handleCloseModal} style={cancelButtonStyle}>Cancel</button>
-                  <button type="submit" style={{ ...submitButtonStyle, background: '#d97706' }}>Establish HQ</button>
                 </div>
               </form>
             )}

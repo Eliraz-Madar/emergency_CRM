@@ -124,6 +124,13 @@ class IncidentViewSet(viewsets.ModelViewSet):
             "incident_id": instance.id,
             "incident_title": instance.title,
             "status": instance.status,
+            # Full IncidentSerializer shape so a client can insert this
+            # directly into its incidents list/map with no re-fetch — same
+            # fields every other incident in that list already has (id,
+            # title, description, location_lat, location_lng, priority,
+            # status, channel, field_command, field_command_name,
+            # created_at, tasks, assigned_unit_ids, closed_* , major_incident).
+            **IncidentSerializer(instance).data,
         })
 
     def perform_update(self, serializer):
@@ -420,6 +427,23 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
     lookup_field = "field_key"
     lookup_value_regex = "[^/]+"
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        actor = self.request.user
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "field_command_created",
+            **_actor_fields(actor),
+            "field_command_id": instance.field_key,
+            "status": instance.status,
+            # Full FieldCommandSerializer shape (note field_key IS the
+            # serializer's "id" — same identifier the frontend already keys
+            # on everywhere, never the internal numeric pk) so a client can
+            # insert this directly with no re-fetch, same as incident_created
+            # (Stage 1).
+            **FieldCommandSerializer(instance).data,
+        })
+
     @action(detail=True, methods=["post"], url_path="assign-unit")
     def assign_unit(self, request, field_key=None):
         field_command = self.get_object()
@@ -432,6 +456,16 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
         unit.field_command = field_command
         unit.save(update_fields=["field_command"])
+        actor = request.user
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "field_command_unit_assigned",
+            **_actor_fields(actor),
+            "field_command_id": field_command.field_key,
+            "unit_id": unit.id,
+            "status": field_command.status,
+            **FieldCommandSerializer(field_command).data,
+        })
         return Response(self.get_serializer(field_command).data)
 
     @action(detail=True, methods=["post"], url_path="assign-incident")
@@ -447,6 +481,16 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Incident not found."}, status=status.HTTP_404_NOT_FOUND)
         incident.field_command = field_command
         incident.save(update_fields=["field_command"])
+        actor = request.user
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "field_command_incident_assigned",
+            **_actor_fields(actor),
+            "field_command_id": field_command.field_key,
+            "incident_id": incident.id,
+            "status": field_command.status,
+            **FieldCommandSerializer(field_command).data,
+        })
         return Response(self.get_serializer(field_command).data)
 
     @action(detail=True, methods=["patch"], url_path="metrics")
@@ -463,7 +507,16 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
         data = {**request.data, "status": FieldCommand.Status.CLOSED}
         serializer = self.get_serializer(field_command, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        instance = serializer.save()
+        actor = request.user
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "field_command_closed",
+            **_actor_fields(actor),
+            "field_command_id": instance.field_key,
+            "status": instance.status,
+            **FieldCommandSerializer(instance).data,
+        })
         return Response(serializer.data)
 
 

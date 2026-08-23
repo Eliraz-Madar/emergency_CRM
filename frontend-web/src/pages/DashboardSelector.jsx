@@ -34,7 +34,13 @@ const DashboardSelector = () => {
     const loadFieldCommands = async () => {
       try {
         const fields = await getFieldCommands();
-        const normalized = Array.isArray(fields) ? fields : [];
+        const all = Array.isArray(fields) ? fields : [];
+        // A closed field command can no longer be opened via this picker —
+        // GET /api/field-commands/ itself stays unfiltered (other consumers
+        // rely on the full list), this is purely a client-side exclusion.
+        // "CLOSED" matches FieldCommand.Status.CLOSED exactly
+        // (backend/api/models.py).
+        const normalized = all.filter((field) => field.status !== 'CLOSED');
         setFieldOptions(normalized);
         if (!normalized.find((field) => field.id === fieldId) && normalized[0]?.id) {
           handleFieldChange(normalized[0].id);

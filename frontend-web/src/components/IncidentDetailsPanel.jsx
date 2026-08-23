@@ -110,6 +110,20 @@ export function IncidentDetailsPanel() {
     setCloseError('');
   }, [incident?.id]);
 
+  // Escape closes the panel — same dismiss path as the X button
+  // (handleClose below just calls setSelectedIncident(null)). Only
+  // attached while an incident is actually selected, so this listener
+  // doesn't exist at all — and can't interfere with Escape in an
+  // unrelated input elsewhere in the app — when the panel isn't open.
+  useEffect(() => {
+    if (!incident) return;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setSelectedIncident(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [incident?.id, setSelectedIncident]);
+
   const canClose = incident?.status && incident.status !== 'CLOSED';
 
   const handleCloseIncident = async () => {
