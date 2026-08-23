@@ -9,9 +9,15 @@ export function FilterBar() {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const severityOptions = ['LOW', 'MED', 'HIGH', 'CRITICAL'];
-  const statusOptions = ['OPEN', 'IN_PROGRESS', 'CLOSED'];
-  const channelOptions = ['Police', 'Fire', 'EMS', 'Civil Defense'];
-  const sortOptions = ['severity', 'time', 'status'];
+  // Full real Incident.Status set (backend/api/models.py). IN_PROGRESS is a
+  // legacy value predating the OPEN→PENDING→EN_ROUTE→ON_SCENE→RESOLVED→CLOSED
+  // pipeline — kept for old rows and the mobile-dispatch bridge, labeled to
+  // signal that.
+  const statusOptions = ['OPEN', 'PENDING', 'EN_ROUTE', 'ON_SCENE', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
+  const statusLabels = { IN_PROGRESS: 'IN_PROGRESS (legacy)' };
+  // Agency vocabulary, standardized to exactly these three — matches
+  // MapView.jsx's incidentForm/dispatchAgency dropdowns exactly.
+  const channelOptions = ['POLICE', 'EMS', 'FIRE'];
 
   const toggleFilter = (filterType, value) => {
     const current = filters[filterType];
@@ -78,14 +84,14 @@ export function FilterBar() {
                   }`}
                   onClick={() => toggleFilter('statuses', status)}
                 >
-                  {status}
+                  {statusLabels[status] || status}
                 </button>
               ))}
             </div>
           </div>
 
           <div className="filter-group">
-            <label>Channel:</label>
+            <label>Agency:</label>
             <div className="filter-chips">
               {channelOptions.map((channel) => (
                 <button

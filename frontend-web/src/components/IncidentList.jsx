@@ -3,13 +3,11 @@ import { useDashboardStore } from '../store/dashboard.js';
 
 /**
  * Incident List Component - Dynamic and Interactive
- * Supports both routine mode (real incidents) and simulation mode (single simulation incident)
+ * Regional dashboard only — always real, DB-backed incidents.
  */
 export function IncidentList({
   activeFilter = 'ALL',
   setActiveFilter,
-  isSimulation = false,
-  simulationEvents = null
 }) {
   const {
     getFilteredIncidents,
@@ -17,38 +15,15 @@ export function IncidentList({
     setSelectedIncident,
   } = useDashboardStore();
 
-  // Get incidents based on mode
-  const routineIncidents = getFilteredIncidents();
-
-  // In simulation mode, show only the active simulation incident (first one)
-  const simulationIncidents = isSimulation && simulationEvents && simulationEvents.length > 0 ?
-    [simulationEvents[0]].map((evt, idx) => ({
-      id: evt.id || `sim-${idx}`,
-      title: evt.title || evt.message || 'Event',
-      priority: evt.priority || 'MED',
-      status: evt.status || 'IN_PROGRESS',
-      channel: getEventChannel(evt),
-      location_name: evt.location || 'Field',
-      created_at: evt.timestamp || evt.created_at || new Date().toISOString(),
-    })) : [];
-
-  const incidents = isSimulation ? simulationIncidents : routineIncidents;
+  const incidents = getFilteredIncidents();
 
   // Filter categories with icons
   const filterCategories = [
     { id: 'ALL', label: 'All', icon: '🎯', color: '#3b82f6' },
     { id: 'FIRE', label: 'Fire', icon: '🔥', color: '#ef4444' },
     { id: 'POLICE', label: 'Police', icon: '👮', color: '#8b5cf6' },
-    { id: 'MEDICAL', label: 'Medical', icon: '🚑', color: '#10b981' },
+    { id: 'EMS', label: 'EMS', icon: '🚑', color: '#10b981' },
   ];
-
-  function getEventChannel(evt) {
-    const title = (evt.title || evt.message || '').toLowerCase();
-    if (title.includes('fire') || title.includes('flame') || title.includes('burn')) return 'FIRE';
-    if (title.includes('police') || title.includes('security') || title.includes('crime')) return 'POLICE';
-    if (title.includes('medical') || title.includes('casualt') || title.includes('injur')) return 'MEDICAL';
-    return 'Civil Defense';
-  }
 
   // Apply active filter
   const filteredIncidents = activeFilter === 'ALL'
@@ -107,26 +82,23 @@ export function IncidentList({
         <h2>Incidents ({filteredIncidents.length})</h2>
       </div>
 
-      {/* Filter Buttons - hidden in simulation mode */}
-      {!isSimulation && (
-        <div className="incident-filter-bar">
-          {filterCategories.map((filter) => (
-            <button
-              key={filter.id}
-              className={`filter-button ${activeFilter === filter.id ? 'active' : ''}`}
-              onClick={() => setActiveFilter && setActiveFilter(filter.id)}
-              style={{
-                borderColor: activeFilter === filter.id ? filter.color : 'transparent',
-                backgroundColor: activeFilter === filter.id ? filter.color + '20' : 'transparent',
-                color: activeFilter === filter.id ? filter.color : '#94a3b8',
-              }}
-            >
-              <span className="filter-icon">{filter.icon}</span>
-              <span className="filter-label">{filter.label}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="incident-filter-bar">
+        {filterCategories.map((filter) => (
+          <button
+            key={filter.id}
+            className={`filter-button ${activeFilter === filter.id ? 'active' : ''}`}
+            onClick={() => setActiveFilter && setActiveFilter(filter.id)}
+            style={{
+              borderColor: activeFilter === filter.id ? filter.color : 'transparent',
+              backgroundColor: activeFilter === filter.id ? filter.color + '20' : 'transparent',
+              color: activeFilter === filter.id ? filter.color : '#94a3b8',
+            }}
+          >
+            <span className="filter-icon">{filter.icon}</span>
+            <span className="filter-label">{filter.label}</span>
+          </button>
+        ))}
+      </div>
 
       {filteredIncidents.length === 0 ? (
         <div className="empty-state">

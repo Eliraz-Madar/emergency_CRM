@@ -151,6 +151,76 @@ export const connectToUpdatesStream = () => {
 };
 
 // ============================================
+// REAL MAJOR INCIDENT API (the "go live" flow)
+// ============================================
+// Backed by backend/api/views.py's major_incident_* endpoints — entirely
+// separate from the FIELD INCIDENT COMMAND DASHBOARD API below, which stays
+// the mock/training-simulation backend (backend/simulated/).
+
+// Promotes a real Incident to a MajorIncident. incidentType must be one of
+// MajorIncident.IncidentType (EARTHQUAKE/MISSILE_STRIKE/BUILDING_COLLAPSE/
+// FLOOD/HAZMAT/WILDFIRE) — the backend copies title/description/location
+// from the Incident itself, so that's the only new input this call needs.
+export const goLiveIncident = async (incidentId, incidentType) => {
+  const res = await api.post(
+    "/major-incidents/go-live/",
+    { incident_id: incidentId, incident_type: incidentType },
+    actorRoleHeaders("COMMAND_CENTER"),
+  );
+  return res.data;
+};
+
+export const getMajorIncidentSectors = async (majorIncidentId) => {
+  const res = await api.get(`/major-incidents/${majorIncidentId}/sectors/`);
+  return res.data;
+};
+
+// name + hazardLevel only — no lat/lng (Sector.location_lat/lng are nullable
+// for this phase, see backend/api/models.py).
+export const createMajorIncidentSector = async (majorIncidentId, { name, hazardLevel }) => {
+  const res = await api.post(
+    `/major-incidents/${majorIncidentId}/sectors/`,
+    { name, hazard_level: hazardLevel },
+    actorRoleHeaders("COMMAND_CENTER"),
+  );
+  return res.data;
+};
+
+export const getMajorIncidentTaskGroups = async (majorIncidentId) => {
+  const res = await api.get(`/major-incidents/${majorIncidentId}/task-groups/`);
+  return res.data;
+};
+
+export const createMajorIncidentTaskGroup = async (majorIncidentId, { title, category, sectorIds }) => {
+  const body = { title, category };
+  if (Array.isArray(sectorIds) && sectorIds.length > 0) {
+    body.sector_ids = sectorIds;
+  }
+  const res = await api.post(
+    `/major-incidents/${majorIncidentId}/task-groups/`,
+    body,
+    actorRoleHeaders("COMMAND_CENTER"),
+  );
+  return res.data;
+};
+
+// Latest submitted Perimeter for a MajorIncident, or null if none exists yet.
+export const getMajorIncidentPerimeter = async (majorIncidentId) => {
+  const res = await api.get(`/major-incidents/${majorIncidentId}/perimeter/`);
+  return res.data;
+};
+
+// points: ordered array of {lat, lng} (min 3) — field-operator-only.
+export const submitMajorIncidentPerimeter = async (majorIncidentId, points) => {
+  const res = await api.post(
+    `/major-incidents/${majorIncidentId}/perimeter/`,
+    { points, submitted_by_role: "FIELD_OPERATOR" },
+    actorRoleHeaders("FIELD_OPERATOR"),
+  );
+  return res.data;
+};
+
+// ============================================
 // FIELD INCIDENT COMMAND DASHBOARD API
 // ============================================
 

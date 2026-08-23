@@ -19,11 +19,13 @@ import {
   connectToFieldIncidentStream,
   simulateFieldIncidentUpdate,
   getFieldCommand,
+  submitMajorIncidentPerimeter,
 } from '../api/client';
 import SituationOverview from '../components/field-incident/SituationOverview';
 import SectorMap from '../components/field-incident/SectorMap';
 import TaskGroupPanel from '../components/field-incident/TaskGroupPanel';
 import OperationalTimeline from '../components/field-incident/OperationalTimeline';
+import PerimeterMapPicker from '../components/field-incident/PerimeterMapPicker';
 import '../styles/field-incident-dashboard.css';
 import { formatTime, formatDateTime } from '../utils/time.js';
 
@@ -34,12 +36,21 @@ const FieldIncidentDashboard = () => {
   const [selectedScenario, setSelectedScenario] = useState('FIRE');
   const [activeFieldName, setActiveFieldName] = useState('');
 
+  // Perimeter modal state — local to this page, not the field store (the
+  // modal is a one-time action, not permanently-mounted map state).
+  const [isPerimeterModalOpen, setIsPerimeterModalOpen] = useState(false);
+  const [perimeterPoints, setPerimeterPoints] = useState([]);
+  const [submittingPerimeter, setSubmittingPerimeter] = useState(false);
+  const [perimeterError, setPerimeterError] = useState('');
+  const [perimeterConfirmation, setPerimeterConfirmation] = useState('');
+
   const setConnectionStatus = useFieldIncidentStore((s) => s.setConnectionStatus);
   const setLoading = useFieldIncidentStore((s) => s.setLoading);
   const setError = useFieldIncidentStore((s) => s.setError);
   const loadFieldIncident = useFieldIncidentStore((s) => s.loadFieldIncident);
   const addEvent = useFieldIncidentStore((s) => s.addEvent);
   const updateMajorIncident = useFieldIncidentStore((s) => s.updateMajorIncident);
+  const bumpPerimeterVersion = useFieldIncidentStore((s) => s.bumpPerimeterVersion);
   const updateSector = useFieldIncidentStore((s) => s.updateSector);
   const updateTaskGroup = useFieldIncidentStore((s) => s.updateTaskGroup);
   const connectionStatus = useFieldIncidentStore((s) => s.connectionStatus);
@@ -101,11 +112,18 @@ const FieldIncidentDashboard = () => {
       return;
     }
 
-    // NOTE: we intentionally do NOT skip the API load for mode === 'LIVE'.
-    // The War-Room sets majorIncident to a thin incident object (no sectors /
-    // task-groups / events). We need loadFieldIncident() to hydrate the full
-    // field-command scenario so SituationOverview, SectorMap and TaskGroupPanel
-    // have the rich data they require.
+    // LIVE means Stage A's real POST /api/major-incidents/go-live/ response
+    // is already sitting in majorIncident — do not overwrite it by fetching
+    // the mock GET /api/field/incident/ endpoint. (Previously this called
+    // loadFieldIncident() unconditionally here, which clobbered the real
+    // data with mock data on every re-render/remount for this fieldId.)
+    // Sectors/task-groups/events stay whatever's already in the store
+    // (currently empty) until Stage B wires real GET endpoints for them.
+    if (mode === 'LIVE') {
+      setLoading(false);
+      lastLoadedFieldIdRef.current = fieldId;
+      return;
+    }
 
     const loadInitialData = async () => {
       try {
@@ -297,6 +315,41 @@ const FieldIncidentDashboard = () => {
 
   const handleStopSimulation = () => {
     stopSimulation();
+  };
+
+  const handleOpenPerimeterModal = () => {
+    setPerimeterPoints([]);
+    setPerimeterError('');
+    setIsPerimeterModalOpen(true);
+  };
+
+  const handleClosePerimeterModal = () => {
+    setIsPerimeterModalOpen(false);
+    setPerimeterPoints([]);
+    setPerimeterError('');
+  };
+
+  const handleSubmitPerimeter = async () => {
+    if (!majorIncident?.id || perimeterPoints.length < 3) return;
+    setSubmittingPerimeter(true);
+    setPerimeterError('');
+    try {
+      const created = await submitMajorIncidentPerimeter(majorIncident.id, perimeterPoints);
+      setIsPerimeterModalOpen(false);
+      setPerimeterPoints([]);
+      const pointCount = Array.isArray(created?.points) ? created.points.length : perimeterPoints.length;
+      setPerimeterConfirmation(`✅ Perimeter submitted — ${pointCount} points`);
+      setTimeout(() => setPerimeterConfirmation(''), 4000);
+      bumpPerimeterVersion();
+    } catch (err) {
+      console.error('Failed to submit perimeter:', err);
+      const data = err?.response?.data;
+      const firstValue = data ? Object.values(data)[0] : null;
+      const message = Array.isArray(firstValue) ? firstValue[0] : (typeof firstValue === 'string' ? firstValue : 'Failed to submit perimeter.');
+      setPerimeterError(message);
+    } finally {
+      setSubmittingPerimeter(false);
+    }
   };
 
   if (!hasAccess) {
@@ -496,7 +549,7 @@ const FieldIncidentDashboard = () => {
                 ▶ Activate
               </button>
             </>
-          ) : (
+          ) : mode === 'SIMULATION' ? (
             <>
               <div
                 style={{
@@ -551,6 +604,68 @@ const FieldIncidentDashboard = () => {
               >
                 ⏹ Terminate
               </button>
+            </>
+          ) : (
+            // LIVE — a real go-live from the regional dashboard (Stage A).
+            // Hotfix scope: fix the "undefined" title (was reading
+            // simulationType, which a real go-live never sets) and drop the
+            // Terminate button — it called stopSimulation(), which used to
+            // destroy real data; the real end-of-live flow isn't scoped yet,
+            // so no button is safer than a disabled one that implies it will
+            // eventually work.
+            <>
+              <div
+                style={{
+                  backgroundColor: '#7f1d1d',
+                  color: 'white',
+                  padding: '0.5rem 1rem',
+                  borderRadius: '4px',
+                  fontSize: '0.85rem',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  border: '2px solid #dc2626',
+                }}
+              >
+                <span style={{
+                  display: 'inline-block',
+                  width: '8px',
+                  height: '8px',
+                  backgroundColor: '#fca5a5',
+                  borderRadius: '50%',
+                  animation: 'ping 1s cubic-bezier(0, 0, 0.2, 1) infinite',
+                }}></span>
+                🚨 LIVE: {majorIncident?.title || 'Major Incident'}
+              </div>
+
+              <button
+                onClick={handleOpenPerimeterModal}
+                title="Draw and submit the field perimeter (Field Operator)"
+                style={{
+                  backgroundColor: '#0f172a',
+                  color: '#e2e8f0',
+                  border: '1px solid #f59e0b',
+                  borderRadius: '4px',
+                  padding: '0.5rem 1rem',
+                  fontSize: '0.85rem',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                }}
+              >
+                🧭 Set Perimeter
+              </button>
+
+              {perimeterConfirmation && (
+                <span style={{
+                  color: '#10b981',
+                  fontSize: '0.8rem',
+                  fontWeight: '600',
+                }}>
+                  {perimeterConfirmation}
+                </span>
+              )}
             </>
           )}
         </div>
@@ -701,6 +816,86 @@ const FieldIncidentDashboard = () => {
                 onClick={() => setSelectedTimelineEvent(null)}
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Set Perimeter Modal — mirrors the Event Details Modal's overlay/
+          stopPropagation pattern and CSS classes above. */}
+      {isPerimeterModalOpen && (
+        <div
+          className="event-details-modal-overlay"
+          onClick={submittingPerimeter ? undefined : handleClosePerimeterModal}
+        >
+          <div
+            className="event-details-modal"
+            style={{ maxWidth: '560px' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3>🧭 Set Perimeter</h3>
+              <button
+                className="modal-close-btn"
+                onClick={handleClosePerimeterModal}
+                title="Close"
+                disabled={submittingPerimeter}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-content">
+              <PerimeterMapPicker
+                center={{ lat: majorIncident?.location_lat, lng: majorIncident?.location_lng }}
+                onPointsChange={setPerimeterPoints}
+              />
+              <div style={{
+                fontSize: '0.82rem',
+                fontWeight: 600,
+                color: perimeterPoints.length >= 3 ? '#10b981' : '#f59e0b',
+              }}>
+                {perimeterPoints.length >= 3
+                  ? `${perimeterPoints.length} points — ready to submit`
+                  : `${perimeterPoints.length} / 3 points minimum required`}
+              </div>
+              {perimeterError && (
+                <div style={{ color: '#ef4444', fontSize: '0.82rem' }}>{perimeterError}</div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                onClick={handleClosePerimeterModal}
+                disabled={submittingPerimeter}
+                style={{
+                  flex: 1,
+                  padding: '0.75rem 1rem',
+                  background: 'transparent',
+                  color: '#e2e8f0',
+                  border: '1px solid #475569',
+                  borderRadius: '0.5rem',
+                  fontWeight: 600,
+                  fontSize: '0.95rem',
+                  cursor: submittingPerimeter ? 'not-allowed' : 'pointer',
+                  opacity: submittingPerimeter ? 0.6 : 1,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="modal-btn-primary"
+                onClick={handleSubmitPerimeter}
+                disabled={perimeterPoints.length < 3 || submittingPerimeter}
+                style={{
+                  cursor: perimeterPoints.length < 3 || submittingPerimeter ? 'not-allowed' : 'pointer',
+                  opacity: perimeterPoints.length < 3 || submittingPerimeter ? 0.6 : 1,
+                }}
+              >
+                {submittingPerimeter ? 'Submitting…' : 'Submit Perimeter'}
               </button>
             </div>
           </div>

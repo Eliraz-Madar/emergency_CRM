@@ -5,7 +5,9 @@
  * Command-level situational awareness for major incident response.
  */
 
+import { useEffect, useState } from 'react';
 import { useFieldIncidentStore } from '../../store/fieldIncident';
+import { getMajorIncidentPerimeter } from '../../api/client';
 
 const SituationOverview = () => {
   const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
@@ -18,6 +20,28 @@ const SituationOverview = () => {
   const summary = getSituationSummary();
   const avgProgress = getAverageTaskProgress();
   const alerts = getCriticalAlerts();
+
+  // Real perimeter data only — never for the SIMULATION/ROUTINE fake
+  // majorIncident objects ('sim-1'/'routine-1'), which have no backing
+  // MajorIncident row to fetch a perimeter for. Self-fetched (not shared
+  // store, not a prop) — mirrors IncidentDetailsPanel.jsx's sectors/
+  // task-groups pattern. perimeterVersion is a pure signal counter (see
+  // store/fieldIncident.js) bumped after a same-session submission so this
+  // re-fetches instead of showing stale "Not set" — the only other new
+  // store dependency this component picks up, kept to a single integer.
+  const perimeterVersion = useFieldIncidentStore((s) => s.perimeterVersion);
+  const [perimeter, setPerimeter] = useState(null);
+  useEffect(() => {
+    if (mode !== 'LIVE' || !majorIncident?.id) {
+      setPerimeter(null);
+      return;
+    }
+    let cancelled = false;
+    getMajorIncidentPerimeter(majorIncident.id)
+      .then((data) => { if (!cancelled) setPerimeter(data); })
+      .catch(() => { if (!cancelled) setPerimeter(null); });
+    return () => { cancelled = true; };
+  }, [mode, majorIncident?.id, perimeterVersion]);
 
   if (!majorIncident || !summary) {
     return (
@@ -152,6 +176,12 @@ const SituationOverview = () => {
           <span className="stat-label">Incident Status:</span>
           <span className="stat-value" style={{ color: statusColor[summary.status] || statusColor.ACTIVE }}>
             {String(summary.status || 'ACTIVE').replace(/_/g, ' ')}
+          </span>
+        </div>
+        <div className="stat-row">
+          <span className="stat-label">Perimeter:</span>
+          <span className="stat-value">
+            {perimeter?.points?.length ? `${perimeter.points.length} points` : 'Not set'}
           </span>
         </div>
       </div>

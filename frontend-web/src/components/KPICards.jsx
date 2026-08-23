@@ -1,99 +1,73 @@
 import React from 'react';
 import { useDashboardStore } from '../store/dashboard.js';
-import { useFieldIncidentStore } from '../store/fieldIncident.js';
+
+// Real backend Unit.type is Police/Fire/EMS/HomeFront; mirrors the same
+// POLICE/FIRE/MEDICAL bucket scheme IncidentDetailsPanel.jsx's
+// normalizeUnitType uses for its own unit-type filter tabs.
+const normalizeUnitType = (type) => {
+  const t = (type || '').toUpperCase();
+  if (t === 'EMS' || t === 'AMBULANCE' || t === 'MEDICAL') return 'MEDICAL';
+  if (t === 'FIRE') return 'FIRE';
+  if (t === 'POLICE') return 'POLICE';
+  return 'POLICE';
+};
 
 /**
- * KPI Cards Component - displays key metrics
- * Can be overridden with simulation data via props
+ * KPI Cards Component - displays key metrics for the regional dashboard.
+ * Units are sourced exclusively from useDashboardStore's onlineUnits — real,
+ * backend-sourced (GET /api/units/, kept fresh by SSE pushes). No field-
+ * incident/simulation store involved.
  */
-export function KPICards({ simulationData = null }) {
+export function KPICards() {
   const incidents = useDashboardStore((state) => state.incidents);
-  // Live units from field incident store (real-time)
-  const routineUnits = useFieldIncidentStore((s) => s.routineUnits);
-  const fieldUnits = useFieldIncidentStore((s) => s.units);
-  const fieldMode = useFieldIncidentStore((s) => s.mode);
+  const onlineUnits = useDashboardStore((state) => state.onlineUnits);
 
-  // Use the correct units based on mode
-  const liveUnits = fieldMode === 'SIMULATION'
-    ? (Array.isArray(fieldUnits) ? fieldUnits : [])
-    : (Array.isArray(routineUnits) && routineUnits.length > 0 ? routineUnits : (Array.isArray(fieldUnits) ? fieldUnits : []));
+  // "Available" mirrors IncidentDetailsPanel.jsx's own definition: online
+  // and not currently assigned to an incident.
+  const availableUnits = (Array.isArray(onlineUnits) ? onlineUnits : [])
+    .filter((u) => u.is_online === true && !u.assignedTo)
+    .map((u) => ({ ...u, type: normalizeUnitType(u.type) }));
 
-  // Count available units (status === 'PATROL' or 'AVAILABLE')
-  const availableLiveUnits = liveUnits.filter((u) => u.status === 'PATROL' || u.status === 'AVAILABLE');
-  const totalAvailable = availableLiveUnits.length;
-  const policeCount = availableLiveUnits.filter((u) => u.type === 'POLICE').length;
-  const fireCount = availableLiveUnits.filter((u) => u.type === 'FIRE').length;
-  const medicalCount = availableLiveUnits.filter((u) => u.type === 'MEDICAL').length;
+  const totalAvailable = availableUnits.length;
+  const policeCount = availableUnits.filter((u) => u.type === 'POLICE').length;
+  const fireCount = availableUnits.filter((u) => u.type === 'FIRE').length;
+  const medicalCount = availableUnits.filter((u) => u.type === 'MEDICAL').length;
 
-  // Use simulation data if provided, otherwise calculate from regular data
-  let kpis;
+  const totalIncidents = incidents.length;
+  const activeIncidents = incidents.filter(
+    (inc) => inc.status !== 'CLOSED'
+  ).length;
+  const criticalIncidents = incidents.filter(
+    (inc) => inc.severity === 'CRITICAL'
+  ).length;
 
-  if (simulationData) {
-    // Extract simulation KPIs from majorIncident
-    kpis = [
-      {
-        label: 'Casualties',
-        value: simulationData.estimated_casualties || 0,
-        color: '#ef4444',
-        icon: '🚑',
-      },
-      {
-        label: 'Evacuated',
-        value: simulationData.displaced_persons || 0,
-        color: '#f59e0b',
-        icon: '🏃',
-      },
-      {
-        label: 'Confirmed Deaths',
-        value: simulationData.confirmed_deaths || 0,
-        color: '#dc2626',
-        icon: '⚠️',
-      },
-      {
-        label: 'Active Sectors',
-        value: simulationData.active_sectors || 0,
-        color: '#3b82f6',
-        icon: '📍',
-      },
-    ];
-  } else {
-    // Calculate KPIs from regular dashboard data
-    const totalIncidents = incidents.length;
-    const activeIncidents = incidents.filter(
-      (inc) => inc.status !== 'CLOSED'
-    ).length;
-    const criticalIncidents = incidents.filter(
-      (inc) => inc.severity === 'CRITICAL'
-    ).length;
-
-    kpis = [
-      {
-        label: 'Total Incidents',
-        value: totalIncidents,
-        color: '#3b82f6',
-        icon: '📋',
-      },
-      {
-        label: 'Active Incidents',
-        value: activeIncidents,
-        color: '#f59e0b',
-        icon: '🔴',
-      },
-      {
-        label: 'Critical',
-        value: criticalIncidents,
-        color: '#ef4444',
-        icon: '⚠️',
-      },
-      {
-        label: 'Available Units',
-        value: totalAvailable,
-        breakdown: `Pol: ${policeCount} | Fire: ${fireCount} | Med: ${medicalCount}`,
-        color: '#10b981',
-        icon: '🚑',
-      },
-    ];
-  }
+  const kpis = [
+    {
+      label: 'Total Incidents',
+      value: totalIncidents,
+      color: '#3b82f6',
+      icon: '📋',
+    },
+    {
+      label: 'Active Incidents',
+      value: activeIncidents,
+      color: '#f59e0b',
+      icon: '🔴',
+    },
+    {
+      label: 'Critical',
+      value: criticalIncidents,
+      color: '#ef4444',
+      icon: '⚠️',
+    },
+    {
+      label: 'Available Units',
+      value: totalAvailable,
+      breakdown: `Pol: ${policeCount} | Fire: ${fireCount} | Med: ${medicalCount}`,
+      color: '#10b981',
+      icon: '🚑',
+    },
+  ];
 
   return (
     <div className="kpi-cards">

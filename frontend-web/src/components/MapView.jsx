@@ -3,7 +3,6 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle } from 'react-leaflet';
 import { useDashboardStore } from '../store/dashboard.js';
-import { useFieldIncidentStore } from '../store/fieldIncident.js';
 
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return Infinity;
@@ -20,16 +19,13 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
 }
 
 /**
- * Map View Component - displays incidents and units on map
- * Can display simulation sectors via props
- * Supports filtering by incident type and shows moving units during simulation
+ * Map View Component - displays incidents and units on map (regional
+ * dashboard). Always real, backend-sourced data — no field-incident/
+ * simulation store dependency.
+ * Supports filtering by incident type.
  */
 export function MapView({
-  simulationSectors = null,
   activeFilter = 'ALL',
-  simulationIncident = null,
-  simulationUnits = null,
-  isSimulation = false,
   selectedUnitIds = [],
   fieldCommands = [],
   onFieldCommandSelect = null,
@@ -67,12 +63,15 @@ export function MapView({
   const [selectedPoint, setSelectedPoint] = useState(null);
 
   const [incidentForm, setIncidentForm] = useState({
-    type: 'FIRE',
-    customType: '',
+    type: 'POLICE',
     title: '',
     priority: 'HIGH',
     description: '',
   });
+  // UI-only helper for the Title field's dropdown — feeds incidentForm.title
+  // directly, never reconnected to `type` (which is the Responding Agency /
+  // channel value). Not itself sent in the payload.
+  const [titleType, setTitleType] = useState('Fire');
 
   const [fieldHqForm, setFieldHqForm] = useState({
     name: '',
@@ -82,7 +81,6 @@ export function MapView({
   });
 
   const [dispatchAgency, setDispatchAgency] = useState('POLICE');
-  const [dispatchCustomAgency, setDispatchCustomAgency] = useState('');
   const [dispatchUnitId, setDispatchUnitId] = useState('');
 
   const handleCloseContextMenu = useCallback(() => setContextMenu(null), []);
@@ -90,10 +88,10 @@ export function MapView({
   const handleCloseModal = useCallback(() => {
     setActiveModal(null);
     setSelectedPoint(null);
-    setIncidentForm({ type: 'FIRE', customType: '', title: '', priority: 'HIGH', description: '' });
+    setIncidentForm({ type: 'POLICE', title: '', priority: 'HIGH', description: '' });
+    setTitleType('Fire');
     setFieldHqForm({ name: '', incidentType: 'MASS_CASUALTY', activeForcesNotes: '', status: 'Dispatching' });
     setDispatchAgency('POLICE');
-    setDispatchCustomAgency('');
     setDispatchUnitId('');
   }, []);
 
@@ -107,12 +105,11 @@ export function MapView({
   const handleCreateIncidentSubmit = useCallback((e) => {
     e.preventDefault();
     if (!selectedPoint) return;
-    const finalType = incidentForm.type === 'OTHER' ? (incidentForm.customType || 'OTHER') : incidentForm.type;
     onMapReportIncidentRef.current?.({
       lat: selectedPoint.lat,
       lng: selectedPoint.lng,
-      type: finalType,
-      title: incidentForm.title || finalType,
+      type: incidentForm.type,
+      title: incidentForm.title || incidentForm.type,
       priority: incidentForm.priority,
       description: incidentForm.description,
     });
@@ -136,15 +133,14 @@ export function MapView({
   const handleDispatchSubmit = useCallback((e) => {
     e.preventDefault();
     if (!selectedPoint || !dispatchUnitId) return;
-    const agency = dispatchAgency === 'OTHER' ? (dispatchCustomAgency || 'OTHER') : dispatchAgency;
     onMapDispatchForceRef.current?.({
       lat: selectedPoint.lat,
       lng: selectedPoint.lng,
-      agency,
+      agency: dispatchAgency,
       unitId: dispatchUnitId,
     });
     handleCloseModal();
-  }, [selectedPoint, dispatchAgency, dispatchCustomAgency, dispatchUnitId, handleCloseModal]);
+  }, [selectedPoint, dispatchAgency, dispatchUnitId, handleCloseModal]);
 
   const hasAssignedUnits = (incident) => {
     const assignedUnits = Array.isArray(incident?.assignedUnits)
@@ -288,9 +284,6 @@ export function MapView({
     flashingIncidentId,
   } = useDashboardStore();
 
-  // Subscribe directly to the field incident store for strict reactivity
-  const fieldIncidents = useFieldIncidentStore((s) => s.incidents || []);
-
   // Real, DB-backed units only, filtered to actively-connected devices.
   // dashboardOnlineUnits comes from GET /api/units/ (real Unit rows, kept
   // fresh by SSE unit_claimed/unit_location_update/unit_disconnected
@@ -301,39 +294,12 @@ export function MapView({
     () => (Array.isArray(dashboardOnlineUnits) ? dashboardOnlineUnits.filter((u) => u.is_online === true) : []),
     [dashboardOnlineUnits]
   );
-  // Single source of truth for "what units does this map render": the active
-  // simulation roster during a drill, real online units otherwise.
-  const activeUnits = React.useMemo(
-    () => (isSimulation ? (simulationUnits || []) : onlineUnits),
-    [isSimulation, simulationUnits, onlineUnits]
-  );
+  // Single source of truth for "what units does this map render": always
+  // real online units — no simulation/field-incident store involved.
+  const activeUnits = onlineUnits;
 
-  // Combine incidents for display; in simulation show only the active simulation incident
-  const incidents = React.useMemo(() => {
-    if (isSimulation && simulationIncident) {
-      return [{
-        id: simulationIncident.id || 'sim-incident',
-        title: simulationIncident.name || 'Simulation Incident',
-        priority: simulationIncident.priority || 'HIGH',
-        status: simulationIncident.status || 'IN_PROGRESS',
-        channel: simulationIncident.channel || 'SIMULATION',
-        location_lat: simulationIncident.lat ?? 31.77,
-        location_lng: simulationIncident.lng ?? 35.22,
-      }];
-    }
-
-    const dashboard = Array.isArray(dashboardIncidents) ? dashboardIncidents : [];
-    const field = Array.isArray(fieldIncidents) ? fieldIncidents : [];
-    // Combine and deduplicate by id
-    const combined = [...dashboard, ...field];
-    const uniqueMap = new Map();
-    combined.forEach(inc => {
-      if (inc && inc.id) {
-        uniqueMap.set(inc.id, inc);
-      }
-    });
-    return Array.from(uniqueMap.values());
-  }, [dashboardIncidents, fieldIncidents, isSimulation, simulationIncident]);
+  // Real, DB-backed incidents only.
+  const incidents = Array.isArray(dashboardIncidents) ? dashboardIncidents : [];
 
   // Initialize map
   useEffect(() => {
@@ -403,17 +369,14 @@ export function MapView({
     const incLng = target.location_lng ?? target.lng;
     if (!Number.isFinite(incLat) || !Number.isFinite(incLng)) { clearZoomToIncident(); return; }
 
-    // Gather all units dispatched to this incident for bounds fitting
-    const fieldUnits = useFieldIncidentStore.getState().units || [];
-    const dispatched = fieldUnits.filter((u) => String(u.assignedTo) === String(zoomToIncidentId));
+    // Gather all real units dispatched to this incident for bounds fitting.
+    const dispatched = onlineUnits.filter((u) => String(u.assignedTo) === String(zoomToIncidentId));
 
     const validPoints = [
       [incLat, incLng],
-      ...dispatched.map((u) => {
-        const lat = Array.isArray(u.position) ? u.position[0] : u.location_lat;
-        const lng = Array.isArray(u.position) ? u.position[1] : u.location_lng;
-        return [lat, lng];
-      }).filter(([la, ln]) => Number.isFinite(la) && Number.isFinite(ln)),
+      ...dispatched
+        .map((u) => [u.location_lat, u.location_lng])
+        .filter(([la, ln]) => Number.isFinite(la) && Number.isFinite(ln)),
     ];
 
     try {
@@ -563,9 +526,7 @@ export function MapView({
       markersRef.current[`incident-${incident.id}`] = marker;
     });
 
-    // Field command posts are real-world markers — hide them during simulation
-    // so the map shows only the simulation incident and units.
-    const fieldList = (!isSimulation && Array.isArray(fieldCommands)) ? fieldCommands : [];
+    const fieldList = Array.isArray(fieldCommands) ? fieldCommands : [];
     fieldList.forEach((field) => {
       const lat = field.location_lat ?? field.lat;
       const lng = field.location_lng ?? field.lng;
@@ -735,7 +696,7 @@ export function MapView({
         marker.openPopup();
       }
     });
-  }, [incidents, selectedIncidentId, selectedUnitId, simulationSectors, simulationIncident, activeFilter, isSimulation, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, activeUnits]);
+  }, [incidents, selectedIncidentId, selectedUnitId, activeFilter, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, activeUnits]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {
@@ -880,11 +841,10 @@ export function MapView({
   // (EN_ROUTE / ON_SCENE), sorted nearest-first to the right-clicked point.
   const sortedAvailableUnits = (() => {
     if (!selectedPoint) return [];
-    const agency = dispatchAgency === 'OTHER' ? null : dispatchAgency;
     const pool = (Array.isArray(activeUnits) ? activeUnits : []).filter((unit) => {
       const status = (unit.status || '').toUpperCase();
       if (status === 'EN_ROUTE' || status === 'ON_SCENE') return false;
-      if (agency && (unit.type || '').toUpperCase() !== agency) return false;
+      if ((unit.type || '').toUpperCase() !== dispatchAgency) return false;
       return true;
     });
     return pool
@@ -1060,37 +1020,39 @@ export function MapView({
             {activeModal === 'INCIDENT' && (
               <form onSubmit={handleCreateIncidentSubmit}>
                 <h3 style={{ margin: '0 0 12px 0', color: '#38bdf8' }}>🚨 Report Standard Incident</h3>
-                <label style={labelStyle}>Incident Type</label>
+                <label style={labelStyle}>Responding Agency</label>
                 <select
                   value={incidentForm.type}
                   onChange={(e) => setIncidentForm({ ...incidentForm, type: e.target.value })}
                   style={inputStyle}
                 >
-                  <option value="FIRE">🔥 Fire</option>
-                  <option value="THEFT">🦹 Theft / Break-in</option>
-                  <option value="TRAFFIC_ACCIDENT">🚗 Traffic Accident</option>
-                  <option value="MEDICAL">🚑 Medical Emergency</option>
-                  <option value="OTHER">📝 Other (Specify)</option>
+                  <option value="POLICE">👮 Police</option>
+                  <option value="EMS">🚑 EMS</option>
+                  <option value="FIRE">🚒 Fire &amp; Rescue</option>
                 </select>
 
-                {incidentForm.type === 'OTHER' && (
-                  <>
-                    <label style={labelStyle}>Specify Type</label>
-                    <input
-                      type="text"
-                      placeholder="Specify type..."
-                      value={incidentForm.customType}
-                      onChange={(e) => setIncidentForm({ ...incidentForm, customType: e.target.value })}
-                      style={inputStyle}
-                      required
-                    />
-                  </>
-                )}
+                <label style={labelStyle}>Incident Type</label>
+                <select
+                  value={titleType}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setTitleType(value);
+                    setIncidentForm({ ...incidentForm, title: value === 'Other' ? '' : value });
+                  }}
+                  style={inputStyle}
+                >
+                  <option value="Fire">Fire</option>
+                  <option value="Traffic Accident">Traffic Accident</option>
+                  <option value="Theft">Theft</option>
+                  <option value="Criminal Activity">Criminal Activity</option>
+                  <option value="Medical Emergency">Medical Emergency</option>
+                  <option value="Other">Other</option>
+                </select>
 
                 <label style={labelStyle}>Title</label>
                 <input
                   type="text"
-                  placeholder="e.g. Structure Fire on Main St."
+                  placeholder={titleType === 'Other' ? 'Specify a custom title...' : 'e.g. Structure Fire on Main St.'}
                   value={incidentForm.title}
                   onChange={(e) => setIncidentForm({ ...incidentForm, title: e.target.value })}
                   style={inputStyle}
@@ -1190,23 +1152,8 @@ export function MapView({
                 >
                   <option value="POLICE">👮 Police</option>
                   <option value="EMS">🚑 EMS</option>
-                  <option value="FIRE">🚒 Fire & Rescue</option>
-                  <option value="OTHER">📝 Other (Manual)</option>
+                  <option value="FIRE">🚒 Fire &amp; Rescue</option>
                 </select>
-
-                {dispatchAgency === 'OTHER' && (
-                  <>
-                    <label style={labelStyle}>Service Name</label>
-                    <input
-                      type="text"
-                      placeholder="Specify service..."
-                      value={dispatchCustomAgency}
-                      onChange={(e) => setDispatchCustomAgency(e.target.value)}
-                      style={inputStyle}
-                      required
-                    />
-                  </>
-                )}
 
                 <label style={labelStyle}>Available Units (nearest first)</label>
                 <select

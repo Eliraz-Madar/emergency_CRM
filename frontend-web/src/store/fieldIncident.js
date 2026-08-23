@@ -343,6 +343,12 @@ export const useFieldIncidentStore = create((set, get) => ({
   simulationStep: 0, // Current step index in the simulation
   fieldId: getStoredFieldId(), // TODO(auth): load from user profile/session
 
+  // Pure signal counter for the real (LIVE-only) perimeter-submit flow — no
+  // perimeter data itself lives here, only a version bump so a consumer's
+  // useEffect can re-fetch after a same-session submission. Never read or
+  // written by any SIMULATION/drill code path.
+  perimeterVersion: 0,
+
   // Actions
   setMajorIncident: (incident) => set((state) => {
     if (!incident) return { majorIncident: null };
@@ -374,6 +380,7 @@ export const useFieldIncidentStore = create((set, get) => ({
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
   setMode: (mode) => set({ mode }),
+  bumpPerimeterVersion: () => set((s) => ({ perimeterVersion: s.perimeterVersion + 1 })),
   setFieldId: (fieldId) => {
     set({ fieldId });
     // Mirror to localStorage so DashboardSelector and getStoredFieldId() always agree
@@ -1978,6 +1985,15 @@ export const useFieldIncidentStore = create((set, get) => ({
   },
 
   stopSimulation: () => {
+    if (get().mode !== 'SIMULATION') {
+      // Not exiting a drill — refuse to touch state. Ending a real LIVE
+      // session is a separate, not-yet-scoped workflow; doing nothing here
+      // is the safe default (see "final changes"-style hotfix notes: this
+      // used to unconditionally overwrite majorIncident/sectors with fake
+      // routine data even when mode was 'LIVE', destroying real data).
+      return;
+    }
+
     // Immediately restore routine state with full objects (never null)
     const routineIncident = {
       id: 'routine-1',

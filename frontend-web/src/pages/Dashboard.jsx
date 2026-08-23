@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { formatTime } from '../utils/time.js';
 import { useDashboardStore } from '../store/dashboard.js';
-import { useFieldIncidentStore } from '../store/fieldIncident.js';
 import { RealtimeService } from '../services/realtime.js';
 import { KPICards } from '../components/KPICards.jsx';
 import { FilterBar } from '../components/FilterBar.jsx';
@@ -14,9 +13,10 @@ import * as api from '../api/client.js';
 
 /**
  * Dashboard Page - Main operational dashboard (War-Room)
- * 
- * Syncs with Field Incident Dashboard when simulation is active.
- * Displays real operational data when in routine mode.
+ *
+ * Always real, backend-sourced operational data. No dependency on the
+ * field-incident/simulation store — training drills are launched and run
+ * exclusively from the Field Incident Command Dashboard.
  */
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -50,33 +50,12 @@ export default function Dashboard() {
     clearFlashingIncident,
   } = useDashboardStore();
 
-  // Connect to Field Incident simulation store
-  const {
-    mode: fieldMode,
-    simulationType,
-    startSimulation,
-    stopSimulation,
-    majorIncident,
-    sectors: fieldSectors,
-    events: fieldTimeline,
-    taskGroups,
-    units: simulationUnits,
-    routineUnits,
-    moveUnits,
-    tickRoutinePatrol,
-    setLiveIncident,
-    setMode: setFieldMode,
-    cancelUnitDispatch,
-  } = useFieldIncidentStore();
-
   const [isLoading, setIsLoading] = useState(true);
   const [realtimeService, setRealtimeService] = useState(null);
-  const eventsRef = React.useRef(events);
   const [showEventFeed, setShowEventFeed] = useState(false);
   // activeFilter is persisted in the store so it survives page refresh
   const activeFilter = storedActiveFilter;
   const setActiveFilter = storeSetActiveFilter;
-  const [selectedScenario, setSelectedScenario] = useState('FIRE');
   const [activeFieldId, setActiveFieldId] = useState('');
   const [activeFieldName, setActiveFieldName] = useState('');
   const [fieldCommands, setFieldCommands] = useState([]);
@@ -107,16 +86,11 @@ export default function Dashboard() {
       .catch(() => {/* silently ignore – name is cosmetic */});
   }, []);
 
-  // Simulation override detection
-  const isSimulation = fieldMode === 'SIMULATION';
-  // Only real, actively-connected units are shown outside of a drill — seeded
-  // "routine" demo units are no longer used as a fallback here. onlineUnits
-  // (destructured above) comes from GET /api/units/, the real Unit model —
-  // see final changes/04_disable_frontend_map_simulation.md and
+  // Always real, actively-connected units. onlineUnits (destructured above)
+  // comes from GET /api/units/, the real Unit model — see
+  // final changes/04_disable_frontend_map_simulation.md and
   // final changes/05_user_unit_claiming_and_live_sync.md.
-  const activeUnits = isSimulation
-    ? simulationUnits
-    : (Array.isArray(onlineUnits) ? onlineUnits.filter((u) => u.is_online === true) : []);
+  const activeUnits = Array.isArray(onlineUnits) ? onlineUnits.filter((u) => u.is_online === true) : [];
   const selectedUnit = Array.isArray(activeUnits) && selectedUnitId
     ? activeUnits.find((u) => String(u.id) === String(selectedUnitId))
     : null;
@@ -129,16 +103,6 @@ export default function Dashboard() {
           ? `${selectedUnit.assignedTarget.lat.toFixed(5)}, ${selectedUnit.assignedTarget.lng.toFixed(5)}`
           : 'None'))
     : 'None';
-
-  const handleStartSimulation = () => {
-    if (selectedScenario) {
-      startSimulation(selectedScenario);
-    }
-  };
-
-  const handleStopSimulation = () => {
-    stopSimulation();
-  };
 
   const refreshFieldCommands = async () => {
     const fields = await api.getFieldCommands();
@@ -344,48 +308,6 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', handleEscape);
   }, [isCreateFieldOpen]);
 
-  // Link field dashboard to selected incident in regional dashboard
-  useEffect(() => {
-    if (fieldMode === 'SIMULATION') return;
-    if (!selectedIncidentId) return;
-
-    const selected = (incidents || []).find((inc) => inc.id === selectedIncidentId);
-    if (!selected) return;
-
-    setFieldMode && setFieldMode('LIVE');
-    setLiveIncident && setLiveIncident(selected);
-  }, [selectedIncidentId, incidents, setLiveIncident, setFieldMode, fieldMode]);
-
-  // Keep a ref to events so the sync effect below can read it without
-  // adding it to the dependency array (which would cause an infinite loop).
-  useEffect(() => { eventsRef.current = events; }, [events]);
-
-  // Mirror active simulation timeline into the War-Room event feed.
-  // Only runs in SIMULATION mode — not in LIVE mode, because in LIVE mode
-  // the operational events are added directly via addEvent() (dispatch / arrival)
-  // and a setEvents() replacement call would wipe them.
-  // NOTE: 'events' is intentionally NOT in the dependency array — we read
-  // it via eventsRef to avoid the set→change→re-run→set infinite loop.
-  useEffect(() => {
-    if (!isSimulation || !fieldTimeline) return;
-
-    const convertedEvents = fieldTimeline.map((evt, idx) => ({
-      id: evt.id ? `sim-${evt.id}` : `sim-${idx}`,
-      timestamp: evt.timestamp || evt.created_at || new Date().toISOString(),
-      entity_type: 'simulation',
-      entity_id: majorIncident?.id || 'sim',
-      message: evt.title || evt.message || 'Simulation event',
-      level: evt.severity === 'CRITICAL' ? 'error'
-        : evt.severity === 'WARNING' || evt.severity === 'HIGH' ? 'warn' : 'info',
-    }));
-
-    const nonSimulationEvents = (eventsRef.current || []).filter(
-      (e) => e?.entity_type !== 'simulation' && !String(e?.id || '').startsWith('sim-')
-    );
-
-    setEvents([...convertedEvents, ...nonSimulationEvents]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSimulation, fieldTimeline, majorIncident, setEvents]);
 
   // Initialize data and realtime connection
   useEffect(() => {
@@ -411,50 +333,14 @@ export default function Dashboard() {
           console.warn('Failed to load field commands:', error);
         }
 
-        // ── Restore dispatch assignments that survived the page refresh ──────
-        // Uses sessionStorage so assignments are scoped to the current browser tab.
-        // Closing the tab/window starts a clean session with no ghost routes.
-        // One-time: purge any stale entry left in localStorage from older builds.
+        // 'ecm-dispatch-assignments' (sessionStorage) is written only by the
+        // field store's dispatchUnitsToIncident()/cancelUnitDispatch() — the
+        // old fake-dispatch mechanism still used by the SIMULATION drill —
+        // never by the real dispatch flow (IncidentDetailsPanel.jsx's
+        // handleDispatch). There was nothing real to restore from it here;
+        // not read anymore. Left untouched (not cleared) since a drill may
+        // legitimately still be using it.
         localStorage.removeItem('ecm-dispatch-assignments');
-        try {
-          const saved = JSON.parse(sessionStorage.getItem('ecm-dispatch-assignments') || '[]');
-          if (saved.length > 0) {
-            // Group by incident so one dispatchUnitsToIncident call handles all
-            // units for the same incident at once.
-            const byIncident = {};
-            saved.forEach(({ unitId, incidentId, incidentLat, incidentLng, incidentTitle }) => {
-              if (!byIncident[incidentId]) {
-                byIncident[incidentId] = { incidentId, incidentLat, incidentLng, incidentTitle, unitIds: [] };
-              }
-              byIncident[incidentId].unitIds.push(unitId);
-            });
-
-            const { dispatchUnitsToIncident } = useFieldIncidentStore.getState();
-
-            for (const assignment of Object.values(byIncident)) {
-              // silent=true: skip voice + event-log entries on restore
-              dispatchUnitsToIncident({
-                incidentId: assignment.incidentId,
-                unitIds: assignment.unitIds,
-                targetPosition: [assignment.incidentLat, assignment.incidentLng],
-                silent: true,
-              });
-              // Mark the incident IN_PROGRESS in the War-Room store too
-              updateIncident(assignment.incidentId, { status: 'IN_PROGRESS' });
-            }
-
-            // Add a single restore notice to the event log
-            addEvent({
-              id: `restore-dispatch-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              entity_type: 'system',
-              entity_id: 'system',
-              message: `🔄 Restored ${saved.length} unit dispatch assignment${saved.length > 1 ? 's' : ''} from previous session`,
-              level: 'info',
-            });
-          }
-        } catch (_) { /* non-critical — bad saved data should never block load */ }
-        // ─────────────────────────────────────────────────────────────────────
 
         setConnectionStatus('CONNECTED');
         setIsLoading(false);
@@ -582,42 +468,6 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
-  // Unit movement / routine-patrol animation loop — DISABLED.
-  // This used to call moveUnits()/tickRoutinePatrol() every 500ms, sliding
-  // seeded demo units along fake routes regardless of whether any real
-  // device was connected. Units now render strictly at their last reported
-  // GPS coordinates. See final changes/04_disable_frontend_map_simulation.md.
-  //
-  // useEffect(() => {
-  //   const movementInterval = setInterval(() => {
-  //     const { moveUnits: latestMoveUnits, tickRoutinePatrol: latestTickPatrol, mode } = useFieldIncidentStore.getState();
-  //     if (mode === 'ROUTINE' && latestTickPatrol) {
-  //       latestTickPatrol();
-  //     }
-  //     if (latestMoveUnits) {
-  //       latestMoveUnits();
-  //     }
-  //   }, 500);
-  //   return () => clearInterval(movementInterval);
-  // }, []);
-
-  // Simulation step loop — advances the active drill scenario every 2 500 ms.
-  // Mirrors the timer in FieldIncidentDashboard so the drill keeps running
-  // even when the user is on the War-Room and Field Command is not open.
-  // Kept intentionally: SIMULATION mode is an operator-initiated, clearly
-  // banner-labeled training drill — not the unsolicited demo-unit movement
-  // this task removes.
-  useEffect(() => {
-    const simInterval = setInterval(() => {
-      const { mode, nextSimulationStep: latestNextStep } = useFieldIncidentStore.getState();
-      if (mode === 'SIMULATION' && latestNextStep) {
-        latestNextStep();
-      }
-    }, 2500);
-
-    return () => clearInterval(simInterval);
-  }, []);
-
   const getConnectionStatusColor = () => {
     const colors = {
       CONNECTED: '#10b981',
@@ -651,19 +501,6 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard">
-      {/* Simulation Mode Banner */}
-      {isSimulation && (
-        <div className="simulation-banner">
-          <div className="banner-content">
-            <span className="banner-icon">⚠️</span>
-            <span className="banner-text">
-              SIMULATION MODE ACTIVE - {simulationType || 'UNKNOWN'} SCENARIO
-            </span>
-            <span className="banner-badge">TRAINING EXERCISE</span>
-          </div>
-        </div>
-      )}
-
       {/* Top Bar */}
       <div className="dashboard-topbar">
         <div className="topbar-left" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -731,49 +568,6 @@ export default function Dashboard() {
           >
             {getConnectionStatusText()}
           </span>
-          {fieldMode !== 'SIMULATION' ? (
-            <>
-              <select
-                value={selectedScenario}
-                onChange={(e) => setSelectedScenario(e.target.value)}
-                style={{
-                  backgroundColor: '#0f172a',
-                  color: '#e2e8f0',
-                  border: '1px solid #475569',
-                  borderRadius: '4px',
-                  padding: '0.35rem 0.6rem',
-                  fontSize: '0.75rem',
-                  fontWeight: '500',
-                  cursor: 'pointer',
-                  outline: 'none',
-                  minWidth: '150px',
-                }}
-                title="Select drill scenario"
-              >
-                <option value="FIRE">🔥 Fire Emergency</option>
-                <option value="TSUNAMI">🌊 Tsunami Event</option>
-                <option value="EARTHQUAKE">🏚️ Earthquake Crisis</option>
-                <option value="MISSILE">🚀 Missile Attack</option>
-              </select>
-              <button
-                className="feed-toggle"
-                onClick={handleStartSimulation}
-                title="Start emergency drill"
-                style={{ backgroundColor: '#dc2626', borderColor: '#dc2626' }}
-              >
-                ▶ Drill
-              </button>
-            </>
-          ) : (
-            <button
-              className="feed-toggle"
-              onClick={handleStopSimulation}
-              title="Stop emergency drill"
-              style={{ backgroundColor: '#991b1b', borderColor: '#991b1b' }}
-            >
-              ⏹ Stop Drill
-            </button>
-          )}
           <button
             className="feed-toggle"
             onClick={() => window.open('/field-incident', '_blank', 'noopener,noreferrer')}
@@ -791,14 +585,7 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div className="dashboard-section">
-        <KPICards
-          simulationData={isSimulation && majorIncident ? {
-            estimated_casualties: majorIncident.estimated_casualties,
-            displaced_persons: majorIncident.displaced_persons,
-            confirmed_deaths: majorIncident.confirmed_deaths,
-            active_sectors: fieldSectors.filter(s => s?.status === 'ACTIVE').length,
-          } : null}
-        />
+        <KPICards />
       </div>
 
       {/* Filter Bar */}
@@ -813,28 +600,13 @@ export default function Dashboard() {
           <IncidentList
             activeFilter={activeFilter}
             setActiveFilter={setActiveFilter}
-            isSimulation={isSimulation}
-            simulationEvents={isSimulation ? fieldTimeline : null}
           />
         </div>
 
         {/* Center: Map */}
         <div className="content-center">
           <MapView
-            simulationSectors={isSimulation ? fieldSectors : null}
             activeFilter={activeFilter}
-            isSimulation={isSimulation}
-            simulationIncident={isSimulation && majorIncident ? {
-              id: majorIncident.id || 'sim-incident',
-              lat: majorIncident.location_lat || 31.77,
-              lng: majorIncident.location_lng || 35.22,
-              name: majorIncident.title || 'Incident Location',
-              priority: majorIncident.priority || 'HIGH',
-              status: majorIncident.status || 'IN_PROGRESS',
-              title: majorIncident.title || 'Incident',
-              location_name: majorIncident.location_name || 'Field Location'
-            } : null}
-            simulationUnits={isSimulation ? simulationUnits : null}
             selectedUnitIds={selectedUnitIds}
             fieldCommands={fieldCommands}
             selectedFieldCommandId={selectedFieldCommand?.id || null}
@@ -980,74 +752,6 @@ export default function Dashboard() {
                         <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned forces</div>
                       )}
                     </div>
-
-                    {(() => {
-                      const activeDispatches = (simulationUnits || []).filter(
-                        (u) => u.status === 'EN_ROUTE' || u.status === 'ON_SCENE'
-                      );
-                      return (
-                        <div style={{ marginTop: '10px' }}>
-                          <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>
-                            Active Dispatches
-                            {activeDispatches.length > 0 && (
-                              <span style={{
-                                marginLeft: '6px',
-                                background: '#1e3a5f',
-                                color: '#93c5fd',
-                                borderRadius: '999px',
-                                padding: '1px 7px',
-                                fontSize: '0.7rem',
-                                fontWeight: 'bold',
-                              }}>{activeDispatches.length}</span>
-                            )}
-                          </div>
-                          {activeDispatches.length ? (
-                            <div style={{ maxHeight: '140px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                              {activeDispatches.map((unit) => {
-                                const isOnScene = unit.status === 'ON_SCENE';
-                                return (
-                                  <div key={unit.id} style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'center',
-                                    background: '#0f172a',
-                                    border: '1px solid #1f2937',
-                                    borderRadius: '6px',
-                                    padding: '5px 8px',
-                                  }}>
-                                    <div>
-                                      <div style={{ fontSize: '0.8rem', color: '#e2e8f0', fontWeight: '600' }}>
-                                        {unit.name || `Unit ${unit.id}`}
-                                      </div>
-                                      <div style={{ fontSize: '0.7rem', color: isOnScene ? '#10b981' : '#f59e0b' }}>
-                                        {isOnScene ? 'On Scene' : 'En Route'}
-                                      </div>
-                                    </div>
-                                    <button
-                                      title="Cancel dispatch"
-                                      onClick={() => cancelUnitDispatch(unit.id, unit.assignedTo)}
-                                      style={{
-                                        background: 'transparent',
-                                        border: '1px solid #ef4444',
-                                        color: '#ef4444',
-                                        borderRadius: '4px',
-                                        padding: '2px 7px',
-                                        fontSize: '0.7rem',
-                                        cursor: 'pointer',
-                                      }}
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No active dispatches</div>
-                          )}
-                        </div>
-                      );
-                    })()}
 
                     <div style={{ marginTop: '12px' }}>
                       <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Close Field Command Post</div>

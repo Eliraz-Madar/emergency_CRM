@@ -2,8 +2,41 @@ import { useMemo, useState, useEffect } from 'react';
 import { EventFeed } from './EventFeed.jsx';
 import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
-import { useFieldIncidentStore } from '../store/fieldIncident.js';
-import { updateIncidentStatus } from '../api/client.js';
+import {
+  updateIncidentStatus,
+  goLiveIncident,
+  getMajorIncidentSectors,
+  createMajorIncidentSector,
+  getMajorIncidentTaskGroups,
+  createMajorIncidentTaskGroup,
+} from '../api/client.js';
+
+// Same inline-form look as MapView.jsx's operator action menu (labelStyle/
+// inputStyle/actionsRowStyle/*ButtonStyle) — duplicated here rather than
+// imported since those are unexported module-scoped consts in a file this
+// stage is explicitly not allowed to touch (the right-click context menu).
+const labelStyle = { fontSize: '0.8rem', color: '#94a3b8', display: 'block', marginTop: '10px' };
+const inputStyle = {
+  width: '100%',
+  padding: '7px',
+  margin: '6px 0',
+  background: '#1e293b',
+  color: '#fff',
+  border: '1px solid #475569',
+  borderRadius: '6px',
+  boxSizing: 'border-box',
+};
+const submitButtonStyle = {
+  width: '100%',
+  border: 'none',
+  color: '#fff',
+  padding: '8px',
+  borderRadius: '6px',
+  cursor: 'pointer',
+  fontWeight: 'bold',
+  fontSize: '0.82rem',
+  marginTop: '10px',
+};
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
@@ -55,29 +88,14 @@ export function IncidentDetailsPanel() {
     clearFlashingIncident,
   } = useDashboardStore();
 
-  // מושכים את המידע החי מה-Store המבצעי
-  const {
-    incidents: fieldIncidents,
-    units, // legacy seeded/demo roster — still used by the SIMULATION-mode drill
-    cancelUnitDispatch,
-    updateIncidentPriority,
-    mode: fieldMode,
-    majorIncident,
-  } = useFieldIncidentStore();
-
-  // בסימולציה: השתמש ב-majorIncident אם אין selectedIncidentId
-  // בשגרה: חפש ב-field store ואחרי זה בdashboard
+  // Regional dashboard: the selected incident always comes from the real,
+  // DB-backed incidents list — no field-incident/simulation store involved.
   const incident = useMemo(() => {
-    if (!selectedIncidentId && fieldMode === 'SIMULATION' && majorIncident) {
-      return majorIncident;
-    }
-
     if (!selectedIncidentId) return null;
-
-    const liveIncident = Array.isArray(fieldIncidents) ? fieldIncidents.find(i => i.id === selectedIncidentId) : null;
-    const staticIncident = Array.isArray(dashboardIncidents) ? dashboardIncidents.find(i => i.id === selectedIncidentId) : null;
-    return liveIncident || staticIncident;
-  }, [selectedIncidentId, fieldIncidents, dashboardIncidents, fieldMode, majorIncident]);
+    return Array.isArray(dashboardIncidents)
+      ? dashboardIncidents.find(i => i.id === selectedIncidentId)
+      : null;
+  }, [selectedIncidentId, dashboardIncidents]);
 
   const [selectedType, setSelectedType] = useState('POLICE');
   const [activeTab, setActiveTab] = useState('dispatch');
@@ -92,9 +110,7 @@ export function IncidentDetailsPanel() {
     setCloseError('');
   }, [incident?.id]);
 
-  // Closing is only for real, DB-backed incidents — never the training
-  // simulation's majorIncident, which has no Incident.status state machine.
-  const canClose = fieldMode !== 'SIMULATION' && incident?.status && incident.status !== 'CLOSED';
+  const canClose = incident?.status && incident.status !== 'CLOSED';
 
   const handleCloseIncident = async () => {
     const reason = closeReason.trim();
@@ -120,11 +136,139 @@ export function IncidentDetailsPanel() {
     }
   };
 
-  // פונקציית העדכון - משתמשת ב-Store החי
+  // Real "go live" flow. Liveness comes from the real Incident/MajorIncident
+  // API data, never client state: incident.major_incident is populated by
+  // IncidentSerializer (backend/api/serializers.py) straight off the DB, so
+  // it's correct even on first load / after a page refresh — unlike the old
+  // shared-store majorIncident slot, which reset to null on reload and had
+  // no way to know a re-selected incident was already live.
+  const [liveMajorIncident, setLiveMajorIncident] = useState(null);
+  const liveMajorIncidentId = liveMajorIncident?.id ?? incident?.major_incident?.id ?? null;
+  const isLive = !!liveMajorIncidentId;
+
+  const [goLiveType, setGoLiveType] = useState('EARTHQUAKE');
+  const [goingLive, setGoingLive] = useState(false);
+  const [goLiveError, setGoLiveError] = useState('');
+  const [sectors, setSectors] = useState([]);
+  const [sectorForm, setSectorForm] = useState({ name: '', hazardLevel: 'MEDIUM' });
+  const [addingSector, setAddingSector] = useState(false);
+  const [sectorError, setSectorError] = useState('');
+  const [taskGroups, setTaskGroups] = useState([]);
+  const [taskGroupForm, setTaskGroupForm] = useState({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
+  const [addingTaskGroup, setAddingTaskGroup] = useState(false);
+  const [taskGroupError, setTaskGroupError] = useState('');
+
+  // Reset major-incident form state whenever a different incident is opened
+  useEffect(() => {
+    setLiveMajorIncident(null);
+    setGoLiveType('EARTHQUAKE');
+    setGoLiveError('');
+    setSectorForm({ name: '', hazardLevel: 'MEDIUM' });
+    setSectorError('');
+    setTaskGroupForm({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
+    setTaskGroupError('');
+  }, [incident?.id]);
+
+  // Load existing sectors/task groups once this incident is live.
+  useEffect(() => {
+    if (!liveMajorIncidentId) {
+      setSectors([]);
+      setTaskGroups([]);
+      return;
+    }
+    let cancelled = false;
+    getMajorIncidentSectors(liveMajorIncidentId)
+      .then((data) => { if (!cancelled) setSectors(Array.isArray(data) ? data : []); })
+      .catch(() => {});
+    getMajorIncidentTaskGroups(liveMajorIncidentId)
+      .then((data) => { if (!cancelled) setTaskGroups(Array.isArray(data) ? data : []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [liveMajorIncidentId]);
+
+  // Pulls the first validation message out of a DRF error response,
+  // regardless of which field it landed on (detail / incident_id /
+  // incident_type / submitted_by_role / etc.) — mirrors the pattern
+  // handleCloseIncident above already uses for closed_reason/status.
+  const extractApiError = (error, fallback) => {
+    const data = error?.response?.data;
+    if (!data) return fallback;
+    const firstValue = Object.values(data)[0];
+    if (Array.isArray(firstValue)) return firstValue[0];
+    if (typeof firstValue === 'string') return firstValue;
+    return fallback;
+  };
+
+  const handleGoLive = async () => {
+    if (!incident?.id) return;
+    setGoingLive(true);
+    setGoLiveError('');
+    try {
+      const created = await goLiveIncident(incident.id, goLiveType);
+      setLiveMajorIncident(created);
+    } catch (error) {
+      console.error('Failed to go live:', error);
+      // Covers the double-go-live case: the backend rejects a second call
+      // on the same Incident with a 400 (incident_id: "... already gone
+      // live as MajorIncident <id>."), surfaced here instead of retried.
+      setGoLiveError(extractApiError(error, 'Failed to declare major incident.'));
+    } finally {
+      setGoingLive(false);
+    }
+  };
+
+  const handleAddSector = async (e) => {
+    e.preventDefault();
+    if (!liveMajorIncidentId || !sectorForm.name.trim()) return;
+    setAddingSector(true);
+    setSectorError('');
+    try {
+      const created = await createMajorIncidentSector(liveMajorIncidentId, {
+        name: sectorForm.name.trim(),
+        hazardLevel: sectorForm.hazardLevel,
+      });
+      setSectors((prev) => [...prev, created]);
+      setSectorForm({ name: '', hazardLevel: 'MEDIUM' });
+    } catch (error) {
+      console.error('Failed to create sector:', error);
+      setSectorError(extractApiError(error, 'Failed to create sector.'));
+    } finally {
+      setAddingSector(false);
+    }
+  };
+
+  const toggleTaskGroupSector = (sectorId) => {
+    setTaskGroupForm((prev) => ({
+      ...prev,
+      sectorIds: prev.sectorIds.includes(sectorId)
+        ? prev.sectorIds.filter((id) => id !== sectorId)
+        : [...prev.sectorIds, sectorId],
+    }));
+  };
+
+  const handleAddTaskGroup = async (e) => {
+    e.preventDefault();
+    if (!liveMajorIncidentId || !taskGroupForm.title.trim()) return;
+    setAddingTaskGroup(true);
+    setTaskGroupError('');
+    try {
+      const created = await createMajorIncidentTaskGroup(liveMajorIncidentId, {
+        title: taskGroupForm.title.trim(),
+        category: taskGroupForm.category,
+        sectorIds: taskGroupForm.sectorIds,
+      });
+      setTaskGroups((prev) => [...prev, created]);
+      setTaskGroupForm({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
+    } catch (error) {
+      console.error('Failed to create task group:', error);
+      setTaskGroupError(extractApiError(error, 'Failed to create task group.'));
+    } finally {
+      setAddingTaskGroup(false);
+    }
+  };
+
   const handlePriorityChange = (newPriority) => {
     if (incident && incident.id) {
-      // עדכן גם בשני ה-stores כדי שהמפה תתעדכן
-      updateIncidentPriority(incident.id, newPriority);
       updateIncident(incident.id, { priority: newPriority });
     }
   };
@@ -215,11 +359,16 @@ export function IncidentDetailsPanel() {
   };
 
   const handleCancelDispatch = (unit) => {
-    // cancelUnitDispatch already extracts a numeric id and fires
-    // POST /api/mobile/cancel-dispatch/ regardless of source (see
-    // store/fieldIncident.js) — it just no-ops on the fake roster arrays
-    // for a real unit's id. Clear the real-unit tag here too.
-    cancelUnitDispatch(unit.id, incident.id);
+    // Real cancel-dispatch call — inlined directly (mirrors handleDispatch's
+    // raw-fetch style above) since this used to go through the shared field
+    // store's cancelUnitDispatch(), which had a real HTTP side effect here
+    // (not simulation bookkeeping) alongside fake-roster mutations that are
+    // dropped along with the store dependency.
+    fetch(`${API_BASE_URL}/mobile/cancel-dispatch/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mock_unit_id: unit.id, incident_id: incident.id }),
+    }).catch(() => {});
     upsertOnlineUnit({ id: unit.id, assignedTo: null, status: null });
   };
 
@@ -257,12 +406,10 @@ export function IncidentDetailsPanel() {
   };
 
   // Live dispatched units for this incident: real online units tagged by
-  // handleDispatch above, plus the legacy fake-roster units (still used by
-  // the SIMULATION-mode drill). See
-  // final changes/05_user_unit_claiming_and_live_sync.md.
+  // handleDispatch above. See final changes/05_user_unit_claiming_and_live_sync.md.
   const dispatchedUnits = useMemo(() => {
     if (!incident?.id) return [];
-    const real = (Array.isArray(onlineUnits) ? onlineUnits : [])
+    return (Array.isArray(onlineUnits) ? onlineUnits : [])
       .filter((u) => String(u.assignedTo) === String(incident.id))
       .map((u) => ({
         id: u.id,
@@ -271,17 +418,7 @@ export function IncidentDetailsPanel() {
         status: u.status || 'EN_ROUTE',
         isReal: true,
       }));
-    const fake = (Array.isArray(units) ? units : [])
-      .filter((u) => String(u.assignedTo) === String(incident.id))
-      .map((u) => ({
-        id: u.id,
-        name: u.name || String(u.id),
-        type: u.type || 'POLICE',
-        status: u.status || 'EN_ROUTE',
-        isReal: false,
-      }));
-    return [...real, ...fake];
-  }, [incident?.id, onlineUnits, units]);
+  }, [incident?.id, onlineUnits]);
 
   const headerIcon = (() => {
     const type = (incident?.incident_type || '').toUpperCase();
@@ -339,6 +476,7 @@ export function IncidentDetailsPanel() {
         {[
           { id: 'dispatch', label: '🚒 Dispatch' },
           { id: 'events',   label: '📋 Events'  },
+          { id: 'major',    label: '🌐 Major Incident' },
         ].map(({ id, label }) => (
           <button
             key={id}
@@ -375,6 +513,228 @@ export function IncidentDetailsPanel() {
       {activeTab === 'events' && (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <EventFeed />
+        </div>
+      )}
+
+      {/* ── Major Incident tab ── */}
+      {activeTab === 'major' && (
+        <div>
+          {!isLive ? (
+            <div style={{ marginBottom: '1.25rem' }}>
+              <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Major Incident</div>
+              <p style={{ fontSize: '0.82rem', color: '#9ca3af', margin: '0 0 4px 0' }}>
+                Declare this a Major Incident to unlock sector and task-group coordination.
+              </p>
+              <label style={labelStyle}>Incident Type</label>
+              <select
+                value={goLiveType}
+                onChange={(e) => setGoLiveType(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="EARTHQUAKE">Earthquake</option>
+                <option value="MISSILE_STRIKE">Missile Strike</option>
+                <option value="BUILDING_COLLAPSE">Building Collapse</option>
+                <option value="FLOOD">Flood</option>
+                <option value="HAZMAT">HAZMAT</option>
+                <option value="WILDFIRE">Wildfire</option>
+              </select>
+              {goLiveError && (
+                <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{goLiveError}</div>
+              )}
+              <button
+                type="button"
+                onClick={handleGoLive}
+                disabled={goingLive}
+                style={{
+                  ...submitButtonStyle,
+                  background: '#dc2626',
+                  cursor: goingLive ? 'not-allowed' : 'pointer',
+                  opacity: goingLive ? 0.6 : 1,
+                }}
+              >
+                {goingLive ? 'Declaring…' : '🚨 Go Live'}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">
+                  Major Incident — {liveMajorIncident?.status ?? incident.major_incident.status}
+                </div>
+                {liveMajorIncident ? (
+                  <div style={{
+                    background: '#0f172a', border: '1px solid #1f2937', borderRadius: '6px',
+                    padding: '10px', fontSize: '0.8rem', color: '#cbd5e1', lineHeight: 1.6,
+                  }}>
+                    <div style={{ fontWeight: 700, color: '#f87171', marginBottom: '4px' }}>{liveMajorIncident.title}</div>
+                    <div>Type: {liveMajorIncident.incident_type}</div>
+                    <div>Est. Casualties: {liveMajorIncident.estimated_casualties ?? 0}</div>
+                    <div>Confirmed Deaths: {liveMajorIncident.confirmed_deaths ?? 0}</div>
+                    <div>Displaced Persons: {liveMajorIncident.displaced_persons ?? 0}</div>
+                    <div>Affected Radius: {liveMajorIncident.radius_meters ?? 0} m</div>
+                  </div>
+                ) : (
+                  // Already live (incident.major_incident from the API), but this
+                  // session never called go-live itself, so only the id/status are
+                  // known — no MajorIncident detail-GET endpoint exists yet to
+                  // fetch the rest. Sector/Task Group forms below still work off
+                  // liveMajorIncidentId alone.
+                  <div style={{
+                    background: '#0f172a', border: '1px solid #1f2937', borderRadius: '6px',
+                    padding: '10px', fontSize: '0.8rem', color: '#9ca3af', fontStyle: 'italic',
+                  }}>
+                    Already declared as a Major Incident (id {liveMajorIncidentId}).
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Add Sector</div>
+                <form onSubmit={handleAddSector}>
+                  <label style={labelStyle}>Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. North Zone"
+                    value={sectorForm.name}
+                    onChange={(e) => setSectorForm({ ...sectorForm, name: e.target.value })}
+                    style={inputStyle}
+                    required
+                  />
+                  <label style={labelStyle}>Hazard Level</label>
+                  <select
+                    value={sectorForm.hazardLevel}
+                    onChange={(e) => setSectorForm({ ...sectorForm, hazardLevel: e.target.value })}
+                    style={inputStyle}
+                  >
+                    <option value="LOW">Low</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="HIGH">High</option>
+                    <option value="CRITICAL">Critical</option>
+                  </select>
+                  {sectorError && (
+                    <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{sectorError}</div>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={addingSector || !sectorForm.name.trim()}
+                    style={{
+                      ...submitButtonStyle,
+                      background: '#0284c7',
+                      cursor: addingSector || !sectorForm.name.trim() ? 'not-allowed' : 'pointer',
+                      opacity: addingSector || !sectorForm.name.trim() ? 0.6 : 1,
+                    }}
+                  >
+                    {addingSector ? 'Adding…' : 'Add Sector'}
+                  </button>
+                </form>
+                {sectors.length > 0 && (
+                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {sectors.map((s) => (
+                      <div key={s.id} style={{
+                        display: 'flex', justifyContent: 'space-between',
+                        fontSize: '0.78rem', color: '#9ca3af',
+                        background: '#0f172a', border: '1px solid #1f2937',
+                        borderRadius: '4px', padding: '4px 8px',
+                      }}>
+                        <span>{s.name}</span>
+                        <span>{s.hazard_level}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Add Task Group</div>
+                <form onSubmit={handleAddTaskGroup}>
+                  <label style={labelStyle}>Title</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Search & Rescue Alpha"
+                    value={taskGroupForm.title}
+                    onChange={(e) => setTaskGroupForm({ ...taskGroupForm, title: e.target.value })}
+                    style={inputStyle}
+                    required
+                  />
+                  <label style={labelStyle}>Category</label>
+                  <select
+                    value={taskGroupForm.category}
+                    onChange={(e) => setTaskGroupForm({ ...taskGroupForm, category: e.target.value })}
+                    style={inputStyle}
+                  >
+                    <option value="SEARCH_RESCUE">Search &amp; Rescue</option>
+                    <option value="EVACUATION">Evacuation</option>
+                    <option value="MEDICAL">Medical Response</option>
+                    <option value="UTILITIES">Utilities/Infrastructure</option>
+                    <option value="SECURITY">Security &amp; Perimeter</option>
+                    <option value="LOGISTICS">Logistics &amp; Supply</option>
+                    <option value="DAMAGE_ASSESSMENT">Damage Assessment</option>
+                    <option value="COMMUNICATIONS">Communications</option>
+                  </select>
+
+                  {sectors.length > 0 && (
+                    <>
+                      <label style={labelStyle}>Sectors (optional)</label>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', margin: '6px 0' }}>
+                        {sectors.map((s) => {
+                          const active = taskGroupForm.sectorIds.includes(s.id);
+                          return (
+                            <button
+                              type="button"
+                              key={s.id}
+                              onClick={() => toggleTaskGroupSector(s.id)}
+                              style={{
+                                borderColor: active ? '#60a5fa' : '#374151',
+                                background: active ? 'rgba(59,130,246,0.15)' : 'transparent',
+                                color: active ? '#60a5fa' : '#9ca3af',
+                                borderWidth: '1px',
+                                borderStyle: 'solid',
+                                padding: '4px 10px',
+                                borderRadius: '999px',
+                                fontSize: '0.75rem',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {s.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+
+                  {taskGroupError && (
+                    <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{taskGroupError}</div>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={addingTaskGroup || !taskGroupForm.title.trim()}
+                    style={{
+                      ...submitButtonStyle,
+                      background: '#0284c7',
+                      cursor: addingTaskGroup || !taskGroupForm.title.trim() ? 'not-allowed' : 'pointer',
+                      opacity: addingTaskGroup || !taskGroupForm.title.trim() ? 0.6 : 1,
+                    }}
+                  >
+                    {addingTaskGroup ? 'Adding…' : 'Add Task Group'}
+                  </button>
+                </form>
+                {taskGroups.length > 0 && (
+                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {taskGroups.map((tg) => (
+                      <div key={tg.id} style={{
+                        fontSize: '0.78rem', color: '#9ca3af',
+                        background: '#0f172a', border: '1px solid #1f2937',
+                        borderRadius: '4px', padding: '4px 8px',
+                      }}>
+                        {tg.title} — {tg.category}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
 

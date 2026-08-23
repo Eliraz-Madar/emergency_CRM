@@ -1,6 +1,16 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+// Channel/agency vocabulary, standardized to exactly these three values —
+// no MEDICAL, no OTHER/free-text, no HomeFront/Civil Defense (deferred).
+// Matches MapView.jsx's incidentForm/dispatchAgency dropdowns exactly.
+const DEFAULT_FILTERS = {
+  severities: ['LOW', 'MED', 'HIGH', 'CRITICAL'],
+  statuses: ['OPEN', 'PENDING', 'EN_ROUTE', 'ON_SCENE', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
+  channels: ['POLICE', 'EMS', 'FIRE'],
+  searchText: '',
+};
+
 /**
  * Dashboard state management using Zustand.
  * Handles incidents, units, events, filters, and real-time updates.
@@ -37,12 +47,7 @@ export const useDashboardStore = create(
       flashingIncidentId: null,
 
       // Filters — persisted
-      filters: {
-        severities: ['LOW', 'MED', 'HIGH', 'CRITICAL'],
-        statuses: ['OPEN', 'IN_PROGRESS', 'CLOSED'],
-        channels: ['Police', 'Fire', 'EMS', 'Civil Defense'],
-        searchText: '',
-      },
+      filters: DEFAULT_FILTERS,
 
       sortBy: 'severity', // 'severity', 'time', 'status'
 
@@ -172,6 +177,23 @@ export const useDashboardStore = create(
         filters: state.filters,
         sortBy: state.sortBy,
       }),
+      // Bumped from the unversioned original (implicit version 0) because
+      // filters.channels/statuses changed vocabulary (channel/agency
+      // standardization — see "final changes" notes). A shallow merge alone
+      // would leave any browser with an existing 'ecm-dashboard-ui' entry
+      // stuck on the old, now-incompatible values forever. migrate() below
+      // discards the persisted filters/activeFilter and falls back to the
+      // fresh defaults instead of trying to translate old values.
+      version: 1,
+      migrate: (persistedState) => {
+        const old = (persistedState && typeof persistedState === 'object') ? persistedState : {};
+        return {
+          selectedIncidentId: old.selectedIncidentId ?? null,
+          activeFilter: 'ALL',
+          filters: DEFAULT_FILTERS,
+          sortBy: old.sortBy ?? 'severity',
+        };
+      },
     }
   )
 );
