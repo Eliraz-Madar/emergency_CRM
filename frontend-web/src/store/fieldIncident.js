@@ -319,6 +319,15 @@ const initialRoutineUnits = buildInitialRoutineUnits();
 export const useFieldIncidentStore = create((set, get) => ({
   // Major incident data
   majorIncident: null,
+  // The FieldCommand's OWN status (ACTIVE/CLOSED, backend/api/models.py's
+  // FieldCommand.Status) — deliberately separate from majorIncident.status,
+  // which in LIVE mode is the MajorIncident's own, unrelated status enum
+  // (DECLARED/ACTIVE/STABILIZING/RECOVERY — MajorIncident has no CLOSED
+  // value at all). A closed FieldCommand escalated to a still-open
+  // MajorIncident is a real combination (see the dev DB's field-5), so
+  // this can't be inferred from majorIncident.status in that branch — see
+  // setFieldCommandData below, which is the only setter for this field.
+  fieldCommandStatus: null,
   sectors: [],
   taskGroups: [],
   events: [],
@@ -402,6 +411,7 @@ export const useFieldIncidentStore = create((set, get) => ({
     if (mi) {
       return {
         mode: 'LIVE',
+        fieldCommandStatus: fieldCommandData?.status ?? null,
         majorIncident: {
           id: mi.id,
           title: mi.title,
@@ -416,6 +426,7 @@ export const useFieldIncidentStore = create((set, get) => ({
     }
     return {
       mode: 'FIELD_COMMAND',
+      fieldCommandStatus: fieldCommandData?.status ?? null,
       // FieldCommand-shaped stand-in — no real MajorIncident id, so
       // getMajorIncidentPerimeter/etc. must never be called for this
       // majorIncident.id (SituationOverview.jsx's own perimeter fetch is
@@ -1765,6 +1776,7 @@ export const useFieldIncidentStore = create((set, get) => ({
     const freshUnits = createRoutineUnits();
     set({
       majorIncident: null,
+      fieldCommandStatus: null,
       sectors: [],
       taskGroups: [],
       events: [],

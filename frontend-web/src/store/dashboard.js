@@ -6,7 +6,13 @@ import { persist } from 'zustand/middleware';
 // Matches MapView.jsx's incidentForm/dispatchAgency dropdowns exactly.
 const DEFAULT_FILTERS = {
   severities: ['LOW', 'MED', 'HIGH', 'CRITICAL'],
-  statuses: ['OPEN', 'PENDING', 'EN_ROUTE', 'ON_SCENE', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
+  // CLOSED deliberately excluded from the default — a closed incident is
+  // done, and showing it identically to an active one in the sidebar by
+  // default (checkmark aside) reads as "still needs attention." Still
+  // fully viewable on demand via FilterBar's Status chip, which just adds
+  // 'CLOSED' back into this same array — nothing about the ability to see
+  // closed incidents was removed, only what's shown with no filter touched.
+  statuses: ['OPEN', 'PENDING', 'EN_ROUTE', 'ON_SCENE', 'IN_PROGRESS', 'RESOLVED'],
   channels: ['POLICE', 'EMS', 'FIRE'],
   searchText: '',
 };
@@ -218,7 +224,15 @@ export const useDashboardStore = create(
       // stuck on the old, now-incompatible values forever. migrate() below
       // discards the persisted filters/activeFilter and falls back to the
       // fresh defaults instead of trying to translate old values.
-      version: 1,
+      //
+      // Bumped again, 1 -> 2: DEFAULT_FILTERS.statuses no longer includes
+      // CLOSED. Same reasoning as the first bump — anyone already on
+      // version 1 has 'CLOSED' baked into their persisted filters.statuses
+      // array, and a shallow merge would leave it there forever. migrate()
+      // already unconditionally discards the persisted filters/activeFilter
+      // in favor of DEFAULT_FILTERS regardless of the old version, so no
+      // change to migrate()'s body was needed — only the version bump.
+      version: 2,
       migrate: (persistedState) => {
         const old = (persistedState && typeof persistedState === 'object') ? persistedState : {};
         return {

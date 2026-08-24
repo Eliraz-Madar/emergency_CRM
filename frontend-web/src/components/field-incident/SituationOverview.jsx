@@ -59,6 +59,11 @@ const SituationOverview = () => {
     ROUTINE: '#10b981',
     'ACTIVE MONITORING': '#10b981',
     INITIALIZING: '#f59e0b',
+    // FieldCommand's own CLOSED status (FIELD_COMMAND mode's majorIncident
+    // stand-in uses it directly; see setFieldCommandData in
+    // store/fieldIncident.js) — was previously falling back to
+    // statusColor.ACTIVE's alarming red with no dedicated entry.
+    CLOSED: '#78350f',
   };
 
   // Force display based on mode to prevent stale data

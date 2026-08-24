@@ -40,6 +40,14 @@ class IncidentSerializer(serializers.ModelSerializer):
     assigned_unit_ids = serializers.SerializerMethodField()
     field_command_name = serializers.CharField(
         source="field_command.name", read_only=True, default=None)
+    # "field_command" (below, in Meta.fields) auto-serializes to the
+    # internal numeric pk via DRF's default ModelSerializer FK handling —
+    # not usable for a frontend jump-link, since every other FieldCommand
+    # consumer (handleFieldCommandSelect, MapView markers, etc.) keys off
+    # the public field_key string. This exposes that public key alongside
+    # the name, same source= pattern as field_command_name above.
+    field_command_key = serializers.CharField(
+        source="field_command.field_key", read_only=True, default=None)
 
     # Public name for the closure-role input/output, remapped onto the
     # model's `closed_by` column (kept short since it's Incident-only).
@@ -66,6 +74,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             "channel",
             "field_command",
             "field_command_name",
+            "field_command_key",
             "created_at",
             "tasks",
             "assigned_unit_ids",

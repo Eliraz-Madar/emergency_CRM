@@ -9,6 +9,7 @@ import { FilterBar } from '../components/FilterBar.jsx';
 import { IncidentList } from '../components/IncidentList.jsx';
 import { MapView } from '../components/MapView.jsx';
 import { IncidentDetailsPanel } from '../components/IncidentDetailsPanel.jsx';
+import { FieldCommandDetailsPanel } from '../components/FieldCommandDetailsPanel.jsx';
 import { EventFeed } from '../components/EventFeed.jsx';
 import * as api from '../api/client.js';
 
@@ -76,6 +77,7 @@ export default function Dashboard() {
     incidents,
     events,
     selectedIncidentId,
+    setSelectedIncident,
     selectedUnitId,
     selectedUnitIds,
     units,
@@ -129,6 +131,28 @@ export default function Dashboard() {
   const [showCreateFieldAdvanced, setShowCreateFieldAdvanced] = useState(false);
   const [closeFieldReason, setCloseFieldReason] = useState('');
   const [closeFieldRole, setCloseFieldRole] = useState('COMMAND_CENTER');
+
+  // Mutual exclusion: selecting either entity clears the other's
+  // selection, since both render as position: fixed side panels occupying
+  // the same screen real estate — having both selected used to mean the
+  // Incident panel silently rendered on top of the (still fully mounted)
+  // FieldCommand panel underneath. Centralized here via effects watching
+  // both pieces of state, rather than patched into every individual call
+  // site of setSelectedIncident (IncidentList.jsx, MapView.jsx's incident
+  // marker clicks, the empty-map-click/Escape/X dismiss paths inside
+  // IncidentDetailsPanel.jsx) or handleFieldCommandSelect (MapView.jsx's
+  // field-command marker clicks) — this way every existing and future
+  // entry point is covered automatically, not just the ones enumerated
+  // today. Each effect only acts when its own state became truthy, so
+  // clearing one via the other (setting it to null) never re-triggers the
+  // opposite effect — no infinite loop.
+  useEffect(() => {
+    if (selectedIncidentId) setSelectedFieldCommand(null);
+  }, [selectedIncidentId]);
+
+  useEffect(() => {
+    if (selectedFieldCommand) setSelectedIncident(null);
+  }, [selectedFieldCommand, setSelectedIncident]);
 
   // Load the selected control-center name from localStorage on mount
   useEffect(() => {
@@ -211,6 +235,29 @@ export default function Dashboard() {
     }
   };
 
+  // Cross-link from IncidentDetailsPanel's "linked FieldCommand" summary.
+  // Reuses handleFieldCommandSelect, but needs a full list-shaped object
+  // first (location_lat/lng included) — sortedAssignableUnits' distance
+  // sort reads selectedFieldCommand.location_lat/lng directly, so passing
+  // a minimal {id, name} built from the Incident's own field_command_key/
+  // field_command_name would leave that undefined. Prefer the already-
+  // loaded fieldCommands list (kept fresh by refreshFieldCommands/SSE);
+  // fall back to a direct fetch if it's not there yet.
+  const handleJumpToFieldCommand = async (fieldKey) => {
+    if (!fieldKey) return;
+    const cached = fieldCommands.find((f) => f.id === fieldKey);
+    if (cached) {
+      await handleFieldCommandSelect(cached);
+      return;
+    }
+    try {
+      const fetched = await api.getFieldCommand(fieldKey);
+      await handleFieldCommandSelect(fetched);
+    } catch (error) {
+      console.error('Failed to jump to linked field command:', error);
+    }
+  };
+
   const handleAssignUnitToField = async (unitId) => {
     if (!selectedFieldCommand?.id || !unitId) return;
     setFieldCommandLoading(true);
@@ -222,6 +269,18 @@ export default function Dashboard() {
         api.getFieldCommand(selectedFieldCommand.id),
       ]);
       setUnits(updatedUnits || []);
+      // Also refresh onlineUnits — sortedAvailableFieldUnits (FieldCommand
+      // creation checklist) and MapView's Dispatch modal both read from it,
+      // not units, so without this a unit assigned here kept appearing as
+      // available on those two surfaces. Merged per-unit via
+      // upsertOnlineUnit, NOT a full setOnlineUnits(updatedUnits) replace:
+      // GET /api/units/ (UnitSerializer) has no assignedTo/status fields —
+      // those exist only client-side, set by handleDispatch/
+      // handleCancelDispatch below — so a full-array replace here would
+      // silently wipe "currently dispatched" state for every OTHER unit
+      // dispatched to any incident at the moment this runs. upsertOnlineUnit
+      // merges {...existing, ...partial}, so those two keys are left alone.
+      (updatedUnits || []).forEach((unit) => upsertOnlineUnit(unit));
       setFieldCommandSummary(updatedSummary);
       await refreshFieldCommands();
     } catch (error) {
@@ -870,208 +929,46 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-          <div
-            style={{
-              background: 'rgba(15, 23, 42, 0.7)',
-              border: '1px solid #334155',
-              borderRadius: '10px',
-              padding: '12px',
-              marginBottom: '12px',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {!selectedFieldCommand && (
+            <div
+              style={{
+                background: 'rgba(15, 23, 42, 0.7)',
+                border: '1px solid #334155',
+                borderRadius: '10px',
+                padding: '12px',
+                marginBottom: '12px',
+              }}
+            >
               <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Field Command Overview</h3>
-              <button
-                className="feed-toggle"
-                onClick={refreshFieldCommands}
-                style={{ fontSize: '0.75rem' }}
-              >
-                ⟳ Refresh
-              </button>
-            </div>
-            {fieldCommandError && (
-              <div style={{ color: '#ef4444', fontSize: '0.8rem', marginTop: '6px' }}>
-                {fieldCommandError}
-              </div>
-            )}
-            {!selectedFieldCommand && (
               <div style={{ color: '#94a3b8', marginTop: '8px', fontSize: '0.85rem' }}>
                 Select a field command marker on the map or click "Open Command" in the marker popup to assign forces.
               </div>
-            )}
-            {selectedFieldCommand && (
-              <div style={{ marginTop: '10px' }}>
-                <div style={{ fontWeight: 600 }}>{selectedFieldCommand.name || selectedFieldCommand.id}</div>
-                <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                  Incidents: {fieldCommandSummary?.incidents?.length ?? selectedFieldCommand.incidents_count ?? 0} | Forces: {fieldCommandSummary?.units?.length ?? selectedFieldCommand.units_count ?? 0}
-                </div>
-
-                {fieldCommandLoading && (
-                  <div style={{ color: '#e2e8f0', fontSize: '0.8rem', marginTop: '8px' }}>
-                    Loading field command data...
-                  </div>
-                )}
-
-                {fieldCommandSummary && (
-                  <>
-                    <div style={{ marginTop: '10px' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '0.8rem', color: '#e2e8f0' }}>
-                        <div>Status: {fieldCommandSummary.status || 'ACTIVE'}</div>
-                        <div>Phase: {fieldCommandSummary.incident_phase || 'Containment'}</div>
-                        <div>Casualties: {fieldCommandSummary.casualty_count ?? 0}</div>
-                        <div>Evacuated: {fieldCommandSummary.evacuated_count ?? 0}</div>
-                      </div>
-                    </div>
-                    <div style={{ marginTop: '10px' }}>
-                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Operational Notes</div>
-                      {fieldCommandSummary.operational_notes?.length ? (
-                        <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
-                          {fieldCommandSummary.operational_notes.map((note, idx) => (
-                            <div key={`${note.timestamp || idx}`} style={{ fontSize: '0.78rem', padding: '4px 0' }}>
-                              <div style={{ color: '#94a3b8' }}>{note.timestamp || ''}</div>
-                              <div>{note.message || ''}</div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>No notes yet.</div>
-                      )}
-                    </div>
-                    <div style={{ marginTop: '10px' }}>
-                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assigned Incidents</div>
-                      {fieldCommandSummary.incidents?.length ? (
-                        <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
-                          {fieldCommandSummary.incidents.map((incident) => (
-                            <div key={incident.id} style={{ fontSize: '0.8rem', padding: '4px 0' }}>
-                              {incident.title || 'Incident'}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned incidents</div>
-                      )}
-                    </div>
-
-                    <div style={{ marginTop: '10px' }}>
-                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assigned Forces</div>
-                      {fieldCommandSummary.units?.length ? (
-                        <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
-                          {fieldCommandSummary.units.map((unit) => (
-                            <div key={unit.id} style={{ fontSize: '0.8rem', padding: '4px 0' }}>
-                              {unit.name || `Unit ${unit.id}`} ({unit.type})
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned forces</div>
-                      )}
-                    </div>
-
-                    <div style={{ marginTop: '12px' }}>
-                      <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Close Field Command Post</div>
-                      <textarea
-                        value={closeFieldReason}
-                        onChange={(e) => setCloseFieldReason(e.target.value)}
-                        placeholder="Closure reason (required)..."
-                        rows={2}
-                        style={{
-                          width: '100%',
-                          background: '#0f172a',
-                          border: '1px solid #334155',
-                          borderRadius: '6px',
-                          color: '#e2e8f0',
-                          fontSize: '0.8rem',
-                          padding: '6px 8px',
-                          resize: 'vertical',
-                          marginBottom: '6px',
-                        }}
-                      />
-                      <select
-                        value={closeFieldRole}
-                        onChange={(e) => setCloseFieldRole(e.target.value)}
-                        style={{ width: '100%', padding: '5px', borderRadius: '6px', marginBottom: '8px', fontSize: '0.78rem' }}
-                      >
-                        <option value="COMMAND_CENTER">Closed by: Command Center</option>
-                        <option value="FIELD_OPERATOR">Closed by: Field Operator</option>
-                      </select>
-                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                        <button
-                          type="button"
-                          className="feed-toggle"
-                          onClick={handleCloseFieldCommand}
-                          disabled={fieldCommandLoading || !closeFieldReason.trim()}
-                          style={{
-                            backgroundColor: '#ef4444',
-                            borderColor: '#ef4444',
-                            fontSize: '0.8rem',
-                            padding: '0.5rem 0.75rem',
-                            opacity: !closeFieldReason.trim() ? 0.6 : 1,
-                            cursor: !closeFieldReason.trim() ? 'not-allowed' : 'pointer',
-                          }}
-                        >
-                          Close Camp
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {selectedFieldCommand && (
-                  <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Link Incident</div>
-                    {/* Closed incidents are never linkable — they're done,
-                        not a target for further field-command coordination. */}
-                    {Array.isArray(incidents) && incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED').length ? (
-                      <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
-                        {incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED').slice(0, 10).map((inc) => (
-                          <div key={inc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                            <span style={{ fontSize: '0.8rem' }}>{inc.title || `Incident ${inc.id}`}</span>
-                            <button
-                              className="feed-toggle"
-                              style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
-                              onClick={() => handleAssignIncidentToField(inc.id)}
-                            >
-                              Link
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>No unlinked incidents</div>
-                    )}
-                  </div>
-                )}
-
-                <div style={{ marginTop: '12px' }}>
-                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '6px' }}>Assign Global Forces (nearest first)</div>
-                  {sortedAssignableUnits.length ? (
-                    <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
-                      {sortedAssignableUnits.slice(0, 10).map((unit) => (
-                        <div key={unit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                          <span style={{ fontSize: '0.8rem' }}>
-                            {unit.name || `Unit ${unit.id}`} ({Number.isFinite(unit.distanceKm) ? `${unit.distanceKm.toFixed(1)} km` : 'No GPS'})
-                          </span>
-                          <button
-                            className="feed-toggle"
-                            style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
-                            onClick={() => handleAssignUnitToField(unit.id)}
-                          >
-                            Assign
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No unassigned forces available</div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
+          <FieldCommandDetailsPanel
+            selectedFieldCommand={selectedFieldCommand}
+            fieldCommandSummary={fieldCommandSummary}
+            fieldCommandLoading={fieldCommandLoading}
+            fieldCommandError={fieldCommandError}
+            closeFieldReason={closeFieldReason}
+            setCloseFieldReason={setCloseFieldReason}
+            closeFieldRole={closeFieldRole}
+            setCloseFieldRole={setCloseFieldRole}
+            incidents={incidents}
+            sortedAssignableUnits={sortedAssignableUnits}
+            onRefresh={refreshFieldCommands}
+            onClose={() => setSelectedFieldCommand(null)}
+            onCloseFieldCommand={handleCloseFieldCommand}
+            onLinkIncident={handleAssignIncidentToField}
+            onAssignUnit={handleAssignUnitToField}
+          />
           {showEventFeed ? (
             <EventFeed />
           ) : (
-            <IncidentDetailsPanel onGoLiveCreateFieldCommand={handleGoLiveCreateFieldCommand} />
+            <IncidentDetailsPanel
+              onGoLiveCreateFieldCommand={handleGoLiveCreateFieldCommand}
+              onSelectFieldCommand={handleJumpToFieldCommand}
+            />
           )}
         </div>
       </div>

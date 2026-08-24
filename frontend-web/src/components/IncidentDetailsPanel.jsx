@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect } from 'react';
 import { EventFeed } from './EventFeed.jsx';
-import { Shield, Flame, Ambulance, X, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
+import { SidePanel } from './SidePanel.jsx';
+import { Shield, Flame, Ambulance, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
 import {
   updateIncidentStatus,
@@ -73,7 +74,7 @@ const normalizeUnitType = (type) => {
   return 'POLICE';
 };
 
-export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand } = {}) {
+export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectFieldCommand } = {}) {
   const {
     incidents: dashboardIncidents,
     onlineUnits,
@@ -454,47 +455,33 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand } = {}) {
 
   if (!incident) return null;
 
-  // --- Layout Fix ---
-  // 1. h-[calc(100vh-2rem)]: קובע גובה קשיח.
-  // 2. flex flex-col: מסדר את הילדים בטור.
   return (
-    <div
-      style={{
-        position: 'fixed',
-        right: '1rem',
-        top: '1rem',
-        bottom: '1rem',
-        width: '24rem',
-        height: 'calc(100vh - 2rem)',
-        background: 'radial-gradient(circle at 20% 20%, #111827, #0b1220)',
-        color: '#e5e7eb',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        zIndex: 2000,
-        borderRadius: '0.5rem',
-        boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
-        border: '1px solid #334155'
-      }}
-    >
-      {/* Header - Fixed Height (shrink-0) */}
-      <div className="cc-header p-4 border-b border-slate-700 flex justify-between items-start" style={{ flexShrink: 0 }}>
-        <div className="cc-header-left flex gap-3">
-          <div className="cc-icon-circle p-2 bg-slate-800 rounded-full">{headerIcon}</div>
-          <div>
-            <div className="cc-title font-bold text-lg">{incident.title || 'Incident'}</div>
-            <div className="cc-subtitle text-sm text-slate-400 flex items-center">
-              <MapPin size={14} style={{ marginRight: 6 }} />
-              {incident.location_name || 'Unknown location'}
-            </div>
+    <SidePanel
+      icon={headerIcon}
+      title={incident.title || 'Incident'}
+      subtitle={(
+        <>
+          <MapPin size={14} style={{ marginRight: 6 }} />
+          {incident.location_name || 'Unknown location'}
+        </>
+      )}
+      onClose={handleClose}
+      footer={activeTab === 'dispatch' && (
+        <div className="cc-footer p-4 border-t border-slate-700 bg-slate-900 z-10" style={{ flexShrink: 0 }}>
+          <div className="flex justify-between items-center">
+            <div className="cc-selection text-sm text-slate-400">Selected: <span className="text-white font-bold">{selectedUnitIds.length}</span></div>
+            <button
+              className="cc-dispatch bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              disabled={selectedUnitIds.length === 0}
+              onClick={handleDispatch}
+            >
+              Dispatch Units
+              <ChevronRight size={16} style={{ marginLeft: 8 }} />
+            </button>
           </div>
         </div>
-        <div className="cc-header-right flex items-center gap-2">
-          <button className="cc-close hover:bg-slate-800 p-1 rounded" onClick={handleClose} aria-label="Close panel">
-            <X size={16} />
-          </button>
-        </div>
-      </div>
+      )}
+    >
 
       {/* ── Tab Bar ── */}
       <div style={{ display: 'flex', borderBottom: '1px solid #1e293b', flexShrink: 0 }}>
@@ -766,6 +753,34 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand } = {}) {
       {/* ── Dispatch tab content (original) ── */}
       {activeTab === 'dispatch' && (<>
 
+        {/* ── Linked Field Command (only when escalated to one) ── */}
+        {incident.field_command && (
+          <div
+            onClick={() => onSelectFieldCommand?.(incident.field_command_key)}
+            style={{
+              marginBottom: '1.25rem',
+              padding: '10px',
+              background: '#0f172a',
+              border: '1px solid #1f2937',
+              borderRadius: '6px',
+              cursor: onSelectFieldCommand ? 'pointer' : 'default',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Field Command Post
+              </div>
+              <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#60a5fa', marginTop: '2px' }}>
+                {incident.field_command_name || `Post #${incident.field_command}`}
+              </div>
+            </div>
+            {onSelectFieldCommand && <ChevronRight size={16} color="#60a5fa" />}
+          </div>
+        )}
+
         {/* ── Dispatched Units (always visible) ── */}
         <div style={{ marginBottom: '1.25rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
@@ -984,24 +999,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand } = {}) {
         </div>
         </>)}
       </div>
-
-      {/* Footer - only shown on Dispatch tab */}
-      {activeTab === 'dispatch' && (
-        <div className="cc-footer p-4 border-t border-slate-700 bg-slate-900 z-10" style={{ flexShrink: 0 }}>
-          <div className="flex justify-between items-center">
-            <div className="cc-selection text-sm text-slate-400">Selected: <span className="text-white font-bold">{selectedUnitIds.length}</span></div>
-            <button
-              className="cc-dispatch bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              disabled={selectedUnitIds.length === 0}
-              onClick={handleDispatch}
-            >
-              Dispatch Units
-              <ChevronRight size={16} style={{ marginLeft: 8 }} />
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
+    </SidePanel>
   );
 }
 

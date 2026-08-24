@@ -13,10 +13,17 @@ import '../styles/dashboard-selector.css';
 
 const DashboardSelector = () => {
   const navigate = useNavigate();
-  const [fieldId, setFieldId] = useState('field-1');
+  // No hardcoded 'field-1' fallback: that value only ever mattered as a
+  // stand-in for "nothing real is known yet," and let navigation proceed
+  // with a value nothing downstream had actually validated. Now that an
+  // empty active-post list explicitly blocks navigation (below) rather
+  // than silently falling through, there's nothing left for a fake
+  // default to paper over — '' correctly represents "not yet resolved."
+  const [fieldId, setFieldId] = useState('');
   const [isFieldManager, setIsFieldManager] = useState(false);
   const [fieldValidationError, setFieldValidationError] = useState('');
   const [fieldOptions, setFieldOptions] = useState([]);
+  const [fieldOptionsLoading, setFieldOptionsLoading] = useState(true);
   const [fieldOptionsError, setFieldOptionsError] = useState('');
 
   useEffect(() => {
@@ -48,6 +55,8 @@ const DashboardSelector = () => {
       } catch (error) {
         console.error('Failed to load field commands:', error);
         setFieldOptionsError('Failed to load field commands.');
+      } finally {
+        setFieldOptionsLoading(false);
       }
     };
 
@@ -75,9 +84,21 @@ const DashboardSelector = () => {
   const validateAndNavigate = (path) => {
     // The fieldId dropdown is already populated from the backend list,
     // so a second async round-trip validation is unnecessary and can hang
-    // when the SSE stream holds Django's dev-server threads.
+    // when the SSE stream holds Django's dev-server threads. This function
+    // itself still does no gating — the Field Incident card's own
+    // click/button handlers below check canOpenFieldDashboard before ever
+    // calling this, since that requirement is specific to that one
+    // destination (the Regional/War-Room card has no such restriction).
     navigate(path);
   };
+
+  // False while the active-post list is still loading (avoids a flash of
+  // "no posts" before the fetch resolves) or once it's resolved empty —
+  // the only two states in which entering /field-incident should be
+  // blocked. fieldId's value is irrelevant here on purpose: a stale
+  // localStorage/hardcoded value must never be what lets navigation
+  // through.
+  const canOpenFieldDashboard = !fieldOptionsLoading && fieldOptions.length > 0;
 
   return (
     <div className="dashboard-selector">
@@ -105,25 +126,34 @@ const DashboardSelector = () => {
                 <span className="context-label-icon">📍</span>
                 Active Control Center
               </label>
-              <div className="context-select-wrapper">
-                <select
-                  id="fieldId"
-                  className="context-select"
-                  value={fieldId}
-                  onChange={(e) => handleFieldChange(e.target.value)}
-                >
-                  {fieldOptions.length ? (
-                    fieldOptions.map((field) => (
+              {fieldOptionsLoading ? (
+                <div className="context-select-wrapper">
+                  <div className="context-select" style={{ cursor: 'default', color: '#94a3b8' }}>
+                    Loading control centers…
+                  </div>
+                </div>
+              ) : fieldOptions.length ? (
+                <div className="context-select-wrapper">
+                  <select
+                    id="fieldId"
+                    className="context-select"
+                    value={fieldId}
+                    onChange={(e) => handleFieldChange(e.target.value)}
+                  >
+                    {fieldOptions.map((field) => (
                       <option key={field.id} value={field.id}>
                         {field.name || field.id}
                       </option>
-                    ))
-                  ) : (
-                    <option value={fieldId}>{fieldId}</option>
-                  )}
-                </select>
-                <span className="context-select-arrow">▾</span>
-              </div>
+                    ))}
+                  </select>
+                  <span className="context-select-arrow">▾</span>
+                </div>
+              ) : (
+                // Empty, CLOSED-filtered list — no real value exists to put in
+                // a dropdown, so don't show one at all. This is the state that
+                // used to silently fall through to a stale/hardcoded fieldId.
+                <div className="context-error">No active field command posts</div>
+              )}
               {fieldOptionsError && (
                 <div className="context-error">{fieldOptionsError}</div>
               )}
@@ -188,7 +218,8 @@ const DashboardSelector = () => {
           {/* Field Incident Dashboard */}
           <div
             className="dashboard-card field-card"
-            onClick={() => validateAndNavigate('/field-incident')}
+            onClick={() => canOpenFieldDashboard && validateAndNavigate('/field-incident')}
+            style={!canOpenFieldDashboard ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
           >
             <div className="card-icon">🎖️</div>
             <h2>Field Incident Command</h2>
@@ -213,7 +244,24 @@ const DashboardSelector = () => {
               large-scale disasters requiring command coordination
             </div>
 
-            <button className="card-button">Open Field Command Dashboard</button>
+            <button
+              className="card-button"
+              disabled={!canOpenFieldDashboard}
+              onClick={(e) => {
+                // The card's own onClick above already handles navigation —
+                // stop propagation isn't needed for that, but guard here too
+                // so this button can never fire on its own via keyboard
+                // activation while the card wrapper's click is bypassed.
+                if (!canOpenFieldDashboard) e.preventDefault();
+              }}
+              style={!canOpenFieldDashboard ? { cursor: 'not-allowed', opacity: 0.7 } : undefined}
+            >
+              {fieldOptionsLoading
+                ? 'Loading…'
+                : canOpenFieldDashboard
+                  ? 'Open Field Command Dashboard'
+                  : 'No Active Posts'}
+            </button>
           </div>
         </div>
 

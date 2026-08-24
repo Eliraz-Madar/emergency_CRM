@@ -113,8 +113,17 @@ const FieldIncidentDashboard = () => {
   const addIncidentEvent = useFieldIncidentStore((s) => s.addEvent);
   const moveUnits = useFieldIncidentStore((s) => s.moveUnits);
   const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
+  const fieldCommandStatus = useFieldIncidentStore((s) => s.fieldCommandStatus);
   const setFieldId = useFieldIncidentStore((s) => s.setFieldId);
   const fieldId = useFieldIncidentStore((s) => s.fieldId);
+
+  // The FieldCommand's own status — see fieldIncident.js's fieldCommandStatus
+  // comment for why this is a separate field from majorIncident.status.
+  // Drives the read-only-archive banner and disables every write action
+  // below regardless of mode (LIVE or FIELD_COMMAND) — a closed post is
+  // never actionable, whether or not it's escalated to a still-open
+  // MajorIncident.
+  const isClosed = fieldCommandStatus === 'CLOSED';
 
   const simulationTimerRef = useRef(null);
   const routineEventTimerRef = useRef(null);
@@ -377,6 +386,11 @@ const FieldIncidentDashboard = () => {
   };
 
   const handleOpenPerimeterModal = () => {
+    // Defense-in-depth, not the only guard — the trigger button below is
+    // also disabled/hidden when isClosed, but this makes the refusal real
+    // (matching Stage 1's standard) rather than relying purely on the
+    // button never being clickable.
+    if (isClosed) return;
     setPerimeterPoints([]);
     setPerimeterError('');
     setIsPerimeterModalOpen(true);
@@ -389,7 +403,7 @@ const FieldIncidentDashboard = () => {
   };
 
   const handleSubmitPerimeter = async () => {
-    if (!majorIncident?.id || perimeterPoints.length < 3) return;
+    if (isClosed || !majorIncident?.id || perimeterPoints.length < 3) return;
     setSubmittingPerimeter(true);
     setPerimeterError('');
     try {
@@ -464,7 +478,37 @@ const FieldIncidentDashboard = () => {
   }
 
   return (
-    <div className="field-incident-dashboard">
+    <div className="field-incident-dashboard" style={isClosed ? { paddingTop: '40px' } : undefined}>
+      {/* Unmissable read-only banner — the real fix for a CLOSED
+          FieldCommand rendering identically to an active one. Fixed
+          position + high z-index so it can't be scrolled past or covered;
+          the wrapper's paddingTop above keeps it from overlapping the
+          header underneath. */}
+      {isClosed && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: '40px',
+            backgroundColor: '#78350f',
+            color: '#fef3c7',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '0.5rem',
+            fontWeight: '700',
+            fontSize: '0.9rem',
+            letterSpacing: '0.05em',
+            textTransform: 'uppercase',
+            borderBottom: '2px solid #f59e0b',
+            zIndex: 10000,
+          }}
+        >
+          🔒 Closed — Read-Only Archive
+        </div>
+      )}
       {/* Unified Command Header */}
       <header className="dashboard-header" style={{
         backgroundColor: '#1a1a2e',
@@ -718,22 +762,27 @@ const FieldIncidentDashboard = () => {
                 🚨 LIVE: {majorIncident?.title || 'Major Incident'}
               </div>
 
-              <button
-                onClick={handleOpenPerimeterModal}
-                title="Draw and submit the field perimeter (Field Operator)"
-                style={{
-                  backgroundColor: '#0f172a',
-                  color: '#e2e8f0',
-                  border: '1px solid #f59e0b',
-                  borderRadius: '4px',
-                  padding: '0.5rem 1rem',
-                  fontSize: '0.85rem',
-                  fontWeight: 'bold',
-                  cursor: 'pointer',
-                }}
-              >
-                🧭 Set Perimeter
-              </button>
+              {/* Hidden (not just disabled) when the FieldCommand itself is
+                  closed — a closed post's perimeter is not editable
+                  regardless of the linked MajorIncident's own status. */}
+              {!isClosed && (
+                <button
+                  onClick={handleOpenPerimeterModal}
+                  title="Draw and submit the field perimeter (Field Operator)"
+                  style={{
+                    backgroundColor: '#0f172a',
+                    color: '#e2e8f0',
+                    border: '1px solid #f59e0b',
+                    borderRadius: '4px',
+                    padding: '0.5rem 1rem',
+                    fontSize: '0.85rem',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                  }}
+                >
+                  🧭 Set Perimeter
+                </button>
+              )}
 
               {perimeterConfirmation && (
                 <span style={{
