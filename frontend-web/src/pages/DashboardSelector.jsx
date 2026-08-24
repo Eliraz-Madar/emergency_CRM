@@ -265,6 +265,50 @@ const DashboardSelector = () => {
           </div>
         </div>
 
+        {/* Training Drill entry — deliberately NOT a third dashboard-card.
+            Distinct, secondary styling (dashed border, muted background, no
+            feature list) so it reads as "practice, no real data" rather
+            than another way to open a real post. Bypasses
+            canOpenFieldDashboard/validateAndNavigate entirely: this must
+            work even with zero active FieldCommand posts, since that's the
+            whole point. Uses a ?training=true query param as the signal
+            FieldIncidentDashboard.jsx checks — deliberately not "navigate
+            with no fieldId," which would be indistinguishable from the
+            accidental-empty-fieldId case Stage 3 needs to treat as a real
+            error. */}
+        <div
+          style={{
+            marginTop: '1.5rem',
+            padding: '1rem 1.25rem',
+            border: '1.5px dashed rgba(100, 116, 139, 0.5)',
+            borderRadius: '0.75rem',
+            background: 'rgba(15, 23, 42, 0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '1rem',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 600, color: '#cbd5e1' }}>🎓 Training Drill</div>
+            <div style={{ fontSize: '0.85rem', color: '#64748b', marginTop: '0.15rem' }}>
+              Practice scenario — no real FieldCommand data, doesn't require an active post.
+            </div>
+          </div>
+          <button
+            className="card-button"
+            style={{
+              background: 'transparent',
+              border: '1.5px solid rgba(100, 116, 139, 0.6)',
+              color: '#cbd5e1',
+            }}
+            onClick={() => navigate('/field-incident?training=true')}
+          >
+            Start Training Drill
+          </button>
+        </div>
+
         {/* Info Section */}
         {/* <div className="selector-info">
           <div className="info-card">

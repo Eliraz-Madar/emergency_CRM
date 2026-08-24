@@ -6,7 +6,7 @@ dashboard/mobile dispatches into the database as Tasks.
 from rest_framework.test import APITestCase
 from rest_framework import status
 
-from api.models import User, Incident, Unit, Task
+from api.models import User, Incident, Unit, Task, FieldCommand, MajorIncident
 
 
 def _make_dispatcher():
@@ -321,3 +321,101 @@ class UnitClaimingTests(APITestCase):
         # Stored is_online is True, but the serializer must report False once
         # the last heartbeat is older than Unit.HEARTBEAT_STALE_AFTER.
         self.assertFalse(response.json()["is_online"])
+
+
+class FieldCommandLinkLifecycleTests(APITestCase):
+    def setUp(self):
+        self.dispatcher = User.objects.create_user(
+            username="fieldops_dispatcher", password="pass1234", role=User.Roles.DISPATCHER)
+        self.major_incident = MajorIncident.objects.create(
+            title="Field command link lifecycle",
+            incident_type=MajorIncident.IncidentType.FLOOD,
+            description="Lifecycle test incident",
+            location_lat=32.0,
+            location_lng=34.0,
+        )
+
+    def test_prevent_duplicate_active_link_on_create(self):
+        self.client.force_authenticate(self.dispatcher)
+        first = self.client.post(
+            "/api/field-commands/",
+            {
+                "name": "North Field Post",
+                "location_lat": 31.9,
+                "location_lng": 34.1,
+                "major_incident_id": self.major_incident.id,
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.client.post(
+            "/api/field-commands/",
+            {
+                "name": "South Field Post",
+                "location_lat": 32.1,
+                "location_lng": 34.2,
+                "major_incident_id": self.major_incident.id,
+            },
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("major_incident", second.json())
+
+    def test_prevent_duplicate_active_link_on_update(self):
+        first = FieldCommand.objects.create(
+            name="North Field Post",
+            location_lat=31.9,
+            location_lng=34.1,
+            major_incident=self.major_incident,
+        )
+        second = FieldCommand.objects.create(
+            name="South Field Post",
+            location_lat=32.1,
+            location_lng=34.2,
+        )
+
+        self.client.force_authenticate(self.dispatcher)
+        response = self.client.patch(
+            f"/api/field-commands/{second.field_key}/",
+            {"major_incident_id": self.major_incident.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("major_incident", response.json())
+        self.assertEqual(
+            FieldCommand.objects.filter(major_incident=self.major_incident, status=FieldCommand.Status.ACTIVE).count(),
+            1,
+        )
+
+    def test_cascade_close_incident_when_field_command_closed(self):
+        field_command = FieldCommand.objects.create(
+            name="North Field Post",
+            location_lat=31.9,
+            location_lng=34.1,
+            major_incident=self.major_incident,
+        )
+        incident = Incident.objects.create(
+            title="Linked incident",
+            description="Should close with field-post closure",
+            location_lat=31.9,
+            location_lng=34.1,
+            field_command=field_command,
+        )
+
+        self.client.force_authenticate(self.dispatcher)
+        response = self.client.post(
+            f"/api/field-commands/{field_command.field_key}/close/",
+            {
+                "closed_reason": "Field post shutdown complete",
+                "closed_by_role": FieldCommand.ClosedByRole.COMMAND_CENTER,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        incident.refresh_from_db()
+        field_command.refresh_from_db()
+        self.assertEqual(incident.status, Incident.Status.CLOSED)
+        self.assertEqual(field_command.status, FieldCommand.Status.CLOSED)
+        self.assertIsNone(incident.field_command_id)

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Shield, Flame, Ambulance } from 'lucide-react';
 import { formatTime } from '../utils/time.js';
 import { useDashboardStore } from '../store/dashboard.js';
 import { getSortedAvailableUnits } from '../utils/units.js';
@@ -49,6 +50,33 @@ const mapGoLiveIncidentType = (rawType) => {
     .map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
     .join(' ');
   return { incidentType: 'Other', incidentTypeOther: readable };
+};
+
+// Unit-type filter tabs for the Create Field Command modal's checklist —
+// replicated (not imported) from IncidentDetailsPanel.jsx's identical
+// TYPE_META/TYPE_ORDER/normalizeUnitType, matching that file's own existing
+// precedent for MapView.jsx's labelStyle/inputStyle ("duplicated here
+// rather than imported since those are unexported module-scoped consts").
+// IncidentDetailsPanel.jsx doesn't export these either, and importing a
+// component's internal constants into a page that also renders it would be
+// an odd dependency direction — duplication keeps each file self-contained,
+// same call already made once in this codebase.
+const CREATE_FIELD_TYPE_META = {
+  POLICE: { label: 'Police', color: '#3b82f6', Icon: Shield },
+  FIRE: { label: 'Fire', color: '#ef4444', Icon: Flame },
+  MEDICAL: { label: 'Medical', color: '#f8fafc', Icon: Ambulance },
+};
+const CREATE_FIELD_TYPE_ORDER = ['POLICE', 'FIRE', 'MEDICAL'];
+
+// Real backend Unit.type is Police/Fire/EMS/HomeFront — same normalization
+// IncidentDetailsPanel.jsx's own Dispatch Forces tabs use, so a unit tagged
+// "EMS" still matches the "Medical" tab.
+const normalizeCreateFieldUnitType = (type) => {
+  const t = (type || '').toUpperCase();
+  if (t === 'EMS' || t === 'AMBULANCE' || t === 'MEDICAL') return 'MEDICAL';
+  if (t === 'FIRE') return 'FIRE';
+  if (t === 'POLICE') return 'POLICE';
+  return 'POLICE';
 };
 
 /**
@@ -120,6 +148,12 @@ export default function Dashboard() {
   // by resetCreateFieldForm so a previous Go Live can never leak into an
   // unrelated direct creation.
   const [createFieldMajorIncidentId, setCreateFieldMajorIncidentId] = useState(null);
+  // 'ALL' (default, matches current unfiltered behavior) or one of
+  // CREATE_FIELD_TYPE_ORDER — narrows the checklist by unit type without
+  // forcing a choice before anything is shown, same "All + specific types"
+  // shape IncidentList.jsx's own channel filter already uses elsewhere in
+  // this codebase.
+  const [createFieldUnitType, setCreateFieldUnitType] = useState('ALL');
   const [createFieldForm, setCreateFieldForm] = useState({
     name: '',
     incidentType: '',
@@ -129,6 +163,16 @@ export default function Dashboard() {
     incidentPhase: 'Containment',
   });
   const [showCreateFieldAdvanced, setShowCreateFieldAdvanced] = useState(false);
+  // Optional inline task creation — only meaningful when
+  // createFieldMajorIncidentId is set (TaskGroup requires a real
+  // majorIncidentId; the direct-creation path never has one). Mirrors the
+  // unit checklist's "collect several, one submit" shape rather than a
+  // per-task API call at add-time: createFieldTasks is the local list
+  // submitted in a loop from handleCreateFieldSubmit, createFieldTaskForm
+  // is just the small add-one-task input row's own draft state.
+  const [showCreateFieldTasks, setShowCreateFieldTasks] = useState(false);
+  const [createFieldTasks, setCreateFieldTasks] = useState([]);
+  const [createFieldTaskForm, setCreateFieldTaskForm] = useState({ title: '', category: 'SEARCH_RESCUE' });
   const [closeFieldReason, setCloseFieldReason] = useState('');
   const [closeFieldRole, setCloseFieldRole] = useState('COMMAND_CENTER');
 
@@ -176,9 +220,23 @@ export default function Dashboard() {
   // (no agency-type filter, unlike MapView's Dispatch modal), sorted
   // nearest-first to the right-clicked point. getSortedAvailableUnits
   // already excludes units already attached to a FieldCommand.
-  const sortedAvailableFieldUnits = useMemo(
+  // Unfiltered — used for id-based lookups (unit_name summary, failed-
+  // assignment names) so a unit selected under one type tab is still
+  // found by name even after switching to a different tab before submit.
+  // The checklist itself renders the tab-filtered list below.
+  const allAvailableFieldUnits = useMemo(
     () => getSortedAvailableUnits(activeUnits, createFieldLocation, null),
     [activeUnits, createFieldLocation],
+  );
+  const sortedAvailableFieldUnits = useMemo(
+    () => getSortedAvailableUnits(
+      activeUnits,
+      createFieldLocation,
+      createFieldUnitType === 'ALL'
+        ? null
+        : (unit) => normalizeCreateFieldUnitType(unit.type) === createFieldUnitType,
+    ),
+    [activeUnits, createFieldLocation, createFieldUnitType],
   );
 
   // Field Command Overview's "Assign Global Forces" list: previously just
@@ -388,6 +446,17 @@ export default function Dashboard() {
     }));
   };
 
+  const handleAddCreateFieldTask = () => {
+    const title = createFieldTaskForm.title.trim();
+    if (!title) return;
+    setCreateFieldTasks((prev) => [...prev, { title, category: createFieldTaskForm.category }]);
+    setCreateFieldTaskForm({ title: '', category: 'SEARCH_RESCUE' });
+  };
+
+  const handleRemoveCreateFieldTask = (index) => {
+    setCreateFieldTasks((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const resetCreateFieldForm = () => {
     setCreateFieldForm({
       name: '',
@@ -400,6 +469,10 @@ export default function Dashboard() {
     setShowCreateFieldAdvanced(false);
     setCreateFieldLocation(null);
     setCreateFieldMajorIncidentId(null);
+    setCreateFieldUnitType('ALL');
+    setShowCreateFieldTasks(false);
+    setCreateFieldTasks([]);
+    setCreateFieldTaskForm({ title: '', category: 'SEARCH_RESCUE' });
   };
 
   const handleCreateFieldSubmit = async (event) => {
@@ -422,7 +495,10 @@ export default function Dashboard() {
     // the checklist instead. Zero units selected is allowed (a post can be
     // staffed later via the existing assign-unit flow), rendered as
     // "Unassigned".
-    const selectedUnits = sortedAvailableFieldUnits.filter((u) => createFieldForm.selectedUnitIds.includes(u.id));
+    // Unfiltered lookup, deliberately not sortedAvailableFieldUnits — that
+    // list is narrowed by the active unit-type tab, but selectedUnitIds
+    // can (and should) hold units selected across several different tabs.
+    const selectedUnits = allAvailableFieldUnits.filter((u) => createFieldForm.selectedUnitIds.includes(u.id));
     const unitNames = selectedUnits.map((u) => u.name || `Unit #${u.id}`);
     const unitNameSummary = unitNames.length === 0
       ? 'Unassigned'
@@ -463,6 +539,25 @@ export default function Dashboard() {
         }
       }
 
+      // Optional inline tasks — only ever non-empty when
+      // createFieldMajorIncidentId was set (the Tasks section is entirely
+      // absent otherwise, see the JSX below), so no extra guard needed
+      // here beyond the array being empty for the direct-creation path.
+      // Same partial-failure shape as units above: collect failed titles,
+      // don't roll back the field command or any task that did succeed.
+      const failedTaskTitles = [];
+      for (const task of createFieldTasks) {
+        try {
+          await api.createMajorIncidentTaskGroup(createFieldMajorIncidentId, {
+            title: task.title,
+            category: task.category,
+          });
+        } catch (taskError) {
+          console.error(`Failed to create task group "${task.title}" for major incident ${createFieldMajorIncidentId}:`, taskError);
+          failedTaskTitles.push(task.title);
+        }
+      }
+
       const [realUnits] = await Promise.all([api.getRealUnits(), refreshFieldCommands()]);
       setOnlineUnits(realUnits || []);
       if (created?.id) {
@@ -471,8 +566,11 @@ export default function Dashboard() {
       setIsCreateFieldOpen(false);
       resetCreateFieldForm();
 
-      if (failedUnitNames.length > 0) {
-        setFieldCommandError(`Field command created, but failed to assign: ${failedUnitNames.join(', ')}.`);
+      const failureParts = [];
+      if (failedUnitNames.length > 0) failureParts.push(`failed to assign: ${failedUnitNames.join(', ')}`);
+      if (failedTaskTitles.length > 0) failureParts.push(`failed to create tasks: ${failedTaskTitles.join(', ')}`);
+      if (failureParts.length > 0) {
+        setFieldCommandError(`Field command created, but ${failureParts.join('; ')}.`);
       }
     } catch (error) {
       console.error('Failed to create field command:', error);
@@ -811,22 +909,7 @@ export default function Dashboard() {
             🏠 Home
           </button>
           <h1>🎯 Field War-Room Dashboard</h1>
-          {(activeFieldName || activeFieldId) && (
-            <span style={{
-              background: 'rgba(96, 165, 250, 0.15)',
-              border: '1px solid rgba(96, 165, 250, 0.4)',
-              color: '#60a5fa',
-              borderRadius: '6px',
-              padding: '3px 10px',
-              fontSize: '0.78rem',
-              fontWeight: '700',
-              letterSpacing: '0.04em',
-              whiteSpace: 'nowrap',
-              textTransform: 'uppercase',
-            }}>
-              📍 {activeFieldName || activeFieldId}
-            </span>
-          )}
+          
         </div>
         <div className="topbar-center">
           {lastUpdateTime && (
@@ -858,7 +941,7 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div className="dashboard-section">
-        <KPICards />
+        <KPICards />  {/*This information is coming from: the backend API endpoints for incidents, units, and events. located in the backend folder file name: views.py under the function: kpi_cards */}
       </div>
 
       {/* Filter Bar */}
@@ -1036,6 +1119,38 @@ export default function Dashboard() {
               )}
 
               <label style={{ fontSize: '0.8rem' }}>Units (nearest first)</label>
+              <div style={{ display: 'flex', gap: '6px', margin: '6px 0', flexWrap: 'wrap' }}>
+                {['ALL', ...CREATE_FIELD_TYPE_ORDER].map((type) => {
+                  const isActive = createFieldUnitType === type;
+                  const meta = type === 'ALL' ? null : CREATE_FIELD_TYPE_META[type];
+                  const color = meta?.color || '#94a3b8';
+                  const Icon = meta?.Icon;
+                  return (
+                    <button
+                      type="button"
+                      key={type}
+                      onClick={() => setCreateFieldUnitType(type)}
+                      style={{
+                        borderColor: isActive ? color : '#374151',
+                        background: isActive ? `${color}20` : 'transparent',
+                        color: isActive ? color : '#9ca3af',
+                        borderWidth: '1px',
+                        borderStyle: 'solid',
+                        padding: '5px 10px',
+                        borderRadius: '16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '0.78rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {Icon && <Icon size={13} />}
+                      {type === 'ALL' ? 'All' : meta.label}
+                    </button>
+                  );
+                })}
+              </div>
               <div
                 style={{
                   maxHeight: '160px',
@@ -1066,6 +1181,95 @@ export default function Dashboard() {
                   </label>
                 ))}
               </div>
+
+              {/* Only when escalated via Go Live — TaskGroup requires a
+                  real majorIncidentId, which the direct-creation path
+                  never has, so this section is entirely absent there, not
+                  just hidden/disabled. */}
+              {createFieldMajorIncidentId && (
+                <>
+                  <button
+                    type="button"
+                    className="feed-toggle"
+                    onClick={() => setShowCreateFieldTasks((prev) => !prev)}
+                    style={{ marginBottom: '10px' }}
+                  >
+                    {showCreateFieldTasks ? '▾ Tasks (optional)' : '▸ Tasks (optional)'}
+                  </button>
+
+                  {showCreateFieldTasks && (
+                    <div style={{ marginBottom: '10px' }}>
+                      <label style={{ fontSize: '0.8rem' }}>Task Title</label>
+                      <input
+                        type="text"
+                        value={createFieldTaskForm.title}
+                        onChange={(e) => setCreateFieldTaskForm((prev) => ({ ...prev, title: e.target.value }))}
+                        style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
+                        placeholder="e.g. Search & Rescue Alpha"
+                      />
+                      <label style={{ fontSize: '0.8rem' }}>Category</label>
+                      <select
+                        value={createFieldTaskForm.category}
+                        onChange={(e) => setCreateFieldTaskForm((prev) => ({ ...prev, category: e.target.value }))}
+                        style={{ width: '100%', margin: '6px 0 10px', padding: '6px', borderRadius: '6px' }}
+                      >
+                        <option value="SEARCH_RESCUE">Search &amp; Rescue</option>
+                        <option value="EVACUATION">Evacuation</option>
+                        <option value="MEDICAL">Medical Response</option>
+                        <option value="UTILITIES">Utilities/Infrastructure</option>
+                        <option value="SECURITY">Security &amp; Perimeter</option>
+                        <option value="LOGISTICS">Logistics &amp; Supply</option>
+                        <option value="DAMAGE_ASSESSMENT">Damage Assessment</option>
+                        <option value="COMMUNICATIONS">Communications</option>
+                      </select>
+                      {/* No Sectors toggle here — this mirrors
+                          IncidentDetailsPanel.jsx's own Add Task Group form,
+                          which already only shows sector chips when
+                          sectors.length > 0. At establishment time no
+                          sectors exist yet, so that condition is already
+                          naturally false; no new logic needed. */}
+                      <button
+                        type="button"
+                        className="feed-toggle"
+                        onClick={handleAddCreateFieldTask}
+                        disabled={!createFieldTaskForm.title.trim()}
+                        style={{
+                          marginBottom: '10px',
+                          opacity: !createFieldTaskForm.title.trim() ? 0.6 : 1,
+                          cursor: !createFieldTaskForm.title.trim() ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        + Add Task
+                      </button>
+
+                      {createFieldTasks.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '10px' }}>
+                          {createFieldTasks.map((task, idx) => (
+                            <div
+                              key={`${task.title}-${idx}`}
+                              style={{
+                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                fontSize: '0.78rem', background: '#111827', border: '1px solid #334155',
+                                borderRadius: '4px', padding: '4px 8px',
+                              }}
+                            >
+                              <span>{task.title} — {task.category.replace(/_/g, ' ')}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveCreateFieldTask(idx)}
+                                title="Remove task"
+                                style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.85rem', padding: 0 }}
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
 
               <button
                 type="button"

@@ -13,12 +13,13 @@
  */
 
 import { useEffect, useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useFieldIncidentStore, generateRoutineEvent } from '../store/fieldIncident';
 import {
   connectToFieldIncidentStream,
   simulateFieldIncidentUpdate,
   getFieldCommand,
+  getFieldCommands,
   getMajorIncidentSectors,
   getMajorIncidentTaskGroups,
   submitMajorIncidentPerimeter,
@@ -73,10 +74,20 @@ const buildFieldCommandTimelineEvents = (operationalNotes) => (
 
 const FieldIncidentDashboard = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  // Deliberate signal from DashboardSelector.jsx's "Start Training Drill"
+  // entry — NOT the same thing as "fieldId happens to be empty" (see the
+  // load effect below and the separate, accidental-empty-fieldId handling
+  // it also needs to cover). A query param, checked once per navigation,
+  // rather than reusing fieldId's own falsy-ness, precisely so these two
+  // cases stay distinguishable instead of collapsing into the same check.
+  const isTrainingEntry = searchParams.get('training') === 'true';
 
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState(null);
   const [selectedScenario, setSelectedScenario] = useState('FIRE');
   const [activeFieldName, setActiveFieldName] = useState('');
+  const [initialFieldResolutionDone, setInitialFieldResolutionDone] = useState(false);
+  const [needsFieldSelection, setNeedsFieldSelection] = useState(false);
 
   // Perimeter modal state — local to this page, not the field store (the
   // modal is a one-time action, not permanently-mounted map state).
@@ -116,6 +127,7 @@ const FieldIncidentDashboard = () => {
   const fieldCommandStatus = useFieldIncidentStore((s) => s.fieldCommandStatus);
   const setFieldId = useFieldIncidentStore((s) => s.setFieldId);
   const fieldId = useFieldIncidentStore((s) => s.fieldId);
+  const resetFieldIncidentStore = useFieldIncidentStore((s) => s.reset);
 
   // The FieldCommand's own status — see fieldIncident.js's fieldCommandStatus
   // comment for why this is a separate field from majorIncident.status.
@@ -131,24 +143,120 @@ const FieldIncidentDashboard = () => {
   const lastLoadedFieldIdRef = useRef(null);
 
   const userRole = typeof window !== 'undefined' ? localStorage.getItem('userRole') : null;
-  // Allow access when no role is set (e.g. direct URL navigation in dev/demo).
-  // Only block explicitly non-field-manager roles.
-  const hasAccess = !userRole || userRole === 'FIELD_MANAGER';
+  const deepLinkFieldId = searchParams.get('fieldId');
+  const deepLinkMajorId = searchParams.get('id');
+  const hasDeepLinkTarget = !!(deepLinkFieldId || deepLinkMajorId);
+  // Allow access when no role is set (e.g. direct URL navigation in dev/demo),
+  // and also allow direct deep links from regional/incident flows while auth
+  // is still a placeholder check.
+  const hasAccess = hasDeepLinkTarget || !userRole || userRole === 'FIELD_MANAGER';
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const storedFieldId = localStorage.getItem('fieldId');
-    if (storedFieldId && setFieldId) {
-      setFieldId(storedFieldId);
-    }
-  }, [setFieldId]);
+    let cancelled = false;
+    const resolveFieldFromEntry = async () => {
+      if (typeof window === 'undefined') {
+        setInitialFieldResolutionDone(true);
+        return;
+      }
+
+      const urlFieldId = deepLinkFieldId?.trim();
+      const urlMajorIdRaw = deepLinkMajorId?.trim();
+
+      if (urlFieldId) {
+        try { localStorage.setItem('fieldId', urlFieldId); } catch { /* ignore */ }
+        setFieldId(urlFieldId);
+        setNeedsFieldSelection(false);
+        setInitialFieldResolutionDone(true);
+        return;
+      }
+
+      if (urlMajorIdRaw) {
+        const majorIdNum = Number(urlMajorIdRaw);
+        if (Number.isFinite(majorIdNum)) {
+          try {
+            const fields = await getFieldCommands();
+            if (cancelled) return;
+            const matched = (Array.isArray(fields) ? fields : []).find(
+              (field) => Number(field?.major_incident?.id) === majorIdNum,
+            );
+            if (matched?.id) {
+              try { localStorage.setItem('fieldId', matched.id); } catch { /* ignore */ }
+              setFieldId(matched.id);
+              setNeedsFieldSelection(false);
+              setInitialFieldResolutionDone(true);
+              return;
+            }
+          } catch {
+            // Fall through to stored-field fallback below.
+          }
+        }
+      }
+
+      const storedFieldId = localStorage.getItem('fieldId');
+      if (storedFieldId && setFieldId) {
+        setFieldId(storedFieldId);
+        setNeedsFieldSelection(false);
+      } else {
+        setNeedsFieldSelection(true);
+      }
+      setInitialFieldResolutionDone(true);
+    };
+
+    resolveFieldFromEntry();
+    return () => { cancelled = true; };
+  }, [deepLinkFieldId, deepLinkMajorId, setFieldId]);
 
   // Load initial data — skip if a drill or escalated/real incident is
   // already in the store, so navigating back to this page mid-simulation
   // (or after this effect's own real-data load already ran) never
   // overwrites active state.
   useEffect(() => {
-    if (!fieldId) return;
+    if (!initialFieldResolutionDone) return;
+
+    // Deliberate training entry — the one intentional path back into
+    // ROUTINE (see fieldIncident.js's mode comment). Checked before
+    // anything fieldId-related: DashboardSelector's Training Drill button
+    // doesn't clear fieldId/localStorage, so fieldId is very likely still
+    // whatever real value was last selected — relying on it being falsy
+    // here would be wrong most of the time, not just imprecise. Skips
+    // loadInitialData()/any real fetch entirely.
+    if (isTrainingEntry) {
+      if (mode === 'SIMULATION') {
+        // An active drill already running in this tab session (only
+        // reachable via this same training entry to begin with, given
+        // mode is never persisted) — don't interrupt it on re-render.
+        setLoading(false);
+        return;
+      }
+      // Fresh arrival, or leftover LIVE/FIELD_COMMAND state from viewing a
+      // real post earlier in this same tab session (client-side routing
+      // doesn't remount the store) — reset() clears majorIncident/sectors/
+      // taskGroups/events/fieldCommandStatus in one atomic set, not just
+      // mode, so no real data can leak into any child panel (SectorMap/
+      // TaskGroupPanel don't have SituationOverview's own ROUTINE-mode
+      // display override, so mode alone wouldn't be enough to mask it).
+      resetFieldIncidentStore();
+      // Local component state, not covered by the store's reset() — left
+      // over from an earlier real-post view in this same tab session, this
+      // would otherwise leak the real name/fieldId into the header's
+      // "Active Control Center" line (see its isTrainingEntry check below).
+      setActiveFieldName('');
+      setLoading(false);
+      return;
+    }
+
+    // By this point isTrainingEntry is confirmed false (that branch above
+    // always returns before reaching here), so an empty/falsy fieldId here
+    // is unambiguously the accidental case, never the deliberate training
+    // one — show a real error instead of the old silent no-op, which left
+    // `loading` stuck at its true default forever with no feedback at all.
+    if (!fieldId) {
+      setError('');
+      setNeedsFieldSelection(true);
+      setLoading(false);
+      return;
+    }
+    setNeedsFieldSelection(false);
     if (lastLoadedFieldIdRef.current === fieldId) return;
 
     // Simulation is already running — reuse existing store state without
@@ -205,7 +313,7 @@ const FieldIncidentDashboard = () => {
     };
 
     loadInitialData();
-  }, [fieldId, mode, setFieldCommandData, setSectors, setTaskGroups, setEvents]);
+  }, [fieldId, mode, isTrainingEntry, initialFieldResolutionDone, resetFieldIncidentStore, setFieldCommandData, setSectors, setTaskGroups, setEvents, setError, setLoading]);
 
   // Connect to real-time updates
   useEffect(() => {
@@ -448,6 +556,26 @@ const FieldIncidentDashboard = () => {
     );
   }
 
+  if (!isTrainingEntry && needsFieldSelection) {
+    return (
+      <div className="field-incident-dashboard">
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100dvh', fontSize: '1.1rem', padding: '2rem', textAlign: 'center' }}>
+          <div>🏢 No field command selected</div>
+          <div style={{ marginTop: '0.5rem', fontSize: '0.95rem', color: '#94a3b8', maxWidth: '560px' }}>
+            Open this dashboard with a valid link (for example /field-incident?fieldId=field-1 or /field-incident?id=4),
+            or choose an active command post from the dashboard selector.
+          </div>
+          <button
+            onClick={() => navigate('/')}
+            style={{ marginTop: '1.5rem', padding: '0.55rem 1rem', fontSize: '0.95rem', cursor: 'pointer' }}
+          >
+            Go To Dashboard Selector
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // Loading state
   if (loading) {
     return (
@@ -574,7 +702,11 @@ const FieldIncidentDashboard = () => {
               fontWeight: '700',
               letterSpacing: '0.02em',
             }}>
-              {activeFieldName || fieldId || '—'}
+              {/* isTrainingEntry takes priority over activeFieldName/fieldId —
+                  both can still hold a real value left over from viewing a
+                  real post earlier in this tab session; a deliberate
+                  training entry must never display it. */}
+              {isTrainingEntry ? 'Training Drill' : (activeFieldName || fieldId || '—')}
             </span>
           </div>
           </div>
@@ -590,68 +722,19 @@ const FieldIncidentDashboard = () => {
           padding: '0 1rem',
         }}>
           {mode === 'ROUTINE' ? (
-            <>
-              <span style={{
-                color: '#94a3b8',
-                fontSize: '0.85rem',
-                fontWeight: '600',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-              }}>
-                ⚡ Tactical Simulation:
-              </span>
-              <select
-                value={selectedScenario}
-                onChange={(e) => setSelectedScenario(e.target.value)}
-                style={{
-                  backgroundColor: '#0f172a',
-                  color: '#e2e8f0',
-                  border: '1px solid #475569',
-                  borderRadius: '4px',
-                  padding: '0.5rem 0.8rem',
-                  fontSize: '0.85rem',
-                  fontWeight: '500',
-                  cursor: 'pointer',
-                  outline: 'none',
-                  minWidth: '180px',
-                }}
-              >
-                <option value="FIRE">🔥 Fire Emergency</option>
-                <option value="TSUNAMI">🌊 Tsunami Event</option>
-                <option value="EARTHQUAKE">🏚️ Earthquake Crisis</option>
-                <option value="MISSILE">🚀 Missile Attack</option>
-              </select>
-
-              <button
-                onClick={handleStartSimulation}
-                style={{
-                  backgroundColor: '#dc2626',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  padding: '0.5rem 1.2rem',
-                  fontSize: '0.85rem',
-                  fontWeight: 'bold',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.5px',
-                  cursor: 'pointer',
-                  boxShadow: '0 2px 4px rgba(220, 38, 38, 0.3)',
-                  transition: 'all 0.2s',
-                }}
-                onMouseEnter={(e) => {
-                  e.target.style.backgroundColor = '#b91c1c';
-                  e.target.style.transform = 'translateY(-1px)';
-                  e.target.style.boxShadow = '0 4px 6px rgba(220, 38, 38, 0.4)';
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.backgroundColor = '#dc2626';
-                  e.target.style.transform = 'translateY(0)';
-                  e.target.style.boxShadow = '0 2px 4px rgba(220, 38, 38, 0.3)';
-                }}
-              >
-                ▶ Activate
-              </button>
-            </>
+            // The scenario picker + Activate button used to live here —
+            // moved to a fixed bottom-right panel (below, near the end of
+            // this component's JSX) per this stage. This is just a small
+            // status label now; the actual controls render elsewhere.
+            <span style={{
+              color: '#94a3b8',
+              fontSize: '0.85rem',
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px',
+            }}>
+              🎓 Training Drill Ready
+            </span>
           ) : mode === 'SIMULATION' ? (
             <>
               <div
@@ -1026,6 +1109,91 @@ const FieldIncidentDashboard = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Training Drill controls — fixed bottom-right, gated on
+          mode === 'ROUTINE' exactly as the header's old inline controls
+          were (a repositioning, not a new visibility rule: ROUTINE is now
+          only ever reached via the deliberate ?training=true entry — see
+          the load effect above — so this gate is sufficient on its own). */}
+      {mode === 'ROUTINE' && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '1.5rem',
+            right: '1.5rem',
+            zIndex: 9999,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.5rem',
+            padding: '1rem',
+            background: '#1a1a2e',
+            border: '1px solid #475569',
+            borderRadius: '0.5rem',
+            boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.6)',
+          }}
+        >
+          <span style={{
+            color: '#94a3b8',
+            fontSize: '0.8rem',
+            fontWeight: '600',
+            textTransform: 'uppercase',
+            letterSpacing: '0.5px',
+          }}>
+            ⚡ Tactical Simulation
+          </span>
+          <select
+            value={selectedScenario}
+            onChange={(e) => setSelectedScenario(e.target.value)}
+            style={{
+              backgroundColor: '#0f172a',
+              color: '#e2e8f0',
+              border: '1px solid #475569',
+              borderRadius: '4px',
+              padding: '0.5rem 0.8rem',
+              fontSize: '0.85rem',
+              fontWeight: '500',
+              cursor: 'pointer',
+              outline: 'none',
+              minWidth: '200px',
+            }}
+          >
+            <option value="FIRE">🔥 Fire Emergency</option>
+            <option value="TSUNAMI">🌊 Tsunami Event</option>
+            <option value="EARTHQUAKE">🏚️ Earthquake Crisis</option>
+            <option value="MISSILE">🚀 Missile Attack</option>
+          </select>
+
+          <button
+            onClick={handleStartSimulation}
+            style={{
+              backgroundColor: '#dc2626',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              padding: '0.6rem 1.2rem',
+              fontSize: '0.85rem',
+              fontWeight: 'bold',
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px',
+              cursor: 'pointer',
+              boxShadow: '0 2px 4px rgba(220, 38, 38, 0.3)',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.backgroundColor = '#b91c1c';
+              e.target.style.transform = 'translateY(-1px)';
+              e.target.style.boxShadow = '0 4px 6px rgba(220, 38, 38, 0.4)';
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.backgroundColor = '#dc2626';
+              e.target.style.transform = 'translateY(0)';
+              e.target.style.boxShadow = '0 2px 4px rgba(220, 38, 38, 0.3)';
+            }}
+          >
+            ▶ Activate
+          </button>
         </div>
       )}
     </div>

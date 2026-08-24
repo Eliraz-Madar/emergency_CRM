@@ -479,6 +479,13 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             incident = Incident.objects.get(pk=incident_id)
         except (Incident.DoesNotExist, ValueError, TypeError):
             return Response({"detail": "Incident not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if incident.field_command_id is not None and incident.field_command_id != field_command.id:
+            return Response(
+                {"detail": "This incident is already linked to an active field command."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         incident.field_command = field_command
         incident.save(update_fields=["field_command"])
         actor = request.user
@@ -1374,6 +1381,16 @@ def major_incident_sectors(request, major_incident_id):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     sector = serializer.save(major_incident=major_incident)
+    actor = request.user
+    _broadcast_realtime({
+        "type": "user_action",
+        "action": "major_incident_sector_created",
+        **_actor_fields(actor),
+        "major_incident_id": major_incident.id,
+        "sector_id": sector.id,
+        "sector_name": sector.name,
+        "sector": SectorSerializer(sector).data,
+    })
     return Response(SectorSerializer(sector).data, status=status.HTTP_201_CREATED)
 
 
@@ -1395,4 +1412,14 @@ def major_incident_task_groups(request, major_incident_id):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     task_group = serializer.save(major_incident=major_incident)
+    actor = request.user
+    _broadcast_realtime({
+        "type": "user_action",
+        "action": "major_incident_task_group_created",
+        **_actor_fields(actor),
+        "major_incident_id": major_incident.id,
+        "task_group_id": task_group.id,
+        "task_group_title": task_group.title,
+        "task_group": TaskGroupSerializer(task_group).data,
+    })
     return Response(TaskGroupSerializer(task_group).data, status=status.HTTP_201_CREATED)

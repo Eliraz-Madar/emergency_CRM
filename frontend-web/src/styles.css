@@ -272,6 +272,12 @@ body {
   overflow: hidden;
 }
 
+.content-right {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
 .dashboard-footer {
   padding: var(--spacing-md) var(--spacing-lg);
   text-align: center;
@@ -1283,12 +1289,12 @@ body {
 .event-feed {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
   background: var(--color-bg-card) !important;
   border-radius: var(--border-radius-lg);
   box-shadow: 0 1px 3px var(--color-shadow);
   overflow: hidden;
-  height: 100%;
-  min-height: 0;
   color: var(--color-text-primary);
 }
 

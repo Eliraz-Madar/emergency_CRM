@@ -13,25 +13,7 @@ import { X } from 'lucide-react';
  */
 export function SidePanel({ icon, title, subtitle, onClose, footer, children }) {
   return (
-    <div
-      style={{
-        position: 'fixed',
-        right: '1rem',
-        top: '1rem',
-        bottom: '1rem',
-        width: '24rem',
-        height: 'calc(100vh - 2rem)',
-        background: 'radial-gradient(circle at 20% 20%, #111827, #0b1220)',
-        color: '#e5e7eb',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        zIndex: 2000,
-        borderRadius: '0.5rem',
-        boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
-        border: '1px solid #334155',
-      }}
-    >
+    <div className="cc-panel" style={{ height: '100%', minHeight: 0 }}>
       {/* Header - Fixed Height (shrink-0) */}
       <div className="cc-header p-4 border-b border-slate-700 flex justify-between items-start" style={{ flexShrink: 0 }}>
         <div className="cc-header-left flex gap-3">

@@ -2,6 +2,7 @@ from datetime import timedelta
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 
@@ -321,11 +322,29 @@ class FieldCommand(models.Model):
     closed_by_name = models.CharField(max_length=150, blank=True, default="")
     closed_at = models.DateTimeField(null=True, blank=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["major_incident"],
+                condition=Q(major_incident__isnull=False, status="ACTIVE"),
+                name="unique_active_major_incident_link",
+            )
+        ]
+
     def __str__(self):
         return f"{self.name} ({self.status})"
 
     def clean(self):
         super().clean()
+        if self.major_incident_id and self.status == self.Status.ACTIVE:
+            duplicates = FieldCommand.objects.filter(
+                major_incident_id=self.major_incident_id,
+                status=self.Status.ACTIVE,
+            ).exclude(pk=self.pk)
+            if duplicates.exists():
+                raise ValidationError({
+                    "major_incident": "This major incident is already linked to an active field command."
+                })
         if self.status == self.Status.CLOSED:
             errors = {}
             if not (self.closed_reason or "").strip():

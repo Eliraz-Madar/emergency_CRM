@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { EventFeed } from './EventFeed.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { Shield, Flame, Ambulance, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
@@ -10,6 +11,7 @@ import {
   createMajorIncidentSector,
   getMajorIncidentTaskGroups,
   createMajorIncidentTaskGroup,
+  dispatchUnitsToIncident,
 } from '../api/client.js';
 
 // Same inline-form look as MapView.jsx's operator action menu (labelStyle/
@@ -75,6 +77,7 @@ const normalizeUnitType = (type) => {
 };
 
 export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectFieldCommand } = {}) {
+  const navigate = useNavigate();
   const {
     incidents: dashboardIncidents,
     onlineUnits,
@@ -172,6 +175,10 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   const [taskGroupForm, setTaskGroupForm] = useState({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
   const [addingTaskGroup, setAddingTaskGroup] = useState(false);
   const [taskGroupError, setTaskGroupError] = useState('');
+  const [majorDispatchType, setMajorDispatchType] = useState('POLICE');
+  const [majorDispatchUnitId, setMajorDispatchUnitId] = useState('');
+  const [majorDispatching, setMajorDispatching] = useState(false);
+  const [majorDispatchError, setMajorDispatchError] = useState('');
 
   // Reset major-incident form state whenever a different incident is opened
   useEffect(() => {
@@ -182,6 +189,9 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
     setSectorError('');
     setTaskGroupForm({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
     setTaskGroupError('');
+    setMajorDispatchType('POLICE');
+    setMajorDispatchUnitId('');
+    setMajorDispatchError('');
   }, [incident?.id]);
 
   // Load existing sectors/task groups once this incident is live.
@@ -319,6 +329,10 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   }, [onlineUnits, incidentLat, incidentLng]);
 
   const filteredUnits = availableUnits.filter((u) => u.type === selectedType);
+  const majorFilteredUnits = useMemo(
+    () => availableUnits.filter((u) => u.type === majorDispatchType),
+    [availableUnits, majorDispatchType],
+  );
 
   const toggleUnit = (id) => {
     setSelectedUnitIds(
@@ -330,6 +344,26 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
 
   const handleClose = () => {
     setSelectedIncident && setSelectedIncident(null);
+  };
+
+  const handleMajorDispatchUnit = async () => {
+    if (!incident?.id || !majorDispatchUnitId) return;
+    setMajorDispatching(true);
+    setMajorDispatchError('');
+    try {
+      await dispatchUnitsToIncident(incident.id, [majorDispatchUnitId], { mode: 'incident' });
+      const unit = (onlineUnits || []).find((u) => String(u.id) === String(majorDispatchUnitId));
+      if (unit) {
+        upsertOnlineUnit({ id: unit.id, assignedTo: incident.id, status: 'EN_ROUTE' });
+      }
+      updateIncident(incident.id, { status: 'IN_PROGRESS' });
+      setMajorDispatchUnitId('');
+    } catch (error) {
+      console.error('Failed to dispatch unit from Major Incident tab:', error);
+      setMajorDispatchError(error?.message || 'Failed to dispatch unit.');
+    } finally {
+      setMajorDispatching(false);
+    }
   };
 
   // Dispatches real, currently-online units by mirroring into the DB as
@@ -457,7 +491,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
 
   return (
     <SidePanel
-      icon={headerIcon}
+      icon={headerIcon} 
       title={incident.title || 'Incident'}
       subtitle={(
         <>
@@ -523,7 +557,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
 
       {/* ── Events tab ── */}
       {activeTab === 'events' && (
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
           <EventFeed />
         </div>
       )}
@@ -532,7 +566,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       {activeTab === 'major' && (
         <div>
           {!isLive ? (
-            <div style={{ marginBottom: '1.25rem' }}>
+            <div style={{ marginBottom: '1.25rem', flexDirection: 'column',  }}>
               <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Major Incident</div>
               <p style={{ fontSize: '0.82rem', color: '#9ca3af', margin: '0 0 4px 0' }}>
                 Declare this a Major Incident to unlock sector and task-group coordination.
@@ -586,21 +620,130 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
                     <div>Affected Radius: {liveMajorIncident.radius_meters ?? 0} m</div>
                   </div>
                 ) : (
-                  // Already live (incident.major_incident from the API), but this
-                  // session never called go-live itself, so only the id/status are
-                  // known — no MajorIncident detail-GET endpoint exists yet to
-                  // fetch the rest. Sector/Task Group forms below still work off
-                  // liveMajorIncidentId alone.
                   <div style={{
                     background: '#0f172a', border: '1px solid #1f2937', borderRadius: '6px',
                     padding: '10px', fontSize: '0.8rem', color: '#9ca3af', fontStyle: 'italic',
                   }}>
-                    Already declared as a Major Incident (id {liveMajorIncidentId}).
+                    Live major incident connected from regional context.
                   </div>
                 )}
               </div>
 
               <div style={{ marginBottom: '1.25rem' }}>
+                <div style={{
+                  background: '#0f172a', border: '1px solid #334155', borderRadius: '8px',
+                  padding: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px',
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      Active Command
+                    </div>
+                    <div style={{ fontSize: '0.9rem', color: '#e2e8f0', fontWeight: 700 }}>
+                      HQ Ref #{liveMajorIncidentId}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/field-incident?id=${liveMajorIncidentId}`)}
+                    style={{
+                      border: '1px solid #3b82f6',
+                      background: 'rgba(59,130,246,0.12)',
+                      color: '#60a5fa',
+                      borderRadius: '6px',
+                      padding: '6px 10px',
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    Open Field HQ ↗
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Tactical Force Dispatch</div>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                  {TYPE_ORDER.map((type) => {
+                    const meta = TYPE_META[type];
+                    const active = majorDispatchType === type;
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        onClick={() => {
+                          setMajorDispatchType(type);
+                          setMajorDispatchUnitId('');
+                        }}
+                        style={{
+                          borderColor: active ? meta.color : '#374151',
+                          background: active ? `${meta.color}20` : 'transparent',
+                          color: active ? meta.color : '#9ca3af',
+                          borderWidth: '1px',
+                          borderStyle: 'solid',
+                          padding: '4px 9px',
+                          borderRadius: '999px',
+                          fontSize: '0.76rem',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {meta.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <label style={labelStyle}>Unit</label>
+                <select
+                  value={majorDispatchUnitId}
+                  onChange={(e) => setMajorDispatchUnitId(e.target.value)}
+                  style={inputStyle}
+                >
+                  <option value="">Select available {TYPE_META[majorDispatchType]?.label?.toLowerCase()} unit</option>
+                  {majorFilteredUnits.map((unit) => (
+                    <option key={unit.id} value={unit.id}>
+                      {unit.name || `Unit #${unit.id}`} ({Number.isFinite(unit.distance) ? `${unit.distance.toFixed(1)} km` : 'No GPS'})
+                    </option>
+                  ))}
+                </select>
+                {majorDispatchError && (
+                  <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{majorDispatchError}</div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleMajorDispatchUnit}
+                  disabled={majorDispatching || !majorDispatchUnitId}
+                  style={{
+                    ...submitButtonStyle,
+                    background: '#2563eb',
+                    opacity: majorDispatching || !majorDispatchUnitId ? 0.6 : 1,
+                    cursor: majorDispatching || !majorDispatchUnitId ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {majorDispatching ? 'Dispatching…' : 'Dispatch Unit'}
+                </button>
+              </div>
+
+              <div style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Active Sectors</div>
+                {sectors.length > 0 ? (
+                  <div style={{ marginTop: '10px', marginBottom: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {sectors.map((s) => (
+                      <div key={s.id} style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        fontSize: '0.78rem', color: '#9ca3af',
+                        background: '#0f172a', border: '1px solid #1f2937',
+                        borderRadius: '4px', padding: '4px 8px',
+                      }}>
+                        <span>{s.name}</span>
+                        <span style={{ color: s.hazard_level === 'CRITICAL' ? '#ef4444' : '#cbd5e1', fontWeight: 700 }}>{s.hazard_level}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '8px' }}>No sectors yet.</div>
+                )}
                 <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Add Sector</div>
                 <form onSubmit={handleAddSector}>
                   <label style={labelStyle}>Name</label>
@@ -639,24 +782,38 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
                     {addingSector ? 'Adding…' : 'Add Sector'}
                   </button>
                 </form>
-                {sectors.length > 0 && (
-                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    {sectors.map((s) => (
-                      <div key={s.id} style={{
-                        display: 'flex', justifyContent: 'space-between',
-                        fontSize: '0.78rem', color: '#9ca3af',
-                        background: '#0f172a', border: '1px solid #1f2937',
-                        borderRadius: '4px', padding: '4px 8px',
-                      }}>
-                        <span>{s.name}</span>
-                        <span>{s.hazard_level}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
 
               <div style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Live Task Groups</div>
+                {taskGroups.length > 0 ? (
+                  <div style={{ marginTop: '10px', marginBottom: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {taskGroups.map((tg) => {
+                      const progress = Math.max(0, Math.min(100, Number(tg.progress_percent ?? 0)));
+                      return (
+                        <div key={tg.id} style={{
+                          fontSize: '0.78rem', color: '#cbd5e1',
+                          background: '#0f172a', border: '1px solid #1f2937',
+                          borderRadius: '6px', padding: '8px',
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                            <span style={{ fontWeight: 700 }}>{tg.title}</span>
+                            <span style={{ fontSize: '0.72rem', color: '#93c5fd', textTransform: 'uppercase' }}>{tg.category?.replace(/_/g, ' ')}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                            <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{tg.status || 'ACTIVE'}</span>
+                            <span style={{ fontSize: '0.72rem', color: '#e2e8f0', fontWeight: 700 }}>{progress}%</span>
+                          </div>
+                          <div style={{ height: '6px', background: '#1f2937', borderRadius: '999px', overflow: 'hidden' }}>
+                            <div style={{ width: `${progress}%`, height: '100%', background: progress >= 100 ? '#10b981' : '#3b82f6' }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '8px' }}>No task groups yet.</div>
+                )}
                 <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Add Task Group</div>
                 <form onSubmit={handleAddTaskGroup}>
                   <label style={labelStyle}>Title</label>
@@ -731,19 +888,6 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
                     {addingTaskGroup ? 'Adding…' : 'Add Task Group'}
                   </button>
                 </form>
-                {taskGroups.length > 0 && (
-                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    {taskGroups.map((tg) => (
-                      <div key={tg.id} style={{
-                        fontSize: '0.78rem', color: '#9ca3af',
-                        background: '#0f172a', border: '1px solid #1f2937',
-                        borderRadius: '4px', padding: '4px 8px',
-                      }}>
-                        {tg.title} — {tg.category}
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             </>
           )}

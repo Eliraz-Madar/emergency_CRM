@@ -338,6 +338,21 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             if attrs.get("location_lat") is None or attrs.get("location_lng") is None:
                 raise serializers.ValidationError(
                     "location_lat and location_lng are required to create a field command.")
+
+        major_incident = attrs.get("major_incident")
+        if major_incident is None and instance is not None:
+            major_incident = instance.major_incident
+
+        if major_incident is not None:
+            active_link_exists = FieldCommand.objects.filter(
+                major_incident=major_incident,
+                status=FieldCommand.Status.ACTIVE,
+            ).exclude(pk=getattr(instance, "pk", None)).exists()
+            if active_link_exists:
+                raise serializers.ValidationError({
+                    "major_incident": "This major incident is already linked to an active field command."
+                })
+
         is_closing = (
             instance is not None
             and attrs.get("status") == FieldCommand.Status.CLOSED
@@ -373,10 +388,19 @@ class FieldCommandSerializer(serializers.ModelSerializer):
         if is_closing:
             instance.closed_at = timezone.now()
             instance.save(update_fields=["closed_at"])
+            closure_timestamp = timezone.now()
+            closed_reason = instance.closed_reason or "Field Command closed"
             # Release resources tied to this post, mirroring
             # MockDataService.close_field_command.
             Unit.objects.filter(field_command=instance).update(field_command=None)
-            Incident.objects.filter(field_command=instance).update(field_command=None)
+            Incident.objects.filter(field_command=instance).update(
+                status=Incident.Status.CLOSED,
+                field_command=None,
+                closed_reason=closed_reason,
+                closed_by=Incident.ClosedBy.COMMAND_CENTER,
+                closed_by_name="Field Command Closure",
+                closed_at=closure_timestamp,
+            )
         return instance
 
 

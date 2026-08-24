@@ -70,6 +70,102 @@ export const assignUnitToIncident = async (incidentId, unitId) => {
   return res.data;
 };
 
+const formatDispatchError = async (response) => {
+  let detail = "Unknown error";
+  try {
+    const data = await response.json();
+    if (typeof data?.detail === "string") {
+      detail = data.detail;
+    } else if (Array.isArray(data?.detail) && data.detail[0]) {
+      detail = data.detail[0];
+    } else {
+      const firstValue = data && typeof data === "object" ? Object.values(data)[0] : null;
+      if (typeof firstValue === "string") detail = firstValue;
+      else if (Array.isArray(firstValue) && firstValue[0]) detail = firstValue[0];
+      else detail = JSON.stringify(data);
+    }
+  } catch {
+    try {
+      const text = await response.text();
+      if (text) detail = text;
+    } catch {
+      // keep default message
+    }
+  }
+  return `HTTP ${response.status} ${response.statusText}: ${detail}`;
+};
+
+// Robust unit dispatch helper for tactical flows. Defaults to the real
+// incident assign endpoint and validates HTTP status explicitly.
+//
+// details.mode:
+// - "incident" (default): POST /incidents/{id}/assign-unit/ once per unit
+// - "mobile": POST /mobile/dispatch/ with a unit list payload
+export const dispatchUnitsToIncident = async (incidentId, unitIds, details = {}) => {
+  const uniqueUnitIds = Array.from(new Set((unitIds || []).filter((id) => id != null)));
+  if (!incidentId) throw new Error("dispatchUnitsToIncident requires incidentId.");
+  if (uniqueUnitIds.length === 0) throw new Error("dispatchUnitsToIncident requires at least one unit id.");
+
+  const mode = details.mode === "mobile" ? "mobile" : "incident";
+  const token = localStorage.getItem("token");
+  const headers = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+
+  if (mode === "mobile") {
+    const units = Array.isArray(details.units)
+      ? details.units.filter((u) => uniqueUnitIds.includes(u?.mock_unit_num ?? u?.id)).map((u) => ({
+        mock_unit_num: u.mock_unit_num ?? u.id,
+        name: u.name,
+        type: u.type,
+      }))
+      : uniqueUnitIds.map((id) => ({ mock_unit_num: id }));
+
+    const response = await fetch(`${API_BASE_URL}/mobile/dispatch/`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        incident_id: incidentId,
+        incident_title: details.incidentTitle || `Incident ${incidentId}`,
+        location_lat: details.locationLat,
+        location_lng: details.locationLng,
+        priority: details.priority || "HIGH",
+        units,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`dispatchUnitsToIncident failed: ${await formatDispatchError(response)}`);
+    }
+
+    return response.json();
+  }
+
+  const results = [];
+  for (const unitId of uniqueUnitIds) {
+    const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}/assign-unit/`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ unit_id: unitId }),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `dispatchUnitsToIncident failed for unit ${unitId}: ${await formatDispatchError(response)}`,
+      );
+    }
+
+    results.push(await response.json());
+  }
+
+  return {
+    incidentId,
+    dispatchedUnitIds: uniqueUnitIds,
+    results,
+  };
+};
+
 export const addIncidentNote = async (incidentId, note) => {
   const res = await api.post(`/incidents/${incidentId}/note/`, { note });
   return res.data;

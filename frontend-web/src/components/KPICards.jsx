@@ -33,6 +33,7 @@ export function KPICards() {
   const fireCount = availableUnits.filter((u) => u.type === 'FIRE').length;
   const medicalCount = availableUnits.filter((u) => u.type === 'MEDICAL').length;
 
+  // const totalIncidents = incidents.length;
   const totalIncidents = incidents.length;
   const activeIncidents = incidents.filter(
     (inc) => inc.status !== 'CLOSED'

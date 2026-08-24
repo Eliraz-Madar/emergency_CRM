@@ -15,10 +15,17 @@ echo.
 
 REM Set root directory
 set ROOT=%~dp0
+set VENV_PYTHON=%ROOT%.venv\Scripts\python.exe
+
+if not exist "%VENV_PYTHON%" (
+    echo ✗ Python virtual environment not found at %VENV_PYTHON%
+    echo Create it with: py -m venv .venv
+    exit /b 1
+)
 
 REM Check for required tools
 echo Checking prerequisites...
-python --version >nul 2>&1
+where python >nul 2>&1
 if errorlevel 1 (
     echo ✗ Python not found. Please install Python 3.9+
     exit /b 1
@@ -46,7 +53,7 @@ if not exist "requirements.txt" (
     echo Error: requirements.txt not found in backend folder
     exit /b 1
 )
-start "Emergency CRM - Backend" cmd /k "pip install -q -r requirements.txt && echo. && echo [✓] Backend running at http://localhost:8000/api && echo [✓] Mock Data Endpoints:  GET /mock/incidents, /mock/units, /mock/events && echo [✓] Real-time Stream:      GET /mock/updates/stream (Server-Sent Events) && echo. && python manage.py runserver 0.0.0.0:8000"
+start "Emergency CRM - Backend" powershell -NoExit -Command "Set-Location '%ROOT%backend'; & '%VENV_PYTHON%' -m pip install -q -r requirements.txt; Write-Host ''; Write-Host '[✓] Backend running at http://localhost:8000/api'; Write-Host '[✓] Mock Data Endpoints:  GET /mock/incidents, /mock/units, /mock/events'; Write-Host '[✓] Real-time Stream:      GET /mock/updates/stream (Server-Sent Events)'; Write-Host ''; & '%VENV_PYTHON%' manage.py runserver 0.0.0.0:8000"
 
 REM Wait for backend to initialize
 timeout /t 3 /nobreak >nul
