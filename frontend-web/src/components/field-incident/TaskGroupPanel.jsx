@@ -10,6 +10,7 @@ import { useFieldIncidentStore } from '../../store/fieldIncident';
 
 const TaskGroupPanel = () => {
   const taskGroups = useFieldIncidentStore((s) => s.taskGroups);
+  const mode = useFieldIncidentStore((s) => s.mode);
   const filterCategory = useFieldIncidentStore((s) => s.filterCategory);
   const taskStatusFilter = useFieldIncidentStore((s) => s.taskStatusFilter);
   const setFilterCategory = useFieldIncidentStore((s) => s.setFilterCategory);
@@ -90,7 +91,11 @@ const TaskGroupPanel = () => {
       {/* Task Groups List */}
       <div className="task-group-container max-h-[calc(100vh-10rem)] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800">
         {filteredTasks.length === 0 ? (
-          <p className="no-data">No task groups match filters</p>
+          <p className="no-data">
+            {mode === 'FIELD_COMMAND' && safeTaskGroups.length === 0
+              ? 'Not escalated to a Major Incident — no task-group data'
+              : 'No task groups match filters'}
+          </p>
         ) : (
           <div className="task-groups-list">
             {filteredTasks.map((taskGroup, idx) => {

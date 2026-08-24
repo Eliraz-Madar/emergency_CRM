@@ -19,6 +19,8 @@ import {
   connectToFieldIncidentStream,
   simulateFieldIncidentUpdate,
   getFieldCommand,
+  getMajorIncidentSectors,
+  getMajorIncidentTaskGroups,
   submitMajorIncidentPerimeter,
 } from '../api/client';
 import SituationOverview from '../components/field-incident/SituationOverview';
@@ -28,6 +30,46 @@ import OperationalTimeline from '../components/field-incident/OperationalTimelin
 import PerimeterMapPicker from '../components/field-incident/PerimeterMapPicker';
 import '../styles/field-incident-dashboard.css';
 import { formatTime, formatDateTime } from '../utils/time.js';
+
+// Operational Timeline data source, per real (non-SIMULATION/ROUTINE) branch
+// — neither MajorIncident nor FieldCommand has a dedicated events/timeline
+// endpoint wired up yet, so both are rough approximations from whatever
+// timestamped data genuinely exists, not a real event log:
+// - LIVE (escalated): Sector/TaskGroup rows' own created_at/updated_at and
+//   status/hazard fields, synthesized into timeline-shaped entries.
+// - FIELD_COMMAND (not escalated): FieldCommand.operational_notes
+//   ({timestamp, message} pairs, from FieldCommandSerializer), mapped
+//   straight across — no severity/type info exists on a note, so these
+//   always render as a plain informational "Field Note" entry.
+const buildLiveTimelineEvents = (sectors, taskGroups) => {
+  const sectorEvents = (sectors || []).map((s) => ({
+    event_type: 'STATUS_CHANGE',
+    severity: s.hazard_level === 'CRITICAL' ? 'CRITICAL' : 'INFO',
+    title: `Sector: ${s.name}`,
+    description: `${s.status} — hazard ${s.hazard_level}`,
+    created_at: s.updated_at || s.created_at,
+  }));
+  const taskEvents = (taskGroups || []).map((tg) => ({
+    event_type: 'ASSIGNMENT',
+    severity: 'INFO',
+    title: `Task Group: ${tg.title}`,
+    description: `${tg.status} — ${tg.progress_percent}% complete`,
+    created_at: tg.updated_at || tg.created_at,
+  }));
+  return [...sectorEvents, ...taskEvents].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at),
+  );
+};
+
+const buildFieldCommandTimelineEvents = (operationalNotes) => (
+  (operationalNotes || []).map((note) => ({
+    event_type: 'UPDATE',
+    severity: 'INFO',
+    title: 'Field Note',
+    description: note.message,
+    created_at: note.timestamp,
+  })).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+);
 
 const FieldIncidentDashboard = () => {
   const navigate = useNavigate();
@@ -48,6 +90,10 @@ const FieldIncidentDashboard = () => {
   const setLoading = useFieldIncidentStore((s) => s.setLoading);
   const setError = useFieldIncidentStore((s) => s.setError);
   const loadFieldIncident = useFieldIncidentStore((s) => s.loadFieldIncident);
+  const setFieldCommandData = useFieldIncidentStore((s) => s.setFieldCommandData);
+  const setSectors = useFieldIncidentStore((s) => s.setSectors);
+  const setTaskGroups = useFieldIncidentStore((s) => s.setTaskGroups);
+  const setEvents = useFieldIncidentStore((s) => s.setEvents);
   const addEvent = useFieldIncidentStore((s) => s.addEvent);
   const updateMajorIncident = useFieldIncidentStore((s) => s.updateMajorIncident);
   const bumpPerimeterVersion = useFieldIncidentStore((s) => s.bumpPerimeterVersion);
@@ -88,18 +134,10 @@ const FieldIncidentDashboard = () => {
     }
   }, [setFieldId]);
 
-  // Fetch human-readable name for the active control center
-  useEffect(() => {
-    if (!fieldId) return;
-    getFieldCommand(fieldId)
-      .then((data) => {
-        if (data?.name) setActiveFieldName(data.name);
-      })
-      .catch(() => {/* silently ignore – name is cosmetic */});
-  }, [fieldId]);
-
-  // Load initial data — skip if a drill or live incident is already in the store
-  // so navigating back to this page mid-simulation never overwrites active state.
+  // Load initial data — skip if a drill or escalated/real incident is
+  // already in the store, so navigating back to this page mid-simulation
+  // (or after this effect's own real-data load already ran) never
+  // overwrites active state.
   useEffect(() => {
     if (!fieldId) return;
     if (lastLoadedFieldIdRef.current === fieldId) return;
@@ -112,32 +150,53 @@ const FieldIncidentDashboard = () => {
       return;
     }
 
-    // LIVE means Stage A's real POST /api/major-incidents/go-live/ response
-    // is already sitting in majorIncident — do not overwrite it by fetching
-    // the mock GET /api/field/incident/ endpoint. (Previously this called
-    // loadFieldIncident() unconditionally here, which clobbered the real
-    // data with mock data on every re-render/remount for this fieldId.)
-    // Sectors/task-groups/events stay whatever's already in the store
-    // (currently empty) until Stage B wires real GET endpoints for them.
-    if (mode === 'LIVE') {
+    // LIVE / FIELD_COMMAND mean this effect's own real-data branch below
+    // already ran for this fieldId and populated the store (setFieldCommandData
+    // sets one of these two modes) — don't re-fetch and clobber it.
+    if (mode === 'LIVE' || mode === 'FIELD_COMMAND') {
       setLoading(false);
       lastLoadedFieldIdRef.current = fieldId;
       return;
     }
 
+    // Real data path: fetch the actual FieldCommand (GET
+    // /api/field-commands/{fieldId}/) once, use it both for the cosmetic
+    // header name and to decide LIVE (escalated to a real MajorIncident)
+    // vs FIELD_COMMAND (not escalated — no sector/task-group data exists).
+    // This replaces the old unconditional loadFieldIncident() call, which
+    // hit the mock/fabricating GET /api/field/incident/ endpoint for every
+    // real fieldId regardless of what it actually was.
     const loadInitialData = async () => {
       try {
         lastLoadedFieldIdRef.current = fieldId;
-        await loadFieldIncident?.(fieldId);
+        const fieldCommandData = await getFieldCommand(fieldId);
+        if (fieldCommandData?.name) setActiveFieldName(fieldCommandData.name);
+        setFieldCommandData(fieldCommandData);
+
+        if (fieldCommandData?.major_incident) {
+          const majorIncidentId = fieldCommandData.major_incident.id;
+          const [sectors, taskGroups] = await Promise.all([
+            getMajorIncidentSectors(majorIncidentId),
+            getMajorIncidentTaskGroups(majorIncidentId),
+          ]);
+          setSectors(Array.isArray(sectors) ? sectors : []);
+          setTaskGroups(Array.isArray(taskGroups) ? taskGroups : []);
+          setEvents(buildLiveTimelineEvents(sectors, taskGroups));
+        } else {
+          setSectors([]);
+          setTaskGroups([]);
+          setEvents(buildFieldCommandTimelineEvents(fieldCommandData?.operational_notes));
+        }
+        setLoading(false);
       } catch (err) {
-        console.error('Failed to load field incident data:', err);
+        console.error('Failed to load field command data:', err);
         setError(err.message || 'Failed to load data');
         setLoading(false);
       }
     };
 
     loadInitialData();
-  }, [fieldId, mode, majorIncident, loadFieldIncident]);
+  }, [fieldId, mode, setFieldCommandData, setSectors, setTaskGroups, setEvents]);
 
   // Connect to real-time updates
   useEffect(() => {
@@ -605,6 +664,25 @@ const FieldIncidentDashboard = () => {
                 ⏹ Terminate
               </button>
             </>
+          ) : mode === 'FIELD_COMMAND' ? (
+            // A real FieldCommand with no MajorIncident link — not a demo,
+            // not a drill, but nothing to escalate/Set Perimeter for either.
+            // No Activate/Terminate/Set Perimeter here; those only make
+            // sense for ROUTINE (training) and LIVE (a real, escalated
+            // incident with a real MajorIncident.id to submit against).
+            <div
+              style={{
+                backgroundColor: '#0f172a',
+                color: '#94a3b8',
+                padding: '0.5rem 1rem',
+                borderRadius: '4px',
+                fontSize: '0.85rem',
+                fontWeight: '600',
+                border: '1px solid #334155',
+              }}
+            >
+              🏢 {activeFieldName || fieldId} — Not escalated to a Major Incident
+            </div>
           ) : (
             // LIVE — a real go-live from the regional dashboard (Stage A).
             // Hotfix scope: fix the "undefined" title (was reading

@@ -27,6 +27,29 @@ const FIELD_INCIDENT_TYPES = [
   'Other',
 ];
 
+// Go Live pre-fill: MajorIncident.IncidentType (EARTHQUAKE/MISSILE_STRIKE/
+// BUILDING_COLLAPSE/FLOOD/HAZMAT/WILDFIRE, backend/api/models.py) doesn't
+// exactly match FIELD_INCIDENT_TYPES' vocabulary — three overlap directly,
+// the rest have no dropdown option at all. Falls back to "Other" with a
+// readable version of the raw value pre-filled, rather than silently
+// selecting nothing.
+const GO_LIVE_INCIDENT_TYPE_MAP = {
+  EARTHQUAKE: 'Earthquake',
+  HAZMAT: 'Hazmat',
+  WILDFIRE: 'Wildfire',
+};
+
+const mapGoLiveIncidentType = (rawType) => {
+  const mapped = GO_LIVE_INCIDENT_TYPE_MAP[rawType];
+  if (mapped) return { incidentType: mapped, incidentTypeOther: '' };
+  const readable = (rawType || '')
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+  return { incidentType: 'Other', incidentTypeOther: readable };
+};
+
 /**
  * Dashboard Page - Main operational dashboard (War-Room)
  *
@@ -90,6 +113,11 @@ export default function Dashboard() {
   const [fieldCommandError, setFieldCommandError] = useState('');
   const [isCreateFieldOpen, setIsCreateFieldOpen] = useState(false);
   const [createFieldLocation, setCreateFieldLocation] = useState(null);
+  // Set only when this modal was opened via handleGoLiveCreateFieldCommand
+  // (escalation path) — null for the direct map right-click path. Cleared
+  // by resetCreateFieldForm so a previous Go Live can never leak into an
+  // unrelated direct creation.
+  const [createFieldMajorIncidentId, setCreateFieldMajorIncidentId] = useState(null);
   const [createFieldForm, setCreateFieldForm] = useState({
     name: '',
     incidentType: '',
@@ -209,6 +237,25 @@ export default function Dashboard() {
     setIsCreateFieldOpen(true);
   };
 
+  // Bridged from IncidentDetailsPanel.jsx's Go Live flow (see
+  // onGoLiveCreateFieldCommand) — mirrors handleMapCreateFieldCommand
+  // above, plus pre-fills name/incident type from the newly-declared
+  // MajorIncident and stashes its id so handleCreateFieldSubmit can link
+  // the new post back to it. Every value here is still a plain, editable
+  // form field — this is a starting point, not a lock.
+  const handleGoLiveCreateFieldCommand = ({ lat, lng, majorIncidentId, incidentType, title }) => {
+    setCreateFieldLocation({ lat, lng });
+    setCreateFieldMajorIncidentId(majorIncidentId ?? null);
+    const { incidentType: mappedType, incidentTypeOther } = mapGoLiveIncidentType(incidentType);
+    setCreateFieldForm((prev) => ({
+      ...prev,
+      name: title || prev.name,
+      incidentType: mappedType,
+      incidentTypeOther,
+    }));
+    setIsCreateFieldOpen(true);
+  };
+
   // MapView's "Report Standard Incident" context-menu action already collects
   // and submits the full form itself — this just persists it to the real DB
   // and updates the store directly so the marker appears immediately, rather
@@ -293,6 +340,7 @@ export default function Dashboard() {
     });
     setShowCreateFieldAdvanced(false);
     setCreateFieldLocation(null);
+    setCreateFieldMajorIncidentId(null);
   };
 
   const handleCreateFieldSubmit = async (event) => {
@@ -332,6 +380,12 @@ export default function Dashboard() {
         incident_phase: createFieldForm.incidentPhase,
         location_lat: createFieldLocation.lat,
         location_lng: createFieldLocation.lng,
+        // Present only when this modal was opened via Go Live
+        // (handleGoLiveCreateFieldCommand) — the direct map right-click
+        // path (handleMapCreateFieldCommand) never sets this state, and
+        // resetCreateFieldForm clears it after every submit/cancel, so a
+        // previous Go Live can't leak into an unrelated direct creation.
+        ...(createFieldMajorIncidentId ? { major_incident_id: createFieldMajorIncidentId } : {}),
       };
       // FieldCommandSerializer's "id" is the field_key (see
       // FieldCommandViewSet.perform_create) — the create response already
@@ -1017,7 +1071,7 @@ export default function Dashboard() {
           {showEventFeed ? (
             <EventFeed />
           ) : (
-            <IncidentDetailsPanel />
+            <IncidentDetailsPanel onGoLiveCreateFieldCommand={handleGoLiveCreateFieldCommand} />
           )}
         </div>
       </div>

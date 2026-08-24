@@ -73,7 +73,7 @@ const normalizeUnitType = (type) => {
   return 'POLICE';
 };
 
-export function IncidentDetailsPanel() {
+export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand } = {}) {
   const {
     incidents: dashboardIncidents,
     onlineUnits,
@@ -220,6 +220,17 @@ export function IncidentDetailsPanel() {
     try {
       const created = await goLiveIncident(incident.id, goLiveType);
       setLiveMajorIncident(created);
+      // Bridge straight into the Create Field Command modal — mirrors
+      // MapView.jsx's onMapCreateFieldCommand pattern (a plain callback
+      // prop) rather than a new store mechanism, since Dashboard.jsx's
+      // create-field modal state is local component state, not the store.
+      onGoLiveCreateFieldCommand?.({
+        lat: created.location_lat,
+        lng: created.location_lng,
+        majorIncidentId: created.id,
+        incidentType: created.incident_type,
+        title: created.title,
+      });
     } catch (error) {
       console.error('Failed to go live:', error);
       // Covers the double-go-live case: the backend rejects a second call

@@ -9,6 +9,7 @@ import { useFieldIncidentStore } from '../../store/fieldIncident';
 
 const SectorMap = () => {
   const sectors = useFieldIncidentStore((s) => s.sectors);
+  const mode = useFieldIncidentStore((s) => s.mode);
   const selectedSector = useFieldIncidentStore((s) => s.selectedSector);
   const setSelectedSector = useFieldIncidentStore((s) => s.setSelectedSector);
 
@@ -40,7 +41,11 @@ const SectorMap = () => {
       <h3>Operational Sectors</h3>
 
       {safeSectors.length === 0 ? (
-        <p className="no-data">No sectors data available</p>
+        <p className="no-data">
+          {mode === 'FIELD_COMMAND'
+            ? 'Not escalated to a Major Incident — no sector data'
+            : 'No sectors data available'}
+        </p>
       ) : (
         <div className="sectors-grid">
           {safeSectors.map((sector, idx) => {

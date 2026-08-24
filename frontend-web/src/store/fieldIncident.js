@@ -338,7 +338,17 @@ export const useFieldIncidentStore = create((set, get) => ({
   taskStatusFilter: 'all', // all, in-progress, completed
 
   // Simulation state
-  mode: 'ROUTINE', // 'ROUTINE', 'SIMULATION', or 'LIVE'
+  // 'ROUTINE' — training-demo baseline (fabricated, Activate button visible).
+  // 'SIMULATION' — an active, operator-launched training drill.
+  // 'LIVE' — a real FieldCommand escalated via Go Live; majorIncident is a
+  //   real MajorIncident row, sectors/taskGroups come from its real
+  //   /api/major-incidents/<id>/... sub-resources.
+  // 'FIELD_COMMAND' — a real FieldCommand with no MajorIncident link;
+  //   majorIncident here is a FieldCommand-shaped stand-in (see
+  //   setFieldCommandData below) so Situation Overview can show its real
+  //   name/type/casualties/status without SituationOverview.jsx needing
+  //   any changes — but there is no real Sector/TaskGroup data to show.
+  mode: 'ROUTINE',
   simulationType: null, // 'FIRE', 'TSUNAMI', 'EARTHQUAKE', 'MISSILE', or null
   simulationStep: 0, // Current step index in the simulation
   fieldId: getStoredFieldId(), // TODO(auth): load from user profile/session
@@ -380,6 +390,50 @@ export const useFieldIncidentStore = create((set, get) => ({
   setFilterCategory: (category) => set({ filterCategory: category }),
   setTaskStatusFilter: (filter) => set({ taskStatusFilter: filter }),
   setMode: (mode) => set({ mode }),
+  // Called once per real fieldId load (FieldIncidentDashboard.jsx) with the
+  // real FieldCommand fetched from GET /api/field-commands/{fieldId}/.
+  // Branches on whether it's escalated (major_incident present, from
+  // FieldCommandSerializer.get_major_incident — see backend/api/serializers.py)
+  // — does NOT fetch sectors/taskGroups itself; the component does that
+  // separately (mirrors SituationOverview.jsx's own self-fetch pattern for
+  // perimeter) and calls setSectors/setTaskGroups/setEvents afterward.
+  setFieldCommandData: (fieldCommandData) => set(() => {
+    const mi = fieldCommandData?.major_incident;
+    if (mi) {
+      return {
+        mode: 'LIVE',
+        majorIncident: {
+          id: mi.id,
+          title: mi.title,
+          incident_type: mi.incident_type,
+          status: mi.status,
+          estimated_casualties: mi.estimated_casualties,
+          confirmed_deaths: mi.confirmed_deaths,
+          displaced_persons: mi.displaced_persons,
+          radius_meters: mi.radius_meters,
+        },
+      };
+    }
+    return {
+      mode: 'FIELD_COMMAND',
+      // FieldCommand-shaped stand-in — no real MajorIncident id, so
+      // getMajorIncidentPerimeter/etc. must never be called for this
+      // majorIncident.id (SituationOverview.jsx's own perimeter fetch is
+      // already gated on mode === 'LIVE', so this is naturally safe).
+      majorIncident: {
+        id: null,
+        title: fieldCommandData?.name ?? '',
+        incident_type: fieldCommandData?.incident_type ?? '',
+        status: fieldCommandData?.status ?? '',
+        estimated_casualties: fieldCommandData?.casualty_count ?? 0,
+        confirmed_deaths: 0,
+        displaced_persons: fieldCommandData?.evacuated_count ?? 0,
+        radius_meters: 0,
+      },
+      sectors: [],
+      taskGroups: [],
+    };
+  }),
   bumpPerimeterVersion: () => set((s) => ({ perimeterVersion: s.perimeterVersion + 1 })),
   setFieldId: (fieldId) => {
     set({ fieldId });

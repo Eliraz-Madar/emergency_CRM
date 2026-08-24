@@ -245,6 +245,17 @@ class FieldCommandSerializer(serializers.ModelSerializer):
     # Write-only: append an operational note in the same create/update request
     # (mirrors mock's initial_report/notes/operational_note handling).
     note = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    # Write side: accepts the declared MajorIncident's id when this post is
+    # established via "Go Live" (optional — the direct creation flow, no
+    # escalation, sends nothing and this stays null). Read side: a nested
+    # {id, status} shape, same precedent as IncidentSerializer.get_major_incident,
+    # so FieldIncidentDashboard.jsx can check "is this post escalated" without
+    # a second request.
+    major_incident_id = serializers.PrimaryKeyRelatedField(
+        source="major_incident", queryset=MajorIncident.objects.all(),
+        write_only=True, required=False, allow_null=True,
+    )
+    major_incident = serializers.SerializerMethodField()
 
     class Meta:
         model = FieldCommand
@@ -265,6 +276,8 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             "incidents_count",
             "units_count",
             "note",
+            "major_incident_id",
+            "major_incident",
             "closed_reason",
             "closed_by_role",
             "closed_by_name",
@@ -277,6 +290,32 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             {"timestamp": note.created_at.isoformat(), "message": note.message}
             for note in obj.notes.all()
         ]
+
+    def get_major_incident(self, obj):
+        # Forward FK (unlike Incident.major_incident, which is the reverse
+        # side of a OneToOneField and needs hasattr() to avoid
+        # RelatedObjectDoesNotExist) — a plain None check is correct and
+        # sufficient here.
+        if obj.major_incident_id is None:
+            return None
+        mi = obj.major_incident
+        # Fuller shape than a bare {id, status} — there is no standalone
+        # GET-by-id endpoint for MajorIncident (only go-live's create
+        # response, and the sectors/task-groups/perimeter sub-resource
+        # endpoints, neither of which return the MajorIncident itself), so
+        # FieldIncidentDashboard.jsx needs this nested shape to populate
+        # Situation Overview for a FieldCommand it loads independently of
+        # the regional dashboard's go-live flow.
+        return {
+            "id": mi.id,
+            "status": mi.status,
+            "title": mi.title,
+            "incident_type": mi.incident_type,
+            "estimated_casualties": mi.estimated_casualties,
+            "confirmed_deaths": mi.confirmed_deaths,
+            "displaced_persons": mi.displaced_persons,
+            "radius_meters": mi.radius_meters,
+        }
 
     def get_incidents_count(self, obj):
         return obj.incidents.count()

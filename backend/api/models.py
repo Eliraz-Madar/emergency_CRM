@@ -301,6 +301,16 @@ class FieldCommand(models.Model):
     evacuated_count = models.IntegerField(default=0)
     unit_name = models.CharField(max_length=200, blank=True, default="")
     incident_type = models.CharField(max_length=100, default="General Incident")
+    # Optional escalation link: set only when this post was established via
+    # "Go Live" from a declared MajorIncident. Most FieldCommand rows are
+    # created directly (no escalation) and leave this null — SET_NULL (not
+    # CASCADE) so the post survives if the MajorIncident row is ever
+    # removed, matching the audit-trail-FK convention used elsewhere
+    # (Unit.field_command, Task.assigned_unit).
+    major_incident = models.ForeignKey(
+        "MajorIncident", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="field_commands",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
