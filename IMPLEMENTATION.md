@@ -173,6 +173,10 @@ GET/POST /api/major-incidents/<id>/task-groups/               — optionally lin
      every linked Incident force-closed (closed_by=COMMAND_CENTER)
 ```
 
+**Cross-panel real-time consistency (fixed 2026-08-25):** the SSE handler for `field_command_incident_assigned`/`field_command_unit_assigned` used to only patch the FieldCommand's own record (`upsertFieldCommand`) — it never touched the linked Incident's `field_command` or Unit's `field_id` in the local store. Result: an incident just linked to Field Command A kept appearing as "linkable" in every *other* open Field Command's panel (and an assigned unit kept appearing as "assignable" elsewhere) until a full page refresh. `Dashboard.jsx`'s handler now also calls `updateIncident(update.incident_id, { field_command: update.field_command_id })` / `upsertOnlineUnit({ id: update.unit_id, field_id: update.field_command_id })` on the same event, so both sides of the link update live everywhere. Note: this doesn't yet cover `field_command_closed` — that broadcast carries no incident/unit id list, so units/incidents released by a close still need a refresh to reflect as unlinked in an already-open panel.
+
+**`sortedAssignableUnits` fixed to read `onlineUnits`, not `units` (2026-08-25):** `Dashboard.jsx` was computing the Field Command "Assign" tab's unit list from `units` — the legacy array populated once on initial load — instead of `onlineUnits`, the array SSE keeps fresh. A unit claimed from the mobile app didn't appear there until a full page refresh.
+
 ### Major Incident "Go Live" Lifecycle
 ```
 1. Commander selects a real Incident → POST /api/major-incidents/go-live/
@@ -238,6 +242,8 @@ GET/POST /api/major-incidents/<id>/task-groups/               — optionally lin
 - Stale unit: heartbeat stops → unit silently reports offline after 60s, no error surfaced
 - Double "Go Live" on the same Incident: rejected with a 400 explaining it already went live
 - Closing a Field Command Post with linked incidents still open: incidents are force-closed with an explicit closure reason, not left dangling
+- Mobile app claims a unit while another user's Field Command panel is open: the unit appears in that panel's Assign list live, no refresh (fixed 2026-08-25 — see `sortedAssignableUnits` note above)
+- Incident linked to a Field Command while a *different* Field Command's panel is open elsewhere: it disappears from that other panel's link list live (fixed 2026-08-25)
 
 ## Security Notes
 
@@ -275,4 +281,4 @@ GET/POST /api/major-incidents/<id>/task-groups/               — optionally lin
 
 ---
 
-**Dashboard Version:** 4.0 | **Last Updated:** 2026-08-25 | **Status:** Demo/MVP — regional dashboard and Field Command Post real; training simulation dashboard mock with real overlay
+**Dashboard Version:** 4.1 | **Last Updated:** 2026-08-25 | **Status:** Demo/MVP — regional dashboard and Field Command Post real; training simulation dashboard mock with real overlay

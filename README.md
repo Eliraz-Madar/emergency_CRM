@@ -338,6 +338,10 @@ Make sure you selected the exact unit that was dispatched. Example: select "Unit
 
 The app uses the public OSRM service (`router.project-osrm.org`). If it is slow or rate-limited, routes on the map will be delayed. Backoff and retry are automatic.
 
+### Mobile app's unit shows up in the sea / far from your actual location
+
+If the phone denies location permission or GPS is disabled, the app falls back to a fixed mock coordinate (`mobile-app/utils/location.js`) so the report/claim flow still works — as of 2026-08-25 that fallback is Tel Aviv city center. Enable location permission for the app to see your real position instead.
+
 ---
 
 ## Environment Variables (optional)

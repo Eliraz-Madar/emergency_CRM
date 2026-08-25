@@ -249,13 +249,17 @@ export default function Dashboard() {
   // nearest-first as a consequence of using the shared helper.
   const sortedAssignableUnits = useMemo(
     () => getSortedAvailableUnits(
-      units,
+      // Was reading from `units` (the legacy/demo array, only populated once
+      // on initial load) instead of `onlineUnits` (the real, SSE-kept-fresh
+      // array) — a newly-claimed unit never appeared here until a full page
+      // refresh even though it was already online per every other surface.
+      onlineUnits,
       selectedFieldCommand
         ? { lat: selectedFieldCommand.location_lat, lng: selectedFieldCommand.location_lng }
         : null,
       null,
     ),
-    [units, selectedFieldCommand],
+    [onlineUnits, selectedFieldCommand],
   );
 
   const selectedUnit = Array.isArray(activeUnits) && selectedUnitId
@@ -746,6 +750,19 @@ export default function Dashboard() {
               // status === 'CLOSED' client-side, so merging the new status
               // in is sufficient to hide it everywhere that matters.
               upsertFieldCommand(update);
+              // This event only patches the FieldCommand's own record above —
+              // it never touched the linked Incident/Unit's own
+              // field_command/field_id locally, so an already-linked incident
+              // or already-assigned unit kept showing as "linkable"/
+              // "assignable" in every OTHER open FieldCommandDetailsPanel
+              // until a full refresh. Patch the other side of the link here
+              // too so it disappears from those lists immediately.
+              if (update.action === 'field_command_incident_assigned' && update.incident_id != null) {
+                updateIncident(update.incident_id, { field_command: update.field_command_id });
+              }
+              if (update.action === 'field_command_unit_assigned' && update.unit_id != null) {
+                upsertOnlineUnit({ id: update.unit_id, field_id: update.field_command_id });
+              }
             } else if (update.type === 'user_action' && (
               update.action === 'task_status_update' ||
               update.action === 'incident_unit_assigned'

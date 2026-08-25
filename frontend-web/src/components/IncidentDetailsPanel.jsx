@@ -523,6 +523,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
           { id: 'dispatch', label: '🚒 Dispatch' },
           { id: 'events',   label: '📋 Events'  },
           { id: 'major',    label: '🌐 Major Incident' },
+          { id: 'settings', label: '⚙ Settings' },
         ].map(({ id, label }) => (
           <button
             key={id}
@@ -545,8 +546,9 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       </div>
 
       {/* --- Scrollable Content Wrapper --- */}
-      {/* dispatch: outer div scrolls. events: EventFeed handles its own scroll, outer must not double-scroll. */}
-      <div style={{
+      {/* dispatch: outer div scrolls (thin custom scrollbar via cc-list-scrollable).
+          events: EventFeed handles its own scroll, outer must not double-scroll. */}
+      <div className={activeTab === 'events' ? '' : 'cc-list-scrollable'} style={{
         flex: 1,
         overflowY: activeTab === 'events' ? 'hidden' : 'auto',
         padding: activeTab === 'events' ? '0' : '1rem',
@@ -1014,88 +1016,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
           )}
         </div>
 
-        {/* ── Incident Severity ── */}
-        <div style={{ marginBottom: '1.25rem' }}>
-          <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Incident Severity</div>
-          <div className="cc-severity-buttons grid grid-cols-3 gap-2">
-            {['LOW', 'MEDIUM', 'HIGH'].map((level) => {
-              const normalizedPriority = incident.priority === 'CRITICAL' ? 'HIGH' : incident.priority;
-              const currentPriority = normalizedPriority === 'MED' ? 'MEDIUM' : normalizedPriority;
-              const isActive = currentPriority === level;
-              const colors = { LOW: '#10b981', MEDIUM: '#f59e0b', HIGH: '#ef4444' };
-              const color = colors[level];
-              return (
-                <button
-                  key={level}
-                  onClick={() => handlePriorityChange(level === 'MEDIUM' ? 'MED' : level)}
-                  style={{
-                    background: isActive ? color : 'transparent',
-                    borderColor: color,
-                    color: isActive ? 'white' : color,
-                    borderWidth: '1px',
-                    borderStyle: 'solid',
-                    padding: '8px',
-                    borderRadius: '4px',
-                    fontWeight: isActive ? 'bold' : 'normal',
-                    opacity: isActive ? 1 : 0.6,
-                    transition: 'all 0.2s ease',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {level}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* ── Close Incident (Command Center) ── */}
-        {canClose && (
-          <div style={{ marginBottom: '1.25rem' }}>
-            <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Close Incident</div>
-            <textarea
-              value={closeReason}
-              onChange={(e) => setCloseReason(e.target.value)}
-              placeholder="Closure reason (required) — e.g. resolved by phone call, false alarm..."
-              rows={2}
-              style={{
-                width: '100%',
-                background: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                color: '#e2e8f0',
-                fontSize: '0.8rem',
-                padding: '6px 8px',
-                resize: 'vertical',
-                marginBottom: '6px',
-              }}
-            />
-            {closeError && (
-              <div style={{ color: '#ef4444', fontSize: '0.78rem', marginBottom: '6px' }}>{closeError}</div>
-            )}
-            <button
-              type="button"
-              onClick={handleCloseIncident}
-              disabled={closing || !closeReason.trim()}
-              style={{
-                width: '100%',
-                background: '#ef4444',
-                border: '1px solid #ef4444',
-                color: 'white',
-                borderRadius: '6px',
-                padding: '8px',
-                fontSize: '0.82rem',
-                fontWeight: 600,
-                cursor: closing || !closeReason.trim() ? 'not-allowed' : 'pointer',
-                opacity: closing || !closeReason.trim() ? 0.6 : 1,
-              }}
-            >
-              {closing ? 'Closing…' : 'Close Incident'}
-            </button>
-          </div>
-        )}
-
-        {/* ── Dispatch Forces ── */}
+        {/* ── Dispatch Forces (primary action — moved above Severity/Close so it's visible without scrolling) ── */}
         <div className="cc-section flex flex-col">
           <div className="cc-section-header flex items-center gap-2 mb-3 text-slate-300">
             <SirenIcon />
@@ -1141,7 +1062,94 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
             )}
           </div>
         </div>
+
         </>)}
+
+        {/* ── Settings tab: severity + close, secondary/infrequent actions kept off the main Dispatch tab ── */}
+        {activeTab === 'settings' && (
+          <>
+            {/* ── Incident Severity ── */}
+            <div style={{ marginBottom: '1.25rem' }}>
+              <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Incident Severity</div>
+              <div className="cc-severity-buttons grid grid-cols-3 gap-2">
+                {['LOW', 'MEDIUM', 'HIGH'].map((level) => {
+                  const normalizedPriority = incident.priority === 'CRITICAL' ? 'HIGH' : incident.priority;
+                  const currentPriority = normalizedPriority === 'MED' ? 'MEDIUM' : normalizedPriority;
+                  const isActive = currentPriority === level;
+                  const colors = { LOW: '#10b981', MEDIUM: '#f59e0b', HIGH: '#ef4444' };
+                  const color = colors[level];
+                  return (
+                    <button
+                      key={level}
+                      onClick={() => handlePriorityChange(level === 'MEDIUM' ? 'MED' : level)}
+                      style={{
+                        background: isActive ? color : 'transparent',
+                        borderColor: color,
+                        color: isActive ? 'white' : color,
+                        borderWidth: '1px',
+                        borderStyle: 'solid',
+                        padding: '8px',
+                        borderRadius: '4px',
+                        fontWeight: isActive ? 'bold' : 'normal',
+                        opacity: isActive ? 1 : 0.6,
+                        transition: 'all 0.2s ease',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {level}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ── Close Incident (Command Center) ── */}
+            {canClose && (
+              <div style={{ marginBottom: '0.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Close Incident</div>
+                <textarea
+                  value={closeReason}
+                  onChange={(e) => setCloseReason(e.target.value)}
+                  placeholder="Closure reason (required) — e.g. resolved by phone call, false alarm..."
+                  rows={2}
+                  style={{
+                    width: '100%',
+                    background: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    color: '#e2e8f0',
+                    fontSize: '0.8rem',
+                    padding: '6px 8px',
+                    resize: 'vertical',
+                    marginBottom: '6px',
+                  }}
+                />
+                {closeError && (
+                  <div style={{ color: '#ef4444', fontSize: '0.78rem', marginBottom: '6px' }}>{closeError}</div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleCloseIncident}
+                  disabled={closing || !closeReason.trim()}
+                  style={{
+                    width: '100%',
+                    background: '#ef4444',
+                    border: '1px solid #ef4444',
+                    color: 'white',
+                    borderRadius: '6px',
+                    padding: '8px',
+                    fontSize: '0.82rem',
+                    fontWeight: 600,
+                    cursor: closing || !closeReason.trim() ? 'not-allowed' : 'pointer',
+                    opacity: closing || !closeReason.trim() ? 0.6 : 1,
+                  }}
+                >
+                  {closing ? 'Closing…' : 'Close Incident'}
+                </button>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </SidePanel>
   );

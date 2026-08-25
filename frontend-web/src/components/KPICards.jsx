@@ -79,7 +79,7 @@ export function KPICards() {
             <div className="kpi-value">{kpi.value}</div>
             <div className="kpi-label">{kpi.label}</div>
             {kpi.label === 'Available Units' && kpi.breakdown && (
-              <div className="kpi-subtext" style={{ marginTop: 4, fontSize: '0.85rem', color: '#6b7280' }}>
+              <div className="kpi-subtext" style={{ marginTop: 2, fontSize: '0.7rem', color: '#6b7280' }}>
                 {kpi.breakdown}
               </div>
             )}

@@ -62,6 +62,18 @@ export function IncidentList({
     return icons[status] || '•';
   };
 
+  // Same "Dispatch Force to Point" detection and POLICE/FIRE/MEDICAL palette
+  // as MapView.jsx's incident markers, so a point-dispatch row here matches
+  // the diamond marker shown for the same incident on the map.
+  const isPointDispatch = (incident) =>
+    incident?.description === 'Force dispatched directly from the map.';
+
+  const getDispatchAgencyMeta = (incident) => ({
+    POLICE: { emoji: '🚓', color: '#3b82f6' },
+    FIRE: { emoji: '🚒', color: '#ef4444' },
+    EMS: { emoji: '🚑', color: '#10b981' },
+  }[(incident?.channel || '').toUpperCase()] || { emoji: '⚡', color: '#f59e0b' });
+
   const formatTime = (dateString) => {
     const date = new Date(dateString);
     const now = new Date();
@@ -119,7 +131,13 @@ export function IncidentList({
               }} />
               <div className="incident-content">
                 <div className="incident-header">
-                  <span className="incident-icon">{getStatusIcon(incident.status)}</span>
+                  <span
+                    className="incident-icon"
+                    title={isPointDispatch(incident) ? 'Direct point dispatch' : undefined}
+                    style={isPointDispatch(incident) ? { color: getDispatchAgencyMeta(incident).color } : undefined}
+                  >
+                    {isPointDispatch(incident) ? getDispatchAgencyMeta(incident).emoji : getStatusIcon(incident.status)}
+                  </span>
                   <span className="incident-title">
                     {incident.title}
                     {hasAssignedUnits(incident) && (

@@ -219,10 +219,16 @@ class TaskViewSet(viewsets.ModelViewSet):
         if params.get("incident"):
             qs = qs.filter(incident_id=params["incident"])
 
-        # Mobile app passes ?mock_unit=<id> to filter by the specific dispatched unit
+        # Mobile app passes ?mock_unit=<id> to filter by the specific dispatched unit.
+        # Since the mobile app now claims a real Unit (POST /api/units/claim/) and
+        # passes that Unit's real pk here, <id> may match either the legacy
+        # mock_unit_id (set by the routine-unit dispatch bridge, mobile_dispatch())
+        # or the real assigned_unit FK (set by IncidentViewSet.assign_unit) — a task
+        # dispatched to this unit by either path must be visible here.
         if params.get("mock_unit"):
             try:
-                qs = qs.filter(mock_unit_id=int(params["mock_unit"]))
+                unit_id = int(params["mock_unit"])
+                qs = qs.filter(Q(mock_unit_id=unit_id) | Q(assigned_unit_id=unit_id))
             except (ValueError, TypeError):
                 qs = qs.none()
 

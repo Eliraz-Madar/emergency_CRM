@@ -200,7 +200,10 @@ GET/POST /api/major-incidents/<id>/task-groups/                  — GET all, PO
 ```
 POST /api/token/                       — Obtain JWT (returns user_id, username, role, unit_id, unit_type)
 POST /api/token/refresh/
-GET  /api/tasks/?mock_unit=<id>&incident=<id>
+GET  /api/tasks/?mock_unit=<id>&incident=<id>  — matches Task.mock_unit_id OR
+                                                   Task.assigned_unit_id == <id> (a real claimed
+                                                   unit's dispatches often only set assigned_unit,
+                                                   not the legacy mock_unit_id — see TaskViewSet.get_queryset)
 PATCH /api/tasks/<id>/                 — fieldunit: status only; dispatcher/admin: full
 POST /api/tasks/<id>/by-incident/<id>/
 POST /api/units/claim/  |  POST /api/units/disconnect/  |  POST /api/units/heartbeat/
@@ -305,10 +308,17 @@ EventSource connects → connectionStatus = CONNECTING (yellow)
 ```
 Dashboard (Regional, /regional)
 ├── KPICards, IncidentList, MapView, EventFeed, FilterBar
-├── IncidentDetailsPanel   — built on shared SidePanel; "Close Incident" hidden once already CLOSED
-└── FieldCommandDetailsPanel  ← NEW — built on shared SidePanel
-    ├── "Link Incident" list — excludes incidents already linked or CLOSED
-    └── "Close Field Command Post" form (reason + FIELD_OPERATOR/COMMAND_CENTER role)
+├── IncidentDetailsPanel   — built on shared SidePanel; tabs: Dispatch | Events | Major Incident | Settings
+│                            (Settings = Incident Severity + Close Incident, split out of the Dispatch
+│                            tab so the primary dispatch action isn't buried under secondary controls)
+└── FieldCommandDetailsPanel  ← NEW — built on shared SidePanel; tabs: Overview | Assign | Close
+    ├── Overview — status/phase/casualties, linked Major Incident, Operational Notes,
+    │              Assigned Incidents, Assigned Forces (read-only)
+    ├── Assign   — "Link incidents / units" headline over two independently-scrolling
+    │              columns (Incidents | Units), each excluding already-linked/CLOSED entries;
+    │              every incident/unit row shows its POLICE🚓/FIRE🚒/EMS🚑 vehicle icon
+    │              (keyed off Incident.channel / Unit.type)
+    └── Close    — "Close Field Command Post" form (reason + FIELD_OPERATOR/COMMAND_CENTER role)
 
 SidePanel  ← NEW — generic right-side panel shell (header/close/scrollable body/footer),
              extracted from IncidentDetailsPanel's original markup, reused by both panels above
@@ -460,7 +470,17 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 ---
 
 **Last Updated:** 2026-08-25
-**Architecture Version:** 4.0
+**Architecture Version:** 4.1
+
+**Changelog v4.1 (Aug 25, 2026 — Field Command Post real-time consistency + UI polish):**
+- **Fixed stale unit list on Field Command "Assign" tab:** `Dashboard.jsx`'s `sortedAssignableUnits` was computed from `units` (the legacy array, populated once on load) instead of `onlineUnits` (the real, SSE-kept-fresh array) — a unit claimed from the mobile app never appeared there without a full page refresh.
+- **Fixed cross-panel staleness on link/assign:** linking an incident or assigning a unit to a FieldCommand broadcast `field_command_incident_assigned`/`field_command_unit_assigned`, but the SSE handler only patched that FieldCommand's own record (`upsertFieldCommand`) — never the linked Incident's `field_command` or Unit's `field_id` locally. An already-linked incident kept showing as linkable in every *other* open FieldCommandDetailsPanel until refresh. Handler now also calls `updateIncident`/`upsertOnlineUnit` on the other side of the link.
+- **Fixed `TaskViewSet.get_queryset`'s `?mock_unit=` filter:** now matches `Q(mock_unit_id=id) | Q(assigned_unit_id=id)` — previously only matched the legacy `mock_unit_id`, so a real claimed unit's dashboard-dispatched tasks (which set `assigned_unit` but not the arbitrary legacy `mock_unit_id`) never appeared in the mobile app's task list.
+- **Fixed EMS unit map icon:** `MapView.jsx`'s `createUnitIcon()` only had `POLICE`/`FIRE`/`MEDICAL` icon keys but callers passed the raw backend type `"EMS"` — every EMS unit silently fell back to the POLICE icon. Now normalizes `EMS`/`AMBULANCE` → `MEDICAL` before lookup.
+- **New distinct marker for "Dispatch Force to Point" incidents:** these auto-created incidents (identified by their fixed description) now render as a rotated diamond with the dispatched agency's vehicle emoji/color (🚓/🚒/🚑, from `Incident.channel`) instead of the standard circle — both on the map and in `IncidentList.jsx`'s rows — so they're visually distinguishable from real reported incidents.
+- **Fixed mobile GPS fallback landing in the sea:** `mobile-app/utils/location.js`'s `MOCK_LOCATION` (used when GPS permission is denied/unavailable) was `(32.0, 34.0)` — several km out in the Mediterranean — now Tel Aviv city center `(32.0853, 34.7818)`.
+- `FieldCommandDetailsPanel.jsx` restructured into tabs (Overview | Assign | Close), matching `IncidentDetailsPanel.jsx`'s pattern — replaces a single long scrolling column where read-only status lists and actionable link/assign lists were easy to mistake for one mixed list. The Assign tab is a two-column table (Incidents | Units), each with its own independent scroll.
+- KPI card row, regional map sizing, and the three-column dashboard layout (incident list / map / details panel) widths retuned for better balance.
 
 **Changelog v4.0 (Aug 19–24, 2026 — mock→real migration):**
 - Regional dashboard: all `/api/mock/*` endpoints and their backing mock/realtime/polling services deleted; replaced by real `Incident`/`Unit`/`Task` DB models and live SSE broadcast from actual writes.

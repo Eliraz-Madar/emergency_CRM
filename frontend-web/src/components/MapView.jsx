@@ -183,9 +183,15 @@ export function MapView({
       FIRE: { emoji: '🚒', color: '#ef4444' },
       MEDICAL: { emoji: '🚑', color: '#10b981' }
     };
-    const config = icons[type] || icons.POLICE;
+    // Callers pass the raw backend Unit.type ("Police"/"Fire"/"EMS"/"HomeFront",
+    // already uppercased) — only POLICE/FIRE match `icons` directly, so an EMS
+    // (or HomeFront) unit fell through to the POLICE fallback below and always
+    // rendered as a police car. Normalize to the same POLICE/FIRE/MEDICAL bucket
+    // scheme used elsewhere (e.g. KPICards.jsx's normalizeUnitType).
+    const normalizedType = type === 'EMS' || type === 'AMBULANCE' ? 'MEDICAL' : type;
+    const config = icons[normalizedType] || icons.POLICE;
     return L.divIcon({
-      className: `marker-unit-${type?.toLowerCase() || 'police'}`,
+      className: `marker-unit-${normalizedType?.toLowerCase() || 'police'}`,
       html: unitHtml(config.emoji, isSelected, config.color, status),
       iconSize: isSelected ? [90, 90] : [60, 60],
       iconAnchor: isSelected ? [45, 90] : [30, 60],
@@ -443,6 +449,22 @@ export function MapView({
 
       const pinColor = getPinColor(incident.priority || incident.severity);
       const isFlashing = flashingIncidentId != null && flashingIncidentId === incident.id;
+      // "Dispatch Force to Point" (MapView's right-click menu, via
+      // Dashboard.jsx's handleMapDispatchForce) auto-creates a minimal
+      // Incident just to carry a direct point-dispatch — it isn't a real
+      // reported incident, so it gets a distinct diamond+bolt marker instead
+      // of the standard circle, using this hardcoded description as the only
+      // signal available (there's no dedicated backend flag for it).
+      const isPointDispatch = incident.description === 'Force dispatched directly from the map.';
+      // Same POLICE/FIRE/MEDICAL palette as createUnitIcon() below, keyed by
+      // incident.channel (set to the dispatched agency — "POLICE"/"FIRE"/"EMS" —
+      // in Dashboard.jsx's handleMapDispatchForce), so a point-dispatch marker
+      // matches the color/vehicle of the unit that was actually sent.
+      const dispatchAgencyMeta = {
+        POLICE: { emoji: '🚓', color: '#3b82f6' },
+        FIRE: { emoji: '🚒', color: '#ef4444' },
+        EMS: { emoji: '🚑', color: '#10b981' },
+      }[(incident.channel || '').toUpperCase()] || { emoji: '⚡', color: pinColor };
       const assignedStar = hasAssignedUnits(incident)
         ? `
           <div style="
@@ -471,6 +493,12 @@ export function MapView({
       const markerSize = isFlashing ? 32 : 24;
       const markerAnchor = isFlashing ? 16 : 12;
 
+      const shapeHtml = isPointDispatch
+        ? `<div style="width: ${markerSize}px; height: ${markerSize}px; background-color: ${dispatchAgencyMeta.color}; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: width 0.3s ease, height 0.3s ease; transform: rotate(45deg); display: flex; align-items: center; justify-content: center;">
+             <span style="transform: rotate(-45deg); font-size: ${markerSize * 0.5}px; line-height: 1;">${dispatchAgencyMeta.emoji}</span>
+           </div>`
+        : `<div style="background-color: ${pinColor}; width: ${markerSize}px; height: ${markerSize}px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: width 0.3s ease, height 0.3s ease;"></div>`;
+
       const marker = L.marker(
         [lat, lng],
         {
@@ -478,11 +506,11 @@ export function MapView({
             html: `
               <div style="position: relative;">
                 ${flashRing}
-                <div style="background-color: ${pinColor}; width: ${markerSize}px; height: ${markerSize}px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); transition: width 0.3s ease, height 0.3s ease;"></div>
+                ${shapeHtml}
                 ${assignedStar}
               </div>
             `,
-            className: `marker-incident ${selectedIncidentId === incident.id ? 'selected' : ''} ${isFlashing ? 'dispatched' : ''}`,
+            className: `marker-incident ${isPointDispatch ? 'point-dispatch' : ''} ${selectedIncidentId === incident.id ? 'selected' : ''} ${isFlashing ? 'dispatched' : ''}`,
             iconSize: [markerSize, markerSize],
             iconAnchor: [markerAnchor, markerSize],
           }),
@@ -502,6 +530,7 @@ export function MapView({
 
       marker.bindPopup(`
         <div class="map-popup">
+          ${isPointDispatch ? `<p style="margin: 0 0 4px 0; color: ${dispatchAgencyMeta.color}; font-size: 11px; font-weight: bold;">${dispatchAgencyMeta.emoji} DIRECT POINT DISPATCH</p>` : ''}
           <strong>${incident.subtype || incident.title || 'Incident'}</strong>
           <p class="${priorityClass}" style="margin: 4px 0;">Priority: ${incident.priority || 'UNKNOWN'}</p>
           <p>Status: ${incident.status || 'UNKNOWN'}</p>

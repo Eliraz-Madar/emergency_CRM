@@ -1,7 +1,10 @@
 import * as Location from "expo-location";
 
 // Fallback used only when the device can't provide a real GPS fix
-export const MOCK_LOCATION = { latitude: 32.0, longitude: 34.0 };
+// Tel Aviv city center — on land. The previous (32.0, 34.0) fallback sat
+// several km out in the Mediterranean, which put every no-GPS report on
+// water on the map.
+export const MOCK_LOCATION = { latitude: 32.0853, longitude: 34.7818 };
 
 export async function getDeviceLocation() {
   try {
