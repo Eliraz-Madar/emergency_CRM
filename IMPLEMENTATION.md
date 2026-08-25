@@ -2,492 +2,277 @@
 
 ## Architecture Overview
 
-The dashboard is built with a modern frontend-backend architecture optimized for real-time operational awareness.
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Frontend (React + Zustand + Vite)                              │
-│  - Dashboard.jsx (regional)                                     │
-│  - FieldIncidentDashboard.jsx (field)                           │
-│  - Components (KPI, Filter, List, Map, Details, Events)        │
-│  - Real-time SSE client                                         │
-│  - State management (incidents, units, filters, connection)     │
-│  - Cross-tab sync (BroadcastChannel)                            │
+│  - Dashboard.jsx (regional, real data + live SSE)                │
+│  - FieldIncidentDashboard.jsx (training simulation + real        │
+│    MajorIncident/FieldCommand overlay)                           │
+│  - State management (dashboard.js, fieldIncident.js)             │
+│  - Cross-tab sync (BroadcastChannel)                             │
 └─────────────────────────────────────────────────────────────────┘
             ▲
             │ HTTP REST + Server-Sent Events
             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Backend (Django + DRF)                                         │
-│  - Mock Data Service (generates realistic data)                 │
-│  - Real-time Service (SSE broadcast)                            │
-│  - REST API (incidents, units, events, actions)                 │
-│  - Database Models (ready for real data)                        │
+│  - Real REST API: Incident/Task/Unit/FieldCommand ModelViewSets  │
+│  - Real "Go Live" API: MajorIncident/Sector/TaskGroup/Perimeter  │
+│  - Real-time: SSE broadcast from actual writes (not a timer)     │
+│  - Training-sim API (/api/field/...): in-memory mock data,       │
+│    backed by backend/simulated/ (untouched by the migration)     │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**As of Aug 2026, the regional dashboard and Field Command Post are fully real (DB-backed).** Only the Field Incident Command Dashboard's sector/task-group/casualty data remains a seeded mock dataset (`backend/simulated/field_incident_data.py`) — it can now optionally display a real `MajorIncident` on top if one has gone live (see "Major Incident Go-Live" below).
 
 ## Frontend Architecture
 
 ### State Management (Zustand)
-Located in `src/store/dashboard.js`, manages:
-- **Data**: incidents, units, events
-- **UI State**: selected item, filters, sort, connection status, zoom/flash targets
-- **Actions**: add/update entities, set filters, selection, `setZoomToIncident`, `setFlashingIncident`, `setActiveFilter`
-- **Selectors**: filtered/sorted incidents, selected incident
-- **Persistence**: wrapped with `zustand/middleware` `persist` (key: `ecm-dashboard-ui`)
-  - Persisted fields: `selectedIncidentId`, `activeFilter`, `filters`, `sortBy`
-  - NOT persisted: `incidents`, `units`, `events` (always re-fetched from API on load)
 
-Benefits:
-- ✅ Minimal boilerplate vs Redux
-- ✅ Reactive updates trigger re-renders
-- ✅ UI preferences survive page refresh via `persist` middleware
-- ✅ Type-friendly with JSDoc
+#### `src/store/dashboard.js` (Regional)
+- **Data**: `incidents`, `onlineUnits` (real DB `Unit` rows — the map/dispatch source of truth), `fieldCommands` (real DB `FieldCommand` rows), `events`. `units` is a legacy/demo array kept for backward compatibility.
+- **Merge helpers**: `upsertOnlineUnit()` / `upsertFieldCommand()` merge-by-id-or-insert so SSE partial updates don't clobber the rest of a record; `addIncident()` dedupes by id as defense-in-depth against a duplicate SSE connection delivering the same event twice.
+- **Persistence**: `zustand/middleware persist` (key `ecm-dashboard-ui`), **schema version 2**. `migrate()` discards stale `filters`/`activeFilter` shapes across two breaking changes: v0→1 standardized channel vocabulary, v1→2 dropped `CLOSED` from `DEFAULT_FILTERS.statuses` (closed incidents are hidden by default now, not just another filter option).
+  - Persisted: `activeFilter`, `filters`, `sortBy`.
+  - Deliberately NOT persisted: `selectedIncidentId` (so a closed/dismissed detail panel never silently reopens after refresh), `incidents`/`units`/`events` (always re-fetched from the API on load).
 
-Field incident state lives in `src/store/fieldIncident.js` and adds:
-- **Mode**: ROUTINE/SIMULATION/LIVE
-- **Field context**: `fieldId` for access scoping (also mirrored to `localStorage['fieldId']`)
-- **Unit routing**: road routes, on-scene behavior, station parking
-- **Cross-tab sync**: BroadcastChannel updates to keep Field/Regional views aligned
-- **Dispatch persistence**: writes assignments to `sessionStorage['ecm-dispatch-assignments']` on dispatch; removes them when units arrive on scene
-- **Mobile bridge**: on module load, registers all 50 routine units with the backend (`POST /api/mobile/register-units/`); on dispatch, also calls `POST /api/mobile/dispatch/` so the mobile app sees the task
+#### `src/store/fieldIncident.js` (Field Incident Command Dashboard + Field Command Post)
+State: `majorIncident`, `fieldCommandStatus`, `sectors`, `taskGroups`, `events`, `incidents`, `routineUnits`, `units`, `mode`, `simulationType`, `simulationStep`, `fieldId`, `perimeterVersion`, plus UI/filter state.
 
-### Real-Time Connection
-Located in `src/services/realtime.js`:
-- Uses Server-Sent Events (SSE) via EventSource API
-- Auto-reconnects with exponential backoff
-- Handles errors gracefully
-- Falls back to polling if SSE unavailable
+**`mode` is a 4-way enum: `ROUTINE | SIMULATION | LIVE | FIELD_COMMAND`.** `LIVE` means a real `MajorIncident` has gone live; `FIELD_COMMAND` means a real `FieldCommand` post is loaded that has *not* escalated to a MajorIncident (its `majorIncident` state is a FieldCommand-shaped stand-in with `id: null`, so perimeter calls never fire against it). `fieldCommandStatus` is tracked separately from `majorIncident.status` since `FieldCommand` (ACTIVE/CLOSED) and `MajorIncident` (DECLARED/ACTIVE/STABILIZING/RECOVERY) use non-overlapping status vocabularies.
 
-Cross-tab sync uses `BroadcastChannel('field-incident-sync')` to push Field state to other tabs.
+**Bug fixed (`cf4081b`, "isolate SIMULATION from LIVE data"):** `stopSimulation()` used to unconditionally overwrite `majorIncident`/`sectors` with fake routine data — including while the store was actually in `LIVE` mode, silently destroying real incident data on screen. It now guards `if (get().mode !== 'SIMULATION') return;`. Scenario units are tagged `isScenarioUnit: true` and filtered back out of `routineUnits` in `moveUnits()` so patrol units and simulation units never merge.
+
+**Mobile bridge**: on module load, registers all 50 routine units (`POST /api/mobile/register-units/`); dispatch/cancel/status actions mirror to `/api/mobile/dispatch/`, `/cancel-dispatch/`, `/unit-status/`.
+
+**Storage**: `localStorage['fieldId']` (durable), `sessionStorage['ecm-dispatch-assignments']` (session-scoped), `BroadcastChannel('field-incident-sync')` for cross-tab sync.
+
+### Real-Time Connection (SSE) — regional dashboard only
+
+Located in `src/services/realtime.js` (`RealtimeService`, wraps `EventSource`). **`FieldIncidentDashboard.jsx` has no live SSE connection** — `connectToFieldIncidentStream()` exists in `api/client.js` but isn't currently called from that page.
+
+**Duplicate-connection bug fixed (`dc2f0ef`):** React Strict Mode's dev-only double mount→cleanup→mount could leave two `EventSource` connections open simultaneously. Fixed in `Dashboard.jsx`'s data-init `useEffect` with:
+1. A `let cancelled = false` closure flag checked immediately before `new RealtimeService(...).connect()`, so the first (discarded) Strict-Mode pass's cleanup can bail out before it ever opens a connection.
+2. The live connection stored in a `useRef` (not `useState`), so cleanup always targets the actual current instance instead of a stale one captured at render time.
 
 ### Component Structure
 ```
-Dashboard.jsx (page)
-├── dashboard-topbar
-│   ├── Title + status indicators
-│   └── Connection status + demo mode badge
-├── KPI Cards
-│   ├── Total Incidents
-│   ├── Active Incidents
-│   ├── Critical Count
-│   └── Available Units
-├── Filter Bar
-│   ├── Search input
-│   ├── Sort dropdown
-│   └── Advanced filters (severity, status, channel)
-├── Main Content (3-column grid)
-│   ├── Left: Incident List
-│   │   └── Filterable, sortable, selectable list
-│   ├── Center: Map View
-│   │   ├── Leaflet map
-│   │   ├── Incident markers (colored by severity)
-│   │   ├── Unit markers
-│   │   └── Legend
-│   └── Right: Details Panel OR Event Feed
-│       ├── Incident Details (when selected)
-│       │   ├── Overview section
-│       │   ├── Workflow (status/severity controls)
-│       │   ├── Assigned units
-│       │   ├── Quick actions
-│       │   └── Timestamps
-│       └── Event Feed (live activity log)
-│           └── Paginated events
-└── Footer
-    └── Attribution + version info
+Dashboard.jsx (Regional)
+├── KPICards, IncidentList, MapView, EventFeed, FilterBar
+├── IncidentDetailsPanel   (built on shared SidePanel; hides "Close Incident" once CLOSED)
+└── FieldCommandDetailsPanel  ← NEW (built on shared SidePanel)
+    ├── Link-Incident list — excludes incidents already linked or CLOSED
+    └── Close Field Command Post form (reason + FIELD_OPERATOR/COMMAND_CENTER)
+
+SidePanel  ← NEW — generic right-side panel shell, extracted so both panels above share it
+
+FieldIncidentDashboard.jsx
+├── SituationOverview  — fetches the real Perimeter when mode === 'LIVE'
+├── SectorMap, TaskGroupPanel, OperationalTimeline
+└── PerimeterMapPicker  ← NEW — Leaflet click-to-draw polygon tool; emits ordered
+                           {lat,lng}[] which the page POSTs via submitMajorIncidentPerimeter()
 ```
 
-  ### Routing (Units)
-  Units use OSRM public routing for road paths and nearest-road snapping. The public endpoint can rate-limit or time out; for production, use a private OSRM or another routing provider.
-
-### Utility: Time Formatting (`src/utils/time.js`)
-All timestamps in the UI use `en-GB` locale with `hour12: false` to display 24-hour UTC times consistently:
-- `formatTime(isoString)` — returns `HH:MM:SS`
-- `formatDateTime(isoString)` — returns `DD/MM/YYYY, HH:MM:SS`
-Used in EventFeed, OperationalTimeline, IncidentDetailsPanel, and anywhere a timestamp is rendered.
+### Routing (Units)
+Units use OSRM public routing for road paths and nearest-road snapping (both web dashboard and, as of Aug 2026, the mobile app's `IncidentMapScreen` via `mobile-app/utils/routing.js`). The public endpoint can rate-limit or time out — a straight-line haversine fallback route always renders in that case; for production, use a private OSRM or another routing provider.
 
 ### Styling
-Located in `src/styles.css` with:
-- CSS Variables for consistent theming
-- Responsive grid layout (1366px minimum)
-- Professional UI with subtle shadows/transitions
-- Mobile-friendly fallback (stacked layout)
-- Dark color palette with accent colors
+`src/styles.css` — CSS variables, responsive grid (1366px minimum), dark palette. Closed-status color tuned to a muted amber (`#78350f`) rather than alarm red, to visually distinguish "closed" from "critical."
 
-## Backend Mock Data Service
+## Backend Architecture
 
-### Mock Data Generator (`simulated/mock_data.py`)
+### Real Data Models — regional dashboard, Field Command Post, Major Incident Go-Live
 
-**Features:**
-- Deterministic: seed-based for reproducible demos
-- Realistic: uses Faker library for human data
-- Scalable: generates on-demand
-- Event-driven: tracks all updates
+These replaced the mock data generator entirely for the regional dashboard (Aug 2026):
 
-**Data Entities:**
+- **`Incident`** — explicit forward-only state machine (`TRANSITIONS`): `OPEN → PENDING → EN_ROUTE → ON_SCENE → RESOLVED → CLOSED`, plus a legacy `IN_PROGRESS` path for rows written by the mobile-dispatch bridge. `CLOSED` is reachable only via an explicit Commander action and always requires `closed_reason` + `closed_by`. A field unit can resolve an incident only once every assigned `Task` is DONE/CANCELLED; a Commander can always override.
+- **`Unit`** — `is_online` is an explicit flag set only by `/api/units/claim/` or `/heartbeat/`, never true by default. `is_actively_online` is a computed property (`is_online AND last_seen within 60s`) — no background job flips it, so a unit that stops heartbeating simply stops reporting online at read time.
+- **`Task`** — terminal once DONE/CANCELLED; only a Commander can CANCEL.
+- **`FieldCommand` / `FieldCommandNote`** (NEW) — the real "Field Command Post" feature (right-click "Open Field Command Post" on the regional map). Closing a post cascades: releases every assigned `Unit.field_command`, force-closes every linked `Incident`.
+- **`MajorIncident` / `Sector` / `TaskGroup` / `Perimeter`** (NEW real models) — back the "Go Live" flow, declared from a real `Incident` by a Commander. Entirely separate from the mock `field_incident_*` endpoints, which are untouched.
 
-1. **Incident**
-   ```python
-   {
-     "id": int,
-     "title": str,          # Random incident type
-     "description": str,    # Faker-generated
-     "severity": str,       # LOW/MED/HIGH/CRITICAL
-     "status": str,         # OPEN/IN_PROGRESS/CLOSED
-     "location_lat": float,
-     "location_lng": float,
-     "location_name": str,  # Named road/intersection across Israel
-     "created_at": ISO8601,
-     "updated_at": ISO8601,
-     "channel": str,        # Police/Fire/EMS/Civil Defense
-     "assigned_unit_ids": [int],
-     "reporter": str,       # Faker name
-     "tags": [str],         # Random tags
-   }
-   ```
+### Unit Claim / Heartbeat / Disconnect
 
-2. **Unit**
-   ```python
-   {
-     "id": int,
-     "name": str,           # E.g., "Ambulance-1"
-     "type": str,           # Ambulance/Police/Fire/Rescue
-     "status": str,         # Available/Dispatched/OnScene/Offline
-     "location_lat": float,
-     "location_lng": float,
-     "last_update": ISO8601,
-     "crew_size": int,      # 1-5
-   }
-   ```
-
-3. **Event**
-   ```python
-   {
-     "id": int,
-     "timestamp": ISO8601,
-     "entity_type": str,    # "incident" or "unit"
-     "entity_id": int,
-     "message": str,        # Human-readable
-     "level": str,          # "info"/"warn"/"error"
-   }
-   ```
-
-### Simulation Logic
-
-The `simulate_update()` method randomly:
-1. **Creates new incident** (30% chance)
-   - Random type, location, severity
-   - Initial status: OPEN
-2. **Updates incident status** (20% chance)
-   - Random incident → next status in workflow
-3. **Updates incident severity** (20% chance)
-   - Random severity change
-4. **Assigns unit** (20% chance)
-   - Random incident + unit → create assignment
-5. **Moves unit** (10% chance)
-   - Random unit location drift
-
-All updates trigger event log entries automatically.
-
-### API Endpoints
-
-**Base:** `http://localhost:8000/api/`
-
-#### Data Retrieval
 ```
-GET  /mock/incidents/           → List all incidents
-GET  /mock/units/               → List all units
-GET  /mock/events/?limit=50     → List recent events
-GET  /mock/incidents/<id>/      → Get specific incident
+POST /api/units/claim/       { id }  or  { name, type }, location_lat, location_lng
+  → links request.user.unit, sets is_online=True, last_seen=now, GPS from device
+  → 409 if another user is actively holding the unit
+  → claiming a different unit releases the previous one
+
+POST /api/units/heartbeat/   — refresh last_seen (+ GPS); called every 25s by
+                                mobile-app/utils/heartbeat.js
+
+POST /api/units/disconnect/  — explicit logout signal (otherwise the unit falls
+                                offline naturally 60s after heartbeats stop)
 ```
 
-#### Data Modification
+A routing-order regression was caught and regression-tested (`UnitHeartbeatRoutingTests`): `DefaultRouter`'s catch-all `units/<pk>/` route can shadow a literal `units/heartbeat/` path if the router is registered first — the heartbeat path must be declared before `router.urls` is included.
+
+### Field Command Post API
+
 ```
-PATCH /mock/incidents/<id>/status/     {status: "IN_PROGRESS"}
-PATCH /mock/incidents/<id>/severity/   {severity: "HIGH"}
-POST  /mock/incidents/<id>/assign/     {unit_id: 5}
-POST  /mock/incidents/<id>/note/       {note: "Patient conscious"}
+GET/POST /api/field-commands/                    — lookup by field_key (public id), not pk
+POST     /api/field-commands/<id>/assign-unit/
+POST     /api/field-commands/<id>/assign-incident/
+PATCH    /api/field-commands/<id>/metrics/
+POST     /api/field-commands/<id>/close/          — cascades: releases units, closes incidents
 ```
 
-#### Real-Time
+### Major Incident "Go Live" API
+
 ```
-GET   /mock/updates/stream/     → Server-Sent Events
-GET   /mock/simulate/           → Trigger one random update (for testing)
+POST     /api/major-incidents/go-live/                       — COMMAND_CENTER only; rejects a
+                                                                 second go-live on the same Incident
+GET/POST /api/major-incidents/<id>/perimeter/                — FIELD_OPERATOR only for POST
+GET/POST /api/major-incidents/<id>/sectors/                  — COMMAND_CENTER only for POST
+GET/POST /api/major-incidents/<id>/task-groups/               — optionally links existing Sectors
 ```
 
-### Real-Time Service (`utils/realtime.py`)
+### Training-Simulation Backend (Field Incident Command Dashboard only)
 
-- Manages subscriber callbacks
-- Broadcasts updates to all SSE connections
-- Background thread simulates events at configurable interval
-- Supports enable/disable of simulation
+**Unchanged, deliberately untouched by the mock→real migration.** Backed by `backend/simulated/` (`mock_data.py`, `field_incident_data.py`, `realtime.py`, `mock_api_client.py`), served at `/api/field/...`, storing state in an in-memory `_field_incident_data` dict inside `views.py` (not the DB) — except for reports submitted via `add-event`, which do persist a real `IncidentEvent` + `ReportMedia`.
+
+**Auto-simulation disabled:** the field-incident SSE stream used to randomly advance sector/task-group status on a timer (~30% chance per tick), which could silently move a task to COMPLETED with no corresponding API request in the log. That auto-tick is now commented out — state only changes via an explicit call (`/api/field/simulate/`, `PATCH /api/field/sectors/<id>/`, etc.).
+
+### Real-Time Service
+
+`_broadcast_realtime()` (regional) fires only from real write paths (IncidentViewSet/UnitViewSet/TaskViewSet/FieldCommandViewSet create/update, unit claim/heartbeat) — never from a timer. `_push_field_sse()` (training-sim) still exists for the mock dashboard's own event stream.
 
 ## Data Flow
 
-### Initial Load
+### Regional Dashboard — Real Data
 ```
-1. Dashboard mounts
-2. Fetch initial data (incidents, units, events)
-3. Populate Zustand store
-4. Connect SSE stream
-5. Listen for updates
-```
-
-### Real-Time Update
-```
-1. Backend simulates random update
-2. Broadcast via SSE
-3. Frontend receives event
-4. Parse and route (incident/unit/event)
-5. Update Zustand store
-6. Components re-render with new data
-7. Update map markers
-8. Add event log entry
+1. Dashboard mounts → GET /api/incidents/, /api/units/, /api/events/
+2. Populate dashboard.js store (incidents, onlineUnits, fieldCommands)
+3. Connect SSE (/api/updates/stream/) via a cancelled-flag + useRef guarded effect
+4. Every real write (create/update/assign/claim/heartbeat) broadcasts an event
+5. Store upserts by id; components re-render
 ```
 
-### User Action
+### Unit Claim & Live Tracking (Mobile)
 ```
-1. User clicks action (e.g., assign unit)
-2. API call to PATCH /mock/incidents/<id>/assign/
-3. Backend updates mock data
-4. Response returns updated incident
-5. Frontend updates store immediately (optimistic)
-6. SSE broadcasts update to all clients
-7. Event logged automatically
-```
-
-### Dispatch & Unit Routing
-```
-1. User selects units in IncidentDetailsPanel → clicks "Dispatch"
-2. dispatchUnitsToIncident() called in fieldIncident.js store
-3. Units set to EN_ROUTE; OSRM road routes fetched
-4. Assignment written to sessionStorage['ecm-dispatch-assignments']
-5. Map auto-zooms (flyToBounds) to incident + dispatched units
-6. Incident marker pulses with amber ring for 4 seconds
-7. IncidentDetailsPanel stays open (no auto-close)
-8. As units travel, moveUnits() advances positions along route
-9. On arrival: unit status → ON_SCENE; assignment removed from sessionStorage
-10. (Parallel) POST /api/mobile/dispatch/ → backend creates DB Task per unit
-    → Push notifications sent to registered mobile devices for those unit IDs
+1. UnitSelectScreen: getDeviceLocation() → POST /api/units/claim/ {id|name+type, lat, lng}
+2. On success: unit.is_online=True, user.unit set, unit GPS updated
+3. heartbeat.js: startHeartbeatLoop() posts /api/units/heartbeat/ every 25s
+4. IncidentMapScreen: watchDeviceLocation() + fetchRealRoute() (OSRM, haversine fallback)
+5. On logout: disconnectUnit() → POST /api/units/disconnect/
+6. If heartbeats stop for any reason: unit reports offline automatically after 60s
+   (Unit.is_actively_online), no background job needed
 ```
 
-### Dispatch Restore on Page Refresh
+### Field Command Post Lifecycle
 ```
-1. Dashboard mounts → initializeData() fetches incidents + units from API
-2. After data loads, reads sessionStorage['ecm-dispatch-assignments']
-3. Groups saved assignments by incidentId
-4. Calls dispatchUnitsToIncident({ ..., silent: true }) for each group
-   - silent: true → suppresses voice synthesis and event-log entries
-   - Units re-enter EN_ROUTE state with fresh routes from current positions
-5. Affected incidents set to IN_PROGRESS status
-6. Single "Restored N assignments" info event added to event log
+1. Dispatcher right-clicks the regional map → "Open Field Command Post"
+   → POST /api/field-commands/ {name, location_lat, location_lng[, major_incident_id]}
+2. Units/incidents assigned via assign-unit/ / assign-incident/ (or an Incident's
+   field_command is set directly)
+3. Metrics (casualty_count, evacuated_count, incident_phase) updated via PATCH .../metrics/
+4. Close: POST .../close/ {closed_reason, closed_by_role}
+   → cascades: every assigned Unit.field_command = None,
+     every linked Incident force-closed (closed_by=COMMAND_CENTER)
 ```
 
-### Mobile App Dispatch Sync
+### Major Incident "Go Live" Lifecycle
 ```
-On dashboard load:
-  fieldIncident.js module initialises → POST /api/mobile/register-units/
-    → sends all 50 routine units (id, name, type) to the backend
-    → backend stores them in _routine_units_registry (in-memory)
+1. Commander selects a real Incident → POST /api/major-incidents/go-live/
+   {incident_id, incident_type} → creates MajorIncident (status=DECLARED), links via OneToOne
+2. Field operator draws a danger-zone polygon (PerimeterMapPicker.jsx, Leaflet click-to-draw)
+   → POST /api/major-incidents/<id>/perimeter/ {points: [{lat,lng}, ...]} (min 3 points)
+3. Commander creates Sectors (name + hazard_level) and TaskGroups (optionally linking Sectors)
+4. FieldIncidentDashboard.jsx's fieldIncident.js store switches to mode='LIVE' and
+   SituationOverview.jsx fetches/re-fetches the Perimeter (perimeterVersion counter)
+```
 
-Mobile login flow:
-  LoginScreen → POST /api/token/ → receives { access, unit_type }
-  UnitSelectScreen → GET /api/mobile/units/?type=POLICE
-    → shows the same "Unit 43", "Unit 7" etc. seen in the dashboard
-  User selects unit → registerPushToken(unit.id) → POST /api/push-token/
-    → backend stores Expo push token keyed by mock_unit_id
-
-On dispatch:
-  dispatchUnitsToIncident() → POST /api/mobile/dispatch/
-    { incident_id, incident_title, location_lat, location_lng, units: [...] }
-  backend:
-    → update_or_create Incident (mock_incident_id = parsed incident key)
-    → get_or_create Task (mock_unit_id = unit numeric ID)
-    → send Expo push notification to registered tokens for that mock_unit_id
-
-Mobile app (polling every 8 s):
-  GET /api/tasks/?mock_unit=43
-    → lists all tasks where mock_unit_id = 43
-    → new task appears within one polling interval
+### Dispatch & Unit Routing (unchanged from prior versions)
+```
+1. dispatchUnitsToIncident() in fieldIncident.js → units EN_ROUTE, OSRM route fetched
+2. sessionStorage['ecm-dispatch-assignments'] updated; POST /api/mobile/dispatch/ (fire-and-forget)
+3. On arrival: unit → ON_SCENE; assignment removed from sessionStorage
+4. On page refresh: sessionStorage assignments restored silently (silent: true — no voice/log spam)
 ```
 
 ## Key Design Decisions
 
-### 1. SSE vs WebSocket
-- **Chosen: SSE** because:
-  - ✅ Simpler to implement (no library needed)
-  - ✅ Falls back to polling automatically
-  - ✅ Less resource-intensive for simple updates
-  - ✅ Works through standard proxies
-  - ⚠️ Only server→client (sufficient for operational dashboard)
+### 1. SSE vs WebSocket — unchanged rationale (simpler, auto-fallback, sufficient for server→client)
 
-### 2. Mock Data Strategy
-- **Chosen: In-memory generation** because:
-  - ✅ No database required
-  - ✅ Deterministic with seed
-  - ✅ Instant startup
-  - ✅ Safe demo data (no PII)
-  - Ready to replace with real queries
+### 2. Real data replaces mock for regional + Field Command Post, but the training simulation stays mock
+- **Why:** the Field Incident Command Dashboard is explicitly a training/demo view (multi-sector large-scale incident drills) — it doesn't need to be backed by real casualty/sector data to serve that purpose, and keeping it mock avoids needing realistic seed data for every drill scenario.
+- The real "Go Live" flow exists precisely so a *genuine* major incident can be projected into that same UI without touching the drill/mock code path underneath it.
 
-### 3. State Management
-- **Chosen: Zustand** because:
-  - ✅ Minimal setup vs Redux
-  - ✅ Reactive updates
-  - ✅ Composable selectors
-  - ✅ Good DevTools support
-  - ✅ Persistence via `zustand/middleware` `persist` — UI prefs survive page refresh
+### 3. State Management — Zustand, unchanged rationale; the 4-way `mode` enum in `fieldIncident.js` is the main new nuance (see above)
 
-### 4. Component Architecture
-- **Chosen: Functional + Hooks** because:
-  - ✅ Modern React best practices
-  - ✅ Easy to test
-  - ✅ Composable logic
-  - ✅ Better performance with memoization
-
-## Extending to Real Data
-
-To integrate with real incident/unit systems:
-
-### Step 1: Replace Mock Service
-```python
-# backend/api/views.py
-def mock_incidents(request):
-    # OLD: return Response(get_mock_service().get_incidents())
-    # NEW: return Response(Incident.objects.all().values(...))
-    incidents = Incident.objects.select_related(...).all()
-    return Response(IncidentSerializer(incidents, many=True).data)
-```
-
-### Step 2: Implement Real-Time Updates
-```python
-# Option A: Keep SSE, trigger from signal handlers
-from django.db.models.signals import post_save
-@receiver(post_save, sender=Incident)
-def incident_updated(sender, instance, **kwargs):
-    realtime_service.broadcast({
-        'type': 'incident_updated',
-        'data': IncidentSerializer(instance).data
-    })
-
-# Option B: Replace with WebSocket
-# Install django-channels, use async consumers
-```
-
-### Step 3: Authentication
-```python
-# Currently bypassed (auth temporarily disabled)
-# To enable: Remove permission_classes bypass in views.py
-# Implement JWT token validation
-from rest_framework.permissions import IsAuthenticated
-permission_classes = [IsAuthenticated]
-```
-
-### Step 4: Validation & Error Handling
-```python
-# Add proper error handling for real data
-try:
-    incident = Incident.objects.get(pk=id)
-except Incident.DoesNotExist:
-    return Response({"error": "Not found"}, status=404)
-
-# Validate user permissions
-if not user.can_modify_incident(incident):
-    return Response({"error": "Forbidden"}, status=403)
-```
-
-## Performance Considerations
-
-### Frontend
-- **Re-render optimization**: Zustand only updates changed slices
-- **Memoization**: Components using `React.memo` where needed
-- **Lazy loading**: Event list scrolls (not pagination)
-- **Map clustering**: Would be added for 100+ markers
-
-### Backend
-- **Connection pooling**: Django handles automatically
-- **Query optimization**: Use `select_related` for joins
-- **Caching**: Could add Redis for frequently accessed data
-- **Rate limiting**: Should add for production
-
-### Real-Time
-- **Update batching**: SSE doesn't support this yet (could add)
-- **Compression**: Standard gzip for larger payloads
-- **Scalability**: SSE doesn't scale beyond single server
-  - For production: Use message queue (RabbitMQ, Redis) + WebSocket
+### 4. Explicit state machines over free-form status fields
+- **Chosen** for `Incident.TRANSITIONS` and `Task.can_transition_to()` because silent invalid transitions (e.g. skipping straight to CLOSED with no closure trail) were a real risk once real dispatchers/field units could edit status directly.
+- Enforced at the serializer's `validate_status()`/`validate()`, using `effective_role()` to resolve whichever of "real authenticated user" or "declared X-Actor-Role header" applies.
 
 ## Testing Scenarios
 
-### Functional Testing
-1. **Load Initial Data**: Dashboard shows 18 incidents, 24 units spread across Israel
-2. **Filter by Severity**: Show only CRITICAL → 1 incident
-3. **Search by Title**: Search "fire" → filtered list
-4. **Assign Unit**: Click incident → click assign button → verify update
-5. **Change Status**: Click OPEN incident → click IN_PROGRESS → verify
-6. **Add Note**: Click incident → click "Add Note" → verify in event log
-7. **Real-Time**: Watch new incidents appear automatically
+### Automated Backend Tests (`backend/api/test_*.py`)
 
-### Load Testing
-- 100+ incidents: Map should still be responsive (add clustering)
-- 1000+ events: Event log should paginate/virtualize
-- 10 concurrent users: Backend should handle gracefully
+| File | Classes | Covers |
+|---|---|---|
+| `test_auth.py` | `TokenObtainTests` | JWT login returns access/refresh + custom claims; rejects bad password; refresh flow |
+| | `UnitHeartbeatRoutingTests` | Regression: router route-shadowing bug on `/units/heartbeat/`; location update; auth required |
+| `test_endpoints.py` | `IncidentEndpointSchemaTests` | List shape; location required on create |
+| | `TaskEndpointSchemaAndFilterTests` | Denormalized incident fields; `?incident=`/`?mock_unit=` filters; `by-incident` action |
+| | `MobileDispatchBridgeTests` | Dispatch creates incident+task idempotently; requires location; cancel marks CANCELLED; unit-type filtering |
+| | `MobileUnitStatusEndpointTests` | Missing/invalid field 400s; valid update accepted |
+| | `UnitClaimingTests` | Full claim/disconnect lifecycle: default-offline, claimable filter, claim-by-id/name, conflict on active claim, re-claim releases previous unit, stale-heartbeat reports offline |
+| | `FieldCommandLinkLifecycleTests` | Prevents duplicate active MajorIncident↔FieldCommand link on create/update; cascade-closes linked incidents |
+| `test_permissions.py` | `TaskPermissionAuthenticationTests` | Anonymous list/patch on `/api/tasks/` rejected |
+| | `TaskPermissionRoleTests` | Field unit patches only status; dispatcher can create tasks; documents a known gap (field unit can patch a task not assigned to them) |
+| | `ReadOnlyOrAdminDispatcherGapTests` | **Documents (does not fix)** that anonymous users can currently create incidents / delete units |
+
+### Manual Functional Testing
+1. **Load Initial Data**: Dashboard shows real incidents/units from the DB (seeded via `create_sample_data.py`)
+2. **Filter by Severity/Status**: Closed incidents hidden by default; toggle via FilterBar
+3. **Dispatch a unit**: assign → OSRM route → map auto-zoom → mobile app receives push + task
+4. **Claim a unit (mobile)**: select unit → GPS captured → dashboard shows it online; log out → offline within 60s
+5. **Open a Field Command Post**: right-click map → create → assign units/incidents → close → verify cascade (units released, incidents force-closed)
+6. **Go Live**: declare a MajorIncident from a real Incident → submit a perimeter → create sectors/task groups → verify Field Incident Command Dashboard shows the real data in `LIVE` mode
+7. **Real-Time**: watch SSE-driven updates appear automatically; confirm only one connection in Network tab (no duplicate EventSource)
 
 ### Edge Cases
-- Lost connection: Show "CONNECTING" (🟡 yellow) while auto-reconnecting; only goes RED/OFFLINE if SSE is closed entirely
-- Recover connection: Auto-reconnect with backoff
-- Invalid data: Show error toast
-- Server error: Fallback to last known state
-- User offline: Queue actions, sync when online
+- Lost SSE connection: CONNECTING (yellow) while auto-reconnecting; OFFLINE (red) only if the stream can't be established at all, falling back to polling
+- Stale unit: heartbeat stops → unit silently reports offline after 60s, no error surfaced
+- Double "Go Live" on the same Incident: rejected with a 400 explaining it already went live
+- Closing a Field Command Post with linked incidents still open: incidents are force-closed with an explicit closure reason, not left dangling
 
 ## Security Notes
 
 ⚠️ **This is a DEMO/MVP - NOT PRODUCTION READY**
 
-Status of security items:
-- ✅ JWT authentication implemented (simplejwt — access 8h / refresh 7d)
-- ✅ Role-based access control: `fieldunit` / `dispatcher` / `admin` enforced server-side
-- ✅ `TaskPermission` — fieldunit can only PATCH their own task status
-- ❌ No rate limiting (vulnerable to DOS)
-- ❌ No HTTPS/TLS
-- ❌ CORS allows all origins (development only)
-- ❌ No input validation on all endpoints
-- ❌ No audit logging
-- ❌ No data encryption
-- ❌ Mobile bridge endpoints (`/api/mobile/*`) are open (no auth required)
+- ✅ JWT authentication (simplejwt — access 8h / refresh 7d)
+- ✅ Role-based checks via `effective_role()` in serializers (Incident/Task/FieldCommand/MajorIncident/Sector/Perimeter validation)
+- ✅ `TaskPermission` — fieldunit can only PATCH their own task status (partially — see known gap below)
+- ❌ **`ReadOnlyOrAdminDispatcher.has_permission` always returns `True`** — documented, regression-tested gap (`ReadOnlyOrAdminDispatcherGapTests`); anonymous requests can currently create/delete on Incident/Unit/FieldCommand ModelViewSets
+- ❌ A field unit can currently PATCH the status of a task not assigned to them (documented in `TaskPermissionRoleTests`, not yet fixed)
+- ❌ No rate limiting, no HTTPS/TLS, CORS allows all origins, no audit logging, no data encryption
+- ❌ Mobile bridge endpoints (`/api/mobile/*`) remain open (no auth)
 
 ### Security Hardening Checklist
-- [x] Implement JWT authentication
-- [x] Add role-based access control (RBAC)
-- [ ] Validate all inputs (request body, query params)
-- [ ] Enable HTTPS with valid certificate
-- [ ] Restrict CORS to known domains
-- [ ] Add rate limiting (DRF throttling)
-- [ ] Log all actions with user/timestamp
-- [ ] Encrypt sensitive fields in database
-- [ ] Add unit tests for permissions
-- [ ] Security audit by external team
+- [x] JWT authentication
+- [x] Role-based access control for Task/serializer-level checks
+- [ ] Fix `ReadOnlyOrAdminDispatcher` no-op
+- [ ] Fix field-unit-can-patch-unassigned-task gap
+- [ ] Validate all inputs; enable HTTPS; restrict CORS; add rate limiting; audit logging; encryption
 
 ## Future Enhancements
 
-### Phase 2 (Post-MVP)
-- [ ] Real database integration
-- [x] User authentication & roles (JWT + simplejwt)
-- [ ] Map clustering for 100+ incidents
-- [x] Push notifications (Expo push API)
-- [ ] Incident templates & quick create
-- [ ] Advanced analytics & reporting
-- [x] Offline mode with sync (SQLite + SyncScreen)
-- [x] Mobile app integration (dispatch → mobile task sync)
+### Done since last major revision
+- [x] Real database integration for regional dashboard + Field Command Post
+- [x] Real Major Incident "Go Live" flow (Sector/TaskGroup/Perimeter)
+- [x] Live unit tracking (claim/heartbeat/disconnect)
+- [x] Automated backend test suite
 
-### Phase 3 (Long-term)
-- [ ] AI-powered incident routing
-- [ ] Predictive analytics
-- [ ] Multi-agency coordination
-- [ ] Integration with CAD/RMS systems
-- [ ] Video integration
-- [ ] Voice communication bridge
-- [ ] Mobile field app with offline cache
-- [ ] Public information management (PIM)
+### Still open
+- [ ] Real database integration for the Field Incident Command Dashboard's own sector/task-group data (currently mock, with a real MajorIncident optionally layered on top)
+- [ ] Fix the two documented permission gaps above
+- [ ] Map clustering for 100+ incidents
+- [ ] Advanced analytics & reporting
+- [ ] AI-powered incident routing, predictive analytics, multi-agency CAD/RMS integration
 
 ---
 
-**Dashboard Version:** 1.2 | **Build Date:** 2026-06-07 | **Status:** Production Ready (for Demo)
+**Dashboard Version:** 4.0 | **Last Updated:** 2026-08-25 | **Status:** Demo/MVP — regional dashboard and Field Command Post real; training simulation dashboard mock with real overlay
