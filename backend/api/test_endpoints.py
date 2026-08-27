@@ -92,6 +92,19 @@ class TaskEndpointSchemaAndFilterTests(APITestCase):
         body = response.json()
         self.assertEqual([r["id"] for r in body], [self.task.id])
 
+    def test_unit_tasks_action_strict_fk_no_auth(self):
+        # Regional dashboard's selected-vehicle panel — anonymous read, and
+        # ONLY the assigned_unit FK (never the mock_unit_id=7 that also
+        # happens to equal some other unit's pk).
+        response = self.client.get(f"/api/units/{self.unit.id}/tasks/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([r["id"] for r in response.json()], [self.task.id])
+
+        empty = Unit.objects.create(
+            name="Fresh", type="Police", location_lat=1.0, location_lng=1.0)
+        response = self.client.get(f"/api/units/{empty.id}/tasks/")
+        self.assertEqual(response.json(), [])
+
 
 class MobileDispatchBridgeTests(APITestCase):
     """
@@ -419,3 +432,64 @@ class FieldCommandLinkLifecycleTests(APITestCase):
         self.assertEqual(incident.status, Incident.Status.CLOSED)
         self.assertEqual(field_command.status, FieldCommand.Status.CLOSED)
         self.assertIsNone(incident.field_command_id)
+
+
+class FieldCommandMissionTests(APITestCase):
+    def setUp(self):
+        self.dispatcher = User.objects.create_user(
+            username="mission_dispatcher", password="pass1234", role=User.Roles.DISPATCHER)
+        self.client.force_authenticate(self.dispatcher)
+        self.fc = FieldCommand.objects.create(
+            name="Mission Test Post", location_lat=32.0, location_lng=34.0)
+        self.attached = Unit.objects.create(
+            name="Attached Unit", type=Unit.UnitType.FIRE,
+            location_lat=32.0, location_lng=34.0, field_command=self.fc)
+        self.other = Unit.objects.create(
+            name="Other Unit", type=Unit.UnitType.EMS,
+            location_lat=32.0, location_lng=34.0)
+
+    def test_create_mission_logs_typed_note(self):
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "Evacuate block C", "assigned_unit": self.attached.id},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        body = res.json()
+        self.assertEqual(len(body["missions"]), 1)
+        self.assertEqual(body["missions"][0]["assigned_unit_name"], "Attached Unit")
+        # The mission is logged to the operational timeline as a typed note.
+        kinds = [n["kind"] for n in body["operational_notes"]]
+        self.assertIn("MISSION", kinds)
+
+    def test_mission_force_must_be_attached_to_post(self):
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "Bad assignee", "assigned_unit": self.other.id},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("assigned_unit", res.json())
+
+    def test_update_mission_status(self):
+        mission = self.fc.missions.create(title="Hold the line")
+        res = self.client.patch(
+            f"/api/field-commands/{self.fc.field_key}/missions/{mission.id}/",
+            {"status": "DONE"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        mission.refresh_from_db()
+        self.assertEqual(mission.status, "DONE")
+
+    def test_missions_blocked_on_closed_post(self):
+        self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/close/",
+            {"closed_reason": "done", "closed_by_role": FieldCommand.ClosedByRole.COMMAND_CENTER},
+            format="json",
+        )
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "Too late"}, format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)

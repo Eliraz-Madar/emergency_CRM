@@ -167,13 +167,6 @@ export function getNextPositionOnRoute(route, currentLat, currentLng, currentInd
 }
 
 /**
- * Clear the route cache (useful for testing or memory management)
- */
-export function clearRouteCache() {
-    routeCache.clear();
-}
-
-/**
  * Snap a point to the nearest road using OSRM Nearest
  * @param {number} lat
  * @param {number} lng

@@ -117,13 +117,6 @@ export const useDashboardStore = create(
         lastUpdateTime: new Date(),
       })),
 
-      updateUnit: (unitId, updates) => set((state) => ({
-        units: state.units.map(unit =>
-          unit.id === unitId ? { ...unit, ...updates } : unit
-        ),
-        lastUpdateTime: new Date(),
-      })),
-
       addEvent: (event) => set((state) => ({
         events: [event, ...state.events].slice(0, 100), // Keep last 100 events
         lastUpdateTime: new Date(),
@@ -132,12 +125,6 @@ export const useDashboardStore = create(
       setSelectedIncident: (incidentId) => set({ selectedIncidentId: incidentId }),
       setSelectedUnit: (unitId) => set({ selectedUnitId: unitId }),
       setSelectedUnitIds: (unitIds) => set({ selectedUnitIds: unitIds }),
-      toggleSelectedUnit: (unitId) => set((state) => ({
-        selectedUnitIds: state.selectedUnitIds.includes(unitId)
-          ? state.selectedUnitIds.filter(id => id !== unitId)
-          : [...state.selectedUnitIds, unitId]
-      })),
-      clearSelectedUnits: () => set({ selectedUnitIds: [] }),
 
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setDemoMode: (enabled) => set({ demoMode: enabled }),
@@ -197,11 +184,6 @@ export const useDashboardStore = create(
         });
 
         return incidents;
-      },
-
-      getSelectedIncident: () => {
-        const state = get();
-        return state.incidents.find(inc => inc.id === state.selectedIncidentId);
       },
     }),
     {

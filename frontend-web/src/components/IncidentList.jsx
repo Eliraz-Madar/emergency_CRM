@@ -1,5 +1,6 @@
 import React from 'react';
 import { useDashboardStore } from '../store/dashboard.js';
+import { getIncidentChannelMeta } from '../utils/agencyMeta.js';
 
 /**
  * Incident List Component - Dynamic and Interactive
@@ -62,17 +63,15 @@ export function IncidentList({
     return icons[status] || '•';
   };
 
-  // Same "Dispatch Force to Point" detection and POLICE/FIRE/MEDICAL palette
-  // as MapView.jsx's incident markers, so a point-dispatch row here matches
-  // the diamond marker shown for the same incident on the map.
+  // Same "Dispatch Force to Point" detection and shared agency palette
+  // (utils/agencyMeta.js) as MapView.jsx's incident markers, so a
+  // point-dispatch row here matches the diamond marker shown for the same
+  // incident on the map. Unknown channel → an amber ⚡ bolt, not 🚨.
   const isPointDispatch = (incident) =>
     incident?.description === 'Force dispatched directly from the map.';
 
-  const getDispatchAgencyMeta = (incident) => ({
-    POLICE: { emoji: '🚓', color: '#3b82f6' },
-    FIRE: { emoji: '🚒', color: '#ef4444' },
-    EMS: { emoji: '🚑', color: '#10b981' },
-  }[(incident?.channel || '').toUpperCase()] || { emoji: '⚡', color: '#f59e0b' });
+  const getDispatchAgencyMeta = (incident) =>
+    getIncidentChannelMeta(incident, { emoji: '⚡', color: '#f59e0b' });
 
   const formatTime = (dateString) => {
     const date = new Date(dateString);

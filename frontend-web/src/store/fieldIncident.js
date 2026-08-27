@@ -10,6 +10,7 @@ import { SCENARIOS } from '../simulations/simulationScenarios';
 import { getFieldIncident } from '../api/client';
 import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
 import { useDashboardStore } from './dashboard';
+import { ISRAEL_CITIES } from '../utils/israelGeo';
 
 const _BACKEND_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
   ? import.meta.env.VITE_API_URL
@@ -80,31 +81,9 @@ const normalizeScenarioUnit = (u, simIncidentId, incLat, incLng) => {
   };
 };
 
-// Major Israeli cities used for unit and event placement (inland-safe centers)
-const ISRAEL_CITIES = [
-  // מרכז
-  { name: 'Tel Aviv', lat: 32.0853, lng: 34.7818 },
-  { name: 'Ramat Gan', lat: 32.0853, lng: 34.8103 },
-  { name: 'Petah Tikva', lat: 32.0878, lng: 34.8879 },
-  { name: 'Rishon LeZion', lat: 31.9730, lng: 34.7925 },
-  { name: 'Holon', lat: 32.0167, lng: 34.7667 },
-  { name: 'Rehovot', lat: 31.8944, lng: 34.8081 },
-  // ירושלים והסביבה
-  { name: 'Jerusalem', lat: 31.7683, lng: 35.2137 },
-  { name: 'Beit Shemesh', lat: 31.7522, lng: 34.9897 },
-  { name: 'Modi\'in', lat: 31.8969, lng: 35.0106 },
-  // צפון
-  { name: 'Haifa', lat: 32.7940, lng: 34.9896 },
-  { name: 'Nazareth', lat: 32.7028, lng: 35.2978 },
-  { name: 'Tiberias', lat: 32.7940, lng: 35.5309 },
-  { name: 'Kiryat Shmona', lat: 33.2073, lng: 35.5711 },
-  { name: 'Safed', lat: 32.9658, lng: 35.4983 },
-  // דרום
-  { name: 'Beer Sheva', lat: 31.2518, lng: 34.7913 },
-  { name: 'Ashdod', lat: 31.8018, lng: 34.6479 },
-  { name: 'Ashkelon', lat: 31.6688, lng: 34.5742 },
-  { name: 'Netivot', lat: 31.4203, lng: 34.5952 },
-];
+// ISRAEL_CITIES (major-city reference points, used below for random unit /
+// event placement) now lives in utils/israelGeo.js — shared with
+// nearestCityName(), which labels real incidents by their closest city.
 
 // Station locations (approximate) for realistic parking
 const STATIONS = {
@@ -164,10 +143,8 @@ const LAT_MIN = 29.5;
 const LAT_MAX = 33.3;
 const LNG_MIN = 34.3;  // Moved east to avoid Mediterranean
 const LNG_MAX = 35.9;
-const PATROL_STEP_DELTA = 0.003; // Visible patrol speed on country map (~300m per tick)
 const PATROL_SPEED = 0.0005; // Same as route movement speed
 const RED_LIGHT_STOP_MS = [3000, 8000];
-const RANDOM_STOP_MS = [8000, 20000];
 const RED_LIGHT_STOP_CHANCE = 0; // No stops — all vehicles keep moving
 const AUTO_RELEASE_MS = [45000, 120000]; // Ambulance waits 45s–120s before release
 const ROUTE_RETRY_MS = [2000, 4000];
@@ -184,12 +161,6 @@ const clampToIsrael = (lat, lng) => {
 const randomMsBetween = (minMax) => {
   const [min, max] = minMax;
   return Math.floor(min + Math.random() * (max - min));
-};
-
-export const moveUnitRandomly = (lat, lng) => {
-  const nextLat = lat + (Math.random() - 0.5) * PATROL_STEP_DELTA;
-  const nextLng = lng + (Math.random() - 0.5) * PATROL_STEP_DELTA;
-  return clampToIsrael(nextLat, nextLng);
 };
 
 // Land-safe boundaries for unit spawning (avoiding coastlines)
@@ -328,6 +299,14 @@ export const useFieldIncidentStore = create((set, get) => ({
   // this can't be inferred from majorIncident.status in that branch — see
   // setFieldCommandData below, which is the only setter for this field.
   fieldCommandStatus: null,
+  // Raw GET /api/field-commands/{fieldId}/ response (FieldCommandSerializer
+  // shape) for the real FieldCommand currently loaded — the single source the
+  // field dashboard's FieldCommandSummaryView reads from, so it shows exactly
+  // what the regional/war-room dashboard shows for the same post (assigned
+  // incidents, attached forces, operational notes, phase). null in
+  // ROUTINE/SIMULATION (drill) modes. Set only by setFieldCommandData,
+  // cleared by reset().
+  fieldCommandSummary: null,
   sectors: [],
   taskGroups: [],
   events: [],
@@ -407,11 +386,20 @@ export const useFieldIncidentStore = create((set, get) => ({
   // separately (mirrors SituationOverview.jsx's own self-fetch pattern for
   // perimeter) and calls setSectors/setTaskGroups/setEvents afterward.
   setFieldCommandData: (fieldCommandData) => set(() => {
+    // Common to both branches: keep the raw serializer payload so
+    // FieldCommandSummaryView can render the assigned incidents / forces /
+    // notes exactly as the war-room panel does. Escalation (LIVE) does NOT
+    // replace this — an escalated post still has its own linked incidents and
+    // attached forces to show alongside the MajorIncident's sectors/tasks.
+    const shared = {
+      fieldCommandStatus: fieldCommandData?.status ?? null,
+      fieldCommandSummary: fieldCommandData ?? null,
+    };
     const mi = fieldCommandData?.major_incident;
     if (mi) {
       return {
+        ...shared,
         mode: 'LIVE',
-        fieldCommandStatus: fieldCommandData?.status ?? null,
         majorIncident: {
           id: mi.id,
           title: mi.title,
@@ -425,8 +413,8 @@ export const useFieldIncidentStore = create((set, get) => ({
       };
     }
     return {
+      ...shared,
       mode: 'FIELD_COMMAND',
-      fieldCommandStatus: fieldCommandData?.status ?? null,
       // FieldCommand-shaped stand-in — no real MajorIncident id, so
       // getMajorIncidentPerimeter/etc. must never be called for this
       // majorIncident.id (SituationOverview.jsx's own perimeter fetch is
@@ -1777,6 +1765,7 @@ export const useFieldIncidentStore = create((set, get) => ({
     set({
       majorIncident: null,
       fieldCommandStatus: null,
+      fieldCommandSummary: null,
       sectors: [],
       taskGroups: [],
       events: [],
@@ -1789,79 +1778,6 @@ export const useFieldIncidentStore = create((set, get) => ({
       error: null,
       filterCategory: null,
       taskStatusFilter: 'all',
-      mode: 'ROUTINE',
-      simulationType: null,
-      simulationStep: 0,
-    });
-  },
-
-  // Helper function to generate routine baseline data
-  generateRoutineData: () => {
-    const routineIncident = {
-      id: 1,
-      title: 'Routine Operations',
-      incident_type: 'ROUTINE',
-      status: 'ACTIVE',
-      estimated_casualties: 0,
-      confirmed_deaths: 0,
-      displaced_persons: 0,
-      radius_meters: 5000,
-      location_lat: 31.77,
-      location_lng: 35.22,
-    };
-
-    const routineSectors = [
-      {
-        name: 'North Sector',
-        status: 'ACTIVE',
-        hazard_level: 'LOW',
-        hazard_description: 'Normal operations - monitoring traffic and weather',
-        units_deployed: 3,
-        personnel_count: 9,
-      },
-      {
-        name: 'South Sector',
-        status: 'ACTIVE',
-        hazard_level: 'LOW',
-        hazard_description: 'Routine patrols and community engagement',
-        units_deployed: 2,
-        personnel_count: 6,
-      },
-    ];
-
-    const routineTasks = [
-      {
-        title: 'Daily Equipment Check',
-        description: 'Standard equipment inspection and maintenance',
-        category: 'OPERATIONS',
-        priority: 'LOW',
-        status: 'COMPLETED',
-        progress_percent: 100,
-        assigned_units: 1,
-      },
-      {
-        title: 'Community Outreach',
-        description: 'Fire safety education at local schools',
-        category: 'OPERATIONS',
-        priority: 'LOW',
-        status: 'IN_PROGRESS',
-        progress_percent: 60,
-        assigned_units: 2,
-      },
-    ];
-
-    // Generate diverse routine events (compat fields included)
-    const routineEvents = [generateRoutineEvent(), generateRoutineEvent(), generateRoutineEvent()];
-
-    const resetUnits = createRoutineUnits();
-
-    set({
-      majorIncident: routineIncident,
-      sectors: routineSectors,
-      taskGroups: routineTasks,
-      events: routineEvents,
-      routineUnits: resetUnits,
-      units: resetUnits,
       mode: 'ROUTINE',
       simulationType: null,
       simulationStep: 0,
@@ -2177,6 +2093,8 @@ if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       simulationType: state.simulationType,
       simulationStep: state.simulationStep,
       majorIncident: state.majorIncident,
+      fieldCommandStatus: state.fieldCommandStatus,
+      fieldCommandSummary: state.fieldCommandSummary,
       sectors: state.sectors,
       taskGroups: state.taskGroups,
       events: state.events,

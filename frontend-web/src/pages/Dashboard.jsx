@@ -11,6 +11,7 @@ import { IncidentList } from '../components/IncidentList.jsx';
 import { MapView } from '../components/MapView.jsx';
 import { IncidentDetailsPanel } from '../components/IncidentDetailsPanel.jsx';
 import { FieldCommandDetailsPanel } from '../components/FieldCommandDetailsPanel.jsx';
+import { SelectedUnitPanel } from '../components/SelectedUnitPanel.jsx';
 import { EventFeed } from '../components/EventFeed.jsx';
 import * as api from '../api/client.js';
 
@@ -107,6 +108,7 @@ export default function Dashboard() {
     selectedIncidentId,
     setSelectedIncident,
     selectedUnitId,
+    setSelectedUnit,
     selectedUnitIds,
     units,
     onlineUnits,
@@ -176,27 +178,37 @@ export default function Dashboard() {
   const [closeFieldReason, setCloseFieldReason] = useState('');
   const [closeFieldRole, setCloseFieldRole] = useState('COMMAND_CENTER');
 
-  // Mutual exclusion: selecting either entity clears the other's
-  // selection, since both render as position: fixed side panels occupying
-  // the same screen real estate — having both selected used to mean the
-  // Incident panel silently rendered on top of the (still fully mounted)
-  // FieldCommand panel underneath. Centralized here via effects watching
-  // both pieces of state, rather than patched into every individual call
-  // site of setSelectedIncident (IncidentList.jsx, MapView.jsx's incident
-  // marker clicks, the empty-map-click/Escape/X dismiss paths inside
-  // IncidentDetailsPanel.jsx) or handleFieldCommandSelect (MapView.jsx's
-  // field-command marker clicks) — this way every existing and future
-  // entry point is covered automatically, not just the ones enumerated
-  // today. Each effect only acts when its own state became truthy, so
-  // clearing one via the other (setting it to null) never re-triggers the
-  // opposite effect — no infinite loop.
+  // Mutual exclusion between the three map-driven selections — a selected
+  // incident, a selected field command, and a selected vehicle (unit). All
+  // three drive side panels competing for the same screen space, and only
+  // one should ever be shown at once: picking any one clears the other two.
+  // Centralized here via effects watching each piece of state, rather than
+  // patched into every individual call site (IncidentList.jsx, MapView.jsx's
+  // incident / field-command / unit marker clicks, the empty-map-click /
+  // Escape / X dismiss paths) — every existing and future entry point is
+  // covered automatically. Each effect only acts when its OWN state became
+  // truthy and only nulls the others (whose effects are themselves guarded
+  // on truthiness), so the clears never cascade into a loop.
   useEffect(() => {
-    if (selectedIncidentId) setSelectedFieldCommand(null);
-  }, [selectedIncidentId]);
+    if (selectedIncidentId) {
+      setSelectedFieldCommand(null);
+      setSelectedUnit(null);
+    }
+  }, [selectedIncidentId, setSelectedUnit]);
 
   useEffect(() => {
-    if (selectedFieldCommand) setSelectedIncident(null);
-  }, [selectedFieldCommand, setSelectedIncident]);
+    if (selectedFieldCommand) {
+      setSelectedIncident(null);
+      setSelectedUnit(null);
+    }
+  }, [selectedFieldCommand, setSelectedIncident, setSelectedUnit]);
+
+  useEffect(() => {
+    if (selectedUnitId) {
+      setSelectedIncident(null);
+      setSelectedFieldCommand(null);
+    }
+  }, [selectedUnitId, setSelectedIncident]);
 
   // Load the selected control-center name from localStorage on mount
   useEffect(() => {
@@ -625,6 +637,41 @@ export default function Dashboard() {
     }
   };
 
+  // Missions — both API calls return the full FieldCommandSerializer shape,
+  // so we set it straight back with no extra GET (same pattern the field
+  // dashboard uses for its live refresh).
+  const handleCreateFieldMission = async (payload) => {
+    if (!selectedFieldCommand?.id || !payload?.title) return;
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      const updatedSummary = await api.createFieldMission(selectedFieldCommand.id, payload);
+      setFieldCommandSummary(updatedSummary);
+      await refreshFieldCommands();
+    } catch (error) {
+      console.error('Failed to create mission:', error);
+      setFieldCommandError(error?.response?.data?.detail || 'Failed to create mission.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
+  };
+
+  const handleUpdateFieldMission = async (missionId, payload) => {
+    if (!selectedFieldCommand?.id || !missionId) return;
+    setFieldCommandLoading(true);
+    setFieldCommandError('');
+    try {
+      const updatedSummary = await api.updateFieldMission(selectedFieldCommand.id, missionId, payload);
+      setFieldCommandSummary(updatedSummary);
+      await refreshFieldCommands();
+    } catch (error) {
+      console.error('Failed to update mission:', error);
+      setFieldCommandError(error?.response?.data?.detail || 'Failed to update mission.');
+    } finally {
+      setFieldCommandLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!isCreateFieldOpen) return;
     const handleEscape = (event) => {
@@ -992,59 +1039,7 @@ export default function Dashboard() {
 
         {/* Right: Details + Events */}
         <div className="content-right">
-          {selectedUnit && (
-            <div
-              style={{
-                background: 'rgba(8, 18, 35, 0.92)',
-                border: '1px solid #2563eb',
-                borderRadius: '10px',
-                padding: '14px',
-                marginBottom: '12px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <div>
-                  <div style={{ fontSize: '0.95rem', fontWeight: '700' }}>Selected Vehicle</div>
-                  <div style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Click a unit on the map to inspect it</div>
-                </div>
-                <span style={{ background: '#2563eb', color: '#fff', borderRadius: '999px', padding: '4px 10px', fontSize: '0.75rem' }}>
-                  {selectedUnit.type || 'Unit'}
-                </span>
-              </div>
-              <div style={{ color: '#e2e8f0', fontSize: '0.95rem', fontWeight: '600' }}>{selectedUnit.name || `Unit ${selectedUnit.id}`}</div>
-              <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px' }}>
-                <div style={{ background: '#0f172a', padding: '10px', borderRadius: '10px', border: '1px solid #334155' }}>
-                  <div style={{ color: '#94a3b8', fontSize: '0.72rem', textTransform: 'uppercase' }}>Assigned</div>
-                  <div style={{ marginTop: '4px', color: '#fff', fontWeight: '700' }}>{selectedUnit.assignedTo ? 'Yes' : 'No'}</div>
-                </div>
-                <div style={{ background: '#0f172a', padding: '10px', borderRadius: '10px', border: '1px solid #334155' }}>
-                  <div style={{ color: '#94a3b8', fontSize: '0.72rem', textTransform: 'uppercase' }}>Destination</div>
-                  <div style={{ marginTop: '4px', color: '#fff', fontWeight: '700' }}>
-                    {selectedUnitDestination}
-                  </div>
-                </div>
-              </div>
-              <div style={{ marginTop: '10px', color: '#94a3b8', fontSize: '0.85rem' }}>
-                Status: {selectedUnit.status || 'Unknown'}
-              </div>
-            </div>
-          )}
-          {!selectedFieldCommand && (
-            <div
-              style={{
-                background: 'rgba(15, 23, 42, 0.7)',
-                border: '1px solid #334155',
-                borderRadius: '10px',
-                padding: '12px',
-                marginBottom: '12px',
-              }}
-            >
-              <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Field Command Overview</h3>
-              <div style={{ color: '#94a3b8', marginTop: '8px', fontSize: '0.85rem' }}>
-                Select a field command marker on the map or click "Open Command" in the marker popup to assign forces.
-              </div>
-            </div>
-          )}
+          <SelectedUnitPanel unit={selectedUnit} destination={selectedUnitDestination} />
           <FieldCommandDetailsPanel
             selectedFieldCommand={selectedFieldCommand}
             fieldCommandSummary={fieldCommandSummary}
@@ -1061,6 +1056,8 @@ export default function Dashboard() {
             onCloseFieldCommand={handleCloseFieldCommand}
             onLinkIncident={handleAssignIncidentToField}
             onAssignUnit={handleAssignUnitToField}
+            onCreateMission={handleCreateFieldMission}
+            onUpdateMission={handleUpdateFieldMission}
           />
           {showEventFeed ? (
             <EventFeed />

@@ -38,7 +38,9 @@
   - Deliberately NOT persisted: `selectedIncidentId` (so a closed/dismissed detail panel never silently reopens after refresh), `incidents`/`units`/`events` (always re-fetched from the API on load).
 
 #### `src/store/fieldIncident.js` (Field Incident Command Dashboard + Field Command Post)
-State: `majorIncident`, `fieldCommandStatus`, `sectors`, `taskGroups`, `events`, `incidents`, `routineUnits`, `units`, `mode`, `simulationType`, `simulationStep`, `fieldId`, `perimeterVersion`, plus UI/filter state.
+State: `majorIncident`, `fieldCommandStatus`, `fieldCommandSummary`, `sectors`, `taskGroups`, `events`, `incidents`, `routineUnits`, `units`, `mode`, `simulationType`, `simulationStep`, `fieldId`, `perimeterVersion`, plus UI/filter state.
+
+**`fieldCommandSummary`** holds the raw `GET /api/field-commands/{fieldId}/` payload (FieldCommandSerializer shape) for the loaded real post — the single source the field dashboard's `FieldCommandAssignmentsPanel` reads (assigned incidents / forces / missions), so it shows exactly what the war-room shows for that post. Set only by `setFieldCommandData`, cleared by `reset()`. `null` in ROUTINE/SIMULATION.
 
 **`mode` is a 4-way enum: `ROUTINE | SIMULATION | LIVE | FIELD_COMMAND`.** `LIVE` means a real `MajorIncident` has gone live; `FIELD_COMMAND` means a real `FieldCommand` post is loaded that has *not* escalated to a MajorIncident (its `majorIncident` state is a FieldCommand-shaped stand-in with `id: null`, so perimeter calls never fire against it). `fieldCommandStatus` is tracked separately from `majorIncident.status` since `FieldCommand` (ACTIVE/CLOSED) and `MajorIncident` (DECLARED/ACTIVE/STABILIZING/RECOVERY) use non-overlapping status vocabularies.
 
@@ -48,9 +50,11 @@ State: `majorIncident`, `fieldCommandStatus`, `sectors`, `taskGroups`, `events`,
 
 **Storage**: `localStorage['fieldId']` (durable), `sessionStorage['ecm-dispatch-assignments']` (session-scoped), `BroadcastChannel('field-incident-sync')` for cross-tab sync.
 
-### Real-Time Connection (SSE) — regional dashboard only
+### Real-Time Connection (SSE)
 
-Located in `src/services/realtime.js` (`RealtimeService`, wraps `EventSource`). **`FieldIncidentDashboard.jsx` has no live SSE connection** — `connectToFieldIncidentStream()` exists in `api/client.js` but isn't currently called from that page.
+**Regional dashboard:** `src/services/realtime.js` (`RealtimeService`, wraps `EventSource`) on `/api/updates/stream/`.
+
+**Field Incident Command dashboard:** connects to its own stream, `/api/field/updates/stream/` (`connectToFieldIncidentStream()`), a separate channel. It consumes the legacy `incident_update` shape *and* the `field_command_*` actions the backend relays onto this stream (see "Central ↔ field real-time sync" above) — on a matching `field_command_id` it silently re-fetches the post so its Central Command panel + typed timeline entries track the war-room live. `fieldId` / the re-fetch fn are held in refs so the stream isn't re-subscribed on every field switch.
 
 **Duplicate-connection bug fixed (`dc2f0ef`):** React Strict Mode's dev-only double mount→cleanup→mount could leave two `EventSource` connections open simultaneously. Fixed in `Dashboard.jsx`'s data-init `useEffect` with:
 1. A `let cancelled = false` closure flag checked immediately before `new RealtimeService(...).connect()`, so the first (discarded) Strict-Mode pass's cleanup can bail out before it ever opens a connection.
@@ -61,16 +65,31 @@ Located in `src/services/realtime.js` (`RealtimeService`, wraps `EventSource`). 
 Dashboard.jsx (Regional)
 ├── KPICards, IncidentList, MapView, EventFeed, FilterBar
 ├── IncidentDetailsPanel   (built on shared SidePanel; hides "Close Incident" once CLOSED)
-└── FieldCommandDetailsPanel  ← NEW (built on shared SidePanel)
-    ├── Link-Incident list — excludes incidents already linked or CLOSED
-    └── Close Field Command Post form (reason + FIELD_OPERATOR/COMMAND_CENTER)
+└── FieldCommandDetailsPanel  (built on shared SidePanel) — tabs: Overview / Assign / Missions / Close
+    ├── Overview  → FieldCommandSummaryView (shared, read-only)
+    ├── Assign    → link incidents / attach forces (excludes already-linked or CLOSED)
+    ├── Missions  → FieldCommandMissionsTab — create a mission, set status/assignee
+    └── Close     → Close Field Command Post form (reason + FIELD_OPERATOR/COMMAND_CENTER)
 
-SidePanel  ← NEW — generic right-side panel shell, extracted so both panels above share it
+Selecting a unit / an incident / a field command on the regional map is mutually
+exclusive (three effects in Dashboard.jsx) — the "Selected Vehicle" card closes
+when any other selection is made or the empty map is clicked.
+
+SidePanel — generic right-side panel shell shared by both panels above.
+FieldCommandSummaryView — shared read-only render of a post's incidents / forces /
+  missions / notes / metrics (used by the war-room Overview tab AND the field
+  dashboard, so the two never drift). `utils/agencyMeta.js` = shared POLICE/FIRE/
+  EMS/HOMEFRONT icon+colour palette (`getUnitTypeMeta` / `getIncidentChannelMeta`,
+  optional 2nd-arg fallback) — also used by MapView.jsx + IncidentList.jsx.
 
 FieldIncidentDashboard.jsx
-├── SituationOverview  — fetches the real Perimeter when mode === 'LIVE'
-├── SectorMap, TaskGroupPanel, OperationalTimeline
-└── PerimeterMapPicker  ← NEW — Leaflet click-to-draw polygon tool; emits ordered
+├── FieldCommandAssignmentsPanel  ← NEW — "Central Command" panel (tabbed:
+│     Incidents / Forces / Missions), first in the left column so it's visible
+│     without scrolling; rows come from FieldCommandSummaryView
+├── SituationOverview  — fetches the real Perimeter when mode === 'LIVE' (compacted CSS)
+├── SectorMap, TaskGroupPanel, OperationalTimeline  — timeline now shows typed
+│     entries for central-room assignments/missions (NOTE_KIND_META)
+└── PerimeterMapPicker  — Leaflet click-to-draw polygon tool; emits ordered
                            {lat,lng}[] which the page POSTs via submitMajorIncidentPerimeter()
 ```
 
@@ -89,7 +108,9 @@ These replaced the mock data generator entirely for the regional dashboard (Aug 
 - **`Incident`** — explicit forward-only state machine (`TRANSITIONS`): `OPEN → PENDING → EN_ROUTE → ON_SCENE → RESOLVED → CLOSED`, plus a legacy `IN_PROGRESS` path for rows written by the mobile-dispatch bridge. `CLOSED` is reachable only via an explicit Commander action and always requires `closed_reason` + `closed_by`. A field unit can resolve an incident only once every assigned `Task` is DONE/CANCELLED; a Commander can always override.
 - **`Unit`** — `is_online` is an explicit flag set only by `/api/units/claim/` or `/heartbeat/`, never true by default. `is_actively_online` is a computed property (`is_online AND last_seen within 60s`) — no background job flips it, so a unit that stops heartbeating simply stops reporting online at read time.
 - **`Task`** — terminal once DONE/CANCELLED; only a Commander can CANCEL.
-- **`FieldCommand` / `FieldCommandNote`** (NEW) — the real "Field Command Post" feature (right-click "Open Field Command Post" on the regional map). Closing a post cascades: releases every assigned `Unit.field_command`, force-closes every linked `Incident`.
+- **`FieldCommand` / `FieldCommandNote` / `FieldCommandMission`** (NEW) — the real "Field Command Post" feature (right-click "Open Field Command Post" on the regional map). Closing a post cascades: releases every assigned `Unit.field_command`, force-closes every linked `Incident`.
+  - **`FieldCommandNote.kind`** (`NOTE | INCIDENT_LINKED | FORCE_ASSIGNED | MISSION | STATUS`) — plain operator notes are `NOTE`; the other kinds are auto-logged by the backend whenever the central room links an incident / attaches a force / creates or advances a mission, so the field command's own Operational Timeline reflects everything it receives. Rendered with a distinct icon/type on the field dashboard (`NOTE_KIND_META` in `FieldIncidentDashboard.jsx`).
+  - **`FieldCommandMission`** — a titled tasking the war-room gives a post (`title`, `details`, `status` = `OPEN | IN_PROGRESS | DONE`, optional `assigned_unit` — which must already be attached to the post). Independent of `Incident`/`Task`. Managed from the war-room panel's **Missions** tab; shown read-only on the field dashboard.
 - **`MajorIncident` / `Sector` / `TaskGroup` / `Perimeter`** (NEW real models) — back the "Go Live" flow, declared from a real `Incident` by a Commander. Entirely separate from the mock `field_incident_*` endpoints, which are untouched.
 
 ### Unit Claim / Heartbeat / Disconnect
@@ -112,12 +133,18 @@ A routing-order regression was caught and regression-tested (`UnitHeartbeatRouti
 ### Field Command Post API
 
 ```
-GET/POST /api/field-commands/                    — lookup by field_key (public id), not pk
-POST     /api/field-commands/<id>/assign-unit/
-POST     /api/field-commands/<id>/assign-incident/
+GET/POST /api/field-commands/                     — lookup by field_key (public id), not pk
+POST     /api/field-commands/<id>/assign-unit/     — + logs a FORCE_ASSIGNED note
+POST     /api/field-commands/<id>/assign-incident/ — + logs an INCIDENT_LINKED note
+GET/POST /api/field-commands/<id>/missions/        — list / create missions (POST logs a MISSION note)
+PATCH    /api/field-commands/<id>/missions/<mid>/  — update status / assignee / title / details
 PATCH    /api/field-commands/<id>/metrics/
-POST     /api/field-commands/<id>/close/          — cascades: releases units, closes incidents
+POST     /api/field-commands/<id>/close/           — cascades: releases units, closes incidents
 ```
+
+Every mission / assignment write returns the full `FieldCommandSerializer` shape (now also carrying `missions[]` and `operational_notes[].kind`), so the caller refreshes its panel with no extra GET.
+
+**Central ↔ field real-time sync.** `_broadcast_realtime()` in `views.py` relays the `field_command_incident_assigned` / `field_command_unit_assigned` / `field_command_closed` / `field_command_mission_created` / `field_command_mission_updated` actions (`_FIELD_DASHBOARD_RELAYED_ACTIONS`) onto the Field Incident Command dashboard's **own** SSE stream (`/api/field/updates/stream/` — a separate channel from `/api/updates/stream/`). An open field dashboard sees the matching `field_command_id` and silently re-fetches (`applyFieldCommandData`), so its assigned incidents / forces / missions / status stay in lockstep with what the war-room shows for that post — no reload. The war-room's SSE handler already consumed these on `/api/updates/stream/`.
 
 ### Major Incident "Go Live" API
 

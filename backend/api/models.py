@@ -370,9 +370,22 @@ class FieldCommand(models.Model):
 
 
 class FieldCommandNote(models.Model):
+    class Kind(models.TextChoices):
+        # A plain operator note (the original behaviour — still the default).
+        NOTE = "NOTE", "Note"
+        # Auto-logged entries for central-room actions on this post, so the
+        # field command's Operational Timeline reflects everything it
+        # receives. Rendered with a distinct icon/type on the frontend
+        # (see buildFieldCommandNoteEvents in FieldIncidentDashboard.jsx).
+        INCIDENT_LINKED = "INCIDENT_LINKED", "Incident Linked"
+        FORCE_ASSIGNED = "FORCE_ASSIGNED", "Force Assigned"
+        MISSION = "MISSION", "Mission"
+        STATUS = "STATUS", "Status Change"
+
     field_command = models.ForeignKey(
         FieldCommand, related_name="notes", on_delete=models.CASCADE)
     message = models.TextField()
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.NOTE)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -380,6 +393,41 @@ class FieldCommandNote(models.Model):
 
     def __str__(self):
         return f"Note on {self.field_command_id}: {self.message[:40]}"
+
+
+class FieldCommandMission(models.Model):
+    """
+    A tasking the central/war-room command gives to a field command post —
+    a titled objective, optionally assigned to one of the post's own forces.
+    Independent of Incident/Task (those are incident-scoped); this is the
+    post's own to-do list. Shown on both the regional dashboard's field
+    command panel (Missions tab) and the field command's own dashboard.
+    """
+    class Status(models.TextChoices):
+        OPEN = "OPEN", "Open"
+        IN_PROGRESS = "IN_PROGRESS", "In Progress"
+        DONE = "DONE", "Done"
+
+    field_command = models.ForeignKey(
+        FieldCommand, related_name="missions", on_delete=models.CASCADE)
+    title = models.CharField(max_length=200)
+    details = models.TextField(blank=True, default="")
+    # The force responsible for this mission. SET_NULL (not CASCADE) so a
+    # mission survives its unit being detached/removed — it just becomes
+    # unassigned, same audit-trail-FK convention as Unit.field_command.
+    assigned_unit = models.ForeignKey(
+        Unit, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="field_missions")
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.OPEN)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Mission for {self.field_command_id}: {self.title[:40]} ({self.status})"
 
 
 # ============================================

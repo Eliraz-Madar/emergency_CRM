@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import { SidePanel } from './SidePanel.jsx';
+import { FieldCommandSummaryView } from './FieldCommandSummaryView.jsx';
+import { FieldCommandMissionsTab } from './FieldCommandMissionsTab.jsx';
+import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
 
 /**
  * FieldCommand detail panel — extracted from Dashboard.jsx's inline
@@ -39,6 +42,8 @@ export function FieldCommandDetailsPanel({
   onCloseFieldCommand,
   onLinkIncident,
   onAssignUnit,
+  onCreateMission,
+  onUpdateMission,
 }) {
   const [activeTab, setActiveTab] = useState('overview');
 
@@ -48,22 +53,10 @@ export function FieldCommandDetailsPanel({
     ? incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED')
     : [];
 
-  // Same POLICE/FIRE/EMS vehicle palette used everywhere else (MapView.jsx's
-  // point-dispatch markers, IncidentList.jsx's row icons) — a unit's own
-  // `type` field (backend Unit.UnitType: Police/Fire/EMS/HomeFront) or an
-  // incident's `channel` field key into it. Previously this panel hardcoded
-  // 🚓 as a generic "forces" icon (wrong for EMS/Fire units) and 🚨 as a
-  // generic incident icon regardless of type.
-  const UNIT_TYPE_META = {
-    POLICE: { emoji: '🚓', color: '#3b82f6' },
-    FIRE: { emoji: '🚒', color: '#ef4444' },
-    EMS: { emoji: '🚑', color: '#10b981' },
-    HOMEFRONT: { emoji: '🏠', color: '#6b7280' },
-  };
-  const getUnitMeta = (unit) =>
-    UNIT_TYPE_META[(unit?.type || '').toUpperCase()] || { emoji: '🚨', color: '#94a3b8' };
-  const getIncidentMeta = (incident) =>
-    UNIT_TYPE_META[(incident?.channel || '').toUpperCase()] || { emoji: '🚨', color: '#94a3b8' };
+  // Shared POLICE/FIRE/EMS/HOMEFRONT palette — see utils/agencyMeta.js.
+  // The read-only Overview lists get the same icons via FieldCommandSummaryView;
+  // getUnitTypeMeta / getIncidentChannelMeta below are for the Assign tab's
+  // linkable lists.
 
   return (
     <SidePanel title="Field Command Overview" onClose={onClose}>
@@ -98,9 +91,10 @@ export function FieldCommandDetailsPanel({
       {/* ── Tab Bar ── */}
       <div style={{ display: 'flex', borderBottom: '1px solid #1e293b', flexShrink: 0, marginTop: '10px' }}>
         {[
-          { id: 'overview', label: '📋 Overview' },
-          { id: 'assign',   label: '🔗 Assign'   },
-          { id: 'close',    label: '⚙ Close'     },
+          { id: 'overview',  label: '📋 Overview' },
+          { id: 'assign',    label: '🔗 Assign'   },
+          { id: 'missions',  label: '🎯 Missions' },
+          { id: 'close',     label: '⚙ Close'     },
         ].map(({ id, label }) => (
           <button
             key={id}
@@ -137,89 +131,26 @@ export function FieldCommandDetailsPanel({
         }}
       >
 
-        {/* ── Overview tab: read-only status ── */}
+        {/* ── Overview tab: read-only status ──
+            Rendered by the shared FieldCommandSummaryView so this panel and
+            the field command's own dashboard (FieldIncidentDashboard) never
+            drift apart. All sections shown here; the field dashboard reuses
+            the same component with a narrower `sections` list. */}
         {activeTab === 'overview' && (
-          <>
-            {fieldCommandSummary && (
-              <>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '0.8rem', color: '#e2e8f0' }}>
-                  <div>Status: {fieldCommandSummary.status || 'ACTIVE'}</div>
-                  <div>Phase: {fieldCommandSummary.incident_phase || 'Containment'}</div>
-                  <div>Casualties: {fieldCommandSummary.casualty_count ?? 0}</div>
-                  <div>Evacuated: {fieldCommandSummary.evacuated_count ?? 0}</div>
-                </div>
+          <FieldCommandSummaryView summary={fieldCommandSummary} />
+        )}
 
-                {/* Linked Major Incident — no dedicated MajorIncident panel/
-                    selection mechanism exists anywhere in the app, so this is
-                    informational only, unlike IncidentDetailsPanel's
-                    clickable jump-to-FieldCommand link. */}
-                {fieldCommandSummary.major_incident && (
-                  <div style={{
-                    marginTop: '12px', padding: '10px', background: '#0f172a',
-                    border: '1px solid #1f2937', borderRadius: '6px',
-                  }}>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Major Incident
-                    </div>
-                    <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#f87171', marginTop: '2px' }}>
-                      {fieldCommandSummary.major_incident.title}
-                    </div>
-                    <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: '4px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                      <span>Type: {fieldCommandSummary.major_incident.incident_type}</span>
-                      <span>Status: {fieldCommandSummary.major_incident.status}</span>
-                      <span>Casualties: {fieldCommandSummary.major_incident.estimated_casualties ?? 0}</span>
-                    </div>
-                  </div>
-                )}
-
-                <div style={{ marginTop: '14px' }}>
-                  <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">📝 Operational Notes</div>
-                  {fieldCommandSummary.operational_notes?.length ? (
-                    <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
-                      {fieldCommandSummary.operational_notes.map((note, idx) => (
-                        <div key={`${note.timestamp || idx}`} style={{ fontSize: '0.78rem', padding: '4px 0' }}>
-                          <div style={{ color: '#94a3b8' }}>{note.timestamp || ''}</div>
-                          <div>{note.message || ''}</div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>No notes yet.</div>
-                  )}
-                </div>
-
-                <div style={{ marginTop: '14px' }}>
-                  <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">🚨 Assigned Incidents</div>
-                  {fieldCommandSummary.incidents?.length ? (
-                    <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
-                      {fieldCommandSummary.incidents.map((incident) => (
-                        <div key={incident.id} style={{ fontSize: '0.8rem', padding: '4px 0' }}>
-                          {getIncidentMeta(incident).emoji} {incident.title || 'Incident'}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned incidents</div>
-                  )}
-                </div>
-
-                <div style={{ marginTop: '14px' }}>
-                  <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">👥 Assigned Forces</div>
-                  {fieldCommandSummary.units?.length ? (
-                    <div style={{ maxHeight: '120px', overflowY: 'auto' }}>
-                      {fieldCommandSummary.units.map((unit) => (
-                        <div key={unit.id} style={{ fontSize: '0.8rem', padding: '4px 0' }}>
-                          {getUnitMeta(unit).emoji} {unit.name || `Unit ${unit.id}`} ({unit.type})
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No assigned forces</div>
-                  )}
-                </div>
-              </>
-            )}
-          </>
+        {/* ── Missions tab: give this post titled taskings, optionally handed
+              to one of its attached forces. ── */}
+        {activeTab === 'missions' && (
+          <FieldCommandMissionsTab
+            missions={fieldCommandSummary?.missions || []}
+            units={fieldCommandSummary?.units || []}
+            disabled={(fieldCommandSummary?.status || selectedFieldCommand?.status) === 'CLOSED'}
+            busy={fieldCommandLoading}
+            onCreateMission={onCreateMission}
+            onUpdateMission={onUpdateMission}
+          />
         )}
 
         {/* ── Assign tab: two independently-scrolling columns (Incidents | Units)
@@ -244,7 +175,7 @@ export function FieldCommandDetailsPanel({
                         <div
                           style={{ fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3, marginBottom: '3px' }}
                         >
-                          {getIncidentMeta(inc).emoji} {inc.title || `Incident ${inc.id}`}
+                          {getIncidentChannelMeta(inc).emoji} {inc.title || `Incident ${inc.id}`}
                         </div>
                         <button
                           className="feed-toggle"
@@ -271,7 +202,7 @@ export function FieldCommandDetailsPanel({
                         <div
                           style={{ fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3, marginBottom: '3px' }}
                         >
-                          {getUnitMeta(unit).emoji} {unit.name || `Unit ${unit.id}`}
+                          {getUnitTypeMeta(unit).emoji} {unit.name || `Unit ${unit.id}`}
                           {' '}
                           <span style={{ color: '#64748b' }}>
                             ({Number.isFinite(unit.distanceKm) ? `${unit.distanceKm.toFixed(1)} km` : 'No GPS'})

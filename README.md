@@ -86,7 +86,9 @@ Coordinates multiple incidents across a region, backed by real DB data (not simu
 - Details panel stays open after dispatch for continued monitoring
 - Dispatch state survives page refresh — units resume their routes automatically on reload
 - **Field Command Post**: right-click the map (or use the creation panel) to open a real command post, assign units/incidents to it, track casualty/evacuated counts, and close it — closing cascades to release its units and force-close its linked incidents
-- Interactive Leaflet map with incident, unit, and field-command-post markers
+  - **Missions**: from the post's panel (Missions tab) give it titled taskings, optionally assigned to one of its forces, with Open/In progress/Done status
+  - Everything the post receives (incident linked, force attached, mission given) is pushed live to that post's own Field Incident Command dashboard and logged to its Operational Timeline
+- Interactive Leaflet map with incident, unit, and field-command-post markers — selecting a vehicle, an incident, or a field command clears the others (one detail panel at a time)
 - Real-time updates via SSE (new incidents/units/posts appear automatically — one live connection, no duplicates)
 - KPI cards: total incidents, active, critical, available units
 - All timestamps displayed in 24-hour UTC format (DD/MM/YYYY HH:MM:SS)
@@ -98,9 +100,10 @@ Command-level management of a single large-scale incident (earthquake, missile s
 - Situation overview with casualty tracking
 - Sector-based operational map with hazard levels
 - Task group hierarchy with progress tracking
-- Operational timeline (decision trail)
+- **Central Command panel** (left column) — the incidents, forces, and missions the war-room has assigned to this post, tabbed and readable without scrolling; kept in sync live
+- Operational timeline (decision trail) — central-room assignments/missions show as distinct typed entries
 - Critical alerts and resource tracking
-- Real-time SSE simulation stream (training mode only)
+- Real-time SSE: the training-simulation stream (training mode) and live central-room updates for a real post
 - **Go Live**: declare a Major Incident from a real Incident, draw a danger-zone perimeter on the map, and create real sectors/task groups tied to it
 
 ---
@@ -162,7 +165,11 @@ curl -X POST http://localhost:8000/api/token/ \
 | GET | `/api/events/` | No | Real incident event feed (`?limit=`, `?incident_id=`) |
 | GET | `/api/updates/stream/` | No | Live SSE stream (real writes only) |
 | GET/POST | `/api/field-commands/` | Partial* | List/create Field Command Posts |
+| POST | `/api/field-commands/<id>/assign-unit/` \| `/assign-incident/` | Partial* | Attach a force / link an incident (logged to the post's timeline) |
+| GET/POST | `/api/field-commands/<id>/missions/` | Partial* | List / create missions for a post |
+| PATCH | `/api/field-commands/<id>/missions/<mid>/` | Partial* | Update a mission's status / assignee / text |
 | POST | `/api/field-commands/<id>/close/` | Partial* | Close a post (cascades to units/incidents) |
+| GET | `/api/field/updates/stream/` | No | Field dashboard SSE stream (sim events + relayed central-room field-command updates) |
 | POST | `/api/major-incidents/go-live/` | Partial* | Declare a real MajorIncident from an Incident |
 | GET/POST | `/api/major-incidents/<id>/perimeter/` | Partial* | Get/submit the danger-zone perimeter |
 | GET/POST | `/api/major-incidents/<id>/sectors/` | Partial* | Get/create Sectors |
@@ -216,13 +223,16 @@ frontend-web/
             KPICards.jsx
             IncidentList.jsx
             IncidentDetailsPanel.jsx    # Built on SidePanel
-            FieldCommandDetailsPanel.jsx  # Built on SidePanel
+            FieldCommandDetailsPanel.jsx  # Built on SidePanel; tabs Overview/Assign/Missions/Close
+            FieldCommandSummaryView.jsx   # Shared read-only post summary (war-room + field dash)
+            FieldCommandMissionsTab.jsx   # War-room "Missions" tab (create / status / assignee)
             SidePanel.jsx               # Shared right-side panel shell
             MapView.jsx
             EventFeed.jsx
             FilterBar.jsx
             field-incident/
                 SituationOverview.jsx
+                FieldCommandAssignmentsPanel.jsx  # "Central Command" tabbed panel (left column)
                 SectorMap.jsx
                 TaskGroupPanel.jsx
                 OperationalTimeline.jsx
@@ -237,6 +247,7 @@ frontend-web/
         utils/
             time.js             # 24-hour timestamp formatters (en-GB locale, hour12: false)
             units.js            # Distance/nearest-available-unit helpers
+            agencyMeta.js       # Shared POLICE/FIRE/EMS icon + colour palette
     package.json
     vite.config.js
 

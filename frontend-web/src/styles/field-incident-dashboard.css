@@ -174,6 +174,97 @@
   background: var(--fi-bg-card-strong);
   box-shadow: var(--fi-card-shadow);
   border: 1px solid var(--fi-border);
+  /* Situation Overview (compact) + the Central Command panel stack here and
+     the whole column scrolls as one (overriding .dashboard-section's
+     overflow: hidden) — a single scrollbar, not two competing inner ones. */
+  overflow-y: auto;
+}
+
+/* Compact Situation Overview: the left rail is narrow and now shares space
+   with the Central Command panel, so the metric cards are tightened (they
+   were oversized for this column). Content/logic unchanged. */
+.overview-section > .situation-overview {
+  flex: 0 0 auto;
+  overflow-y: visible;
+  padding: 1.15rem 1.25rem;
+  gap: 1rem;
+}
+
+.overview-section .incident-title-section h2 { font-size: 1.15rem; }
+.overview-section .metrics-grid { gap: 0.6rem; }
+.overview-section .metric-card { padding: 0.65rem 0.75rem; gap: 0.2rem; }
+.overview-section .metric-label { font-size: 0.66rem; }
+.overview-section .metric-value { font-size: 1.3rem; }
+.overview-section .metric-sub { font-size: 0.72rem; }
+.overview-section .quick-stats { gap: 0.35rem; padding-top: 0.75rem; }
+.overview-section .stat-row { padding: 0.2rem 0; }
+.overview-section .stat-label,
+.overview-section .stat-value { font-size: 0.82rem; }
+
+/* --- Central Command panel (tabbed: Incidents / Forces / Missions) --- */
+.cc-assignments-panel {
+  flex: 0 0 auto;
+  margin: 1.15rem 1.15rem 0.35rem;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--fi-bg-card);
+  border: 1px solid var(--fi-border);
+  border-radius: 0.75rem;
+  box-shadow: var(--fi-soft-shadow);
+}
+
+.cc-assignments-panel h3 {
+  margin: 0 0 0.7rem;
+  font-size: 0.95rem;
+  color: var(--fi-text-primary);
+}
+
+.cc-assignments-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: rgba(148, 163, 184, 0.08);
+  border-radius: 9px;
+  margin-bottom: 0.9rem;
+}
+
+.cc-assignments-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 4px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fi-text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.cc-assignments-tab:hover { color: var(--fi-text-primary); }
+
+.cc-assignments-tab.active {
+  background: var(--fi-bg-card-strong);
+  color: var(--fi-text-primary);
+  box-shadow: var(--fi-soft-shadow);
+}
+
+.cc-assignments-tab-count {
+  font-size: 0.64rem;
+  font-weight: 700;
+  min-width: 17px;
+  text-align: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22);
+  color: var(--fi-text-primary);
+}
+
+.cc-assignments-tab.active .cc-assignments-tab-count {
+  background: color-mix(in srgb, var(--fi-accent) 30%, transparent);
 }
 
 .operations-section {
@@ -1265,8 +1356,12 @@
   }
 }
 
-/* Scrollbar Styling */
+/* Scrollbar Styling — one look for every scroll area in this dashboard,
+   including the left column (.overview-section) and the Central Command
+   panel's lists (.fc-scroll-area). */
 .situation-overview::-webkit-scrollbar,
+.overview-section::-webkit-scrollbar,
+.fc-scroll-area::-webkit-scrollbar,
 .sectors-grid::-webkit-scrollbar,
 .task-group-container::-webkit-scrollbar,
 .task-groups-list::-webkit-scrollbar,
@@ -1276,6 +1371,8 @@
 }
 
 .situation-overview::-webkit-scrollbar-track,
+.overview-section::-webkit-scrollbar-track,
+.fc-scroll-area::-webkit-scrollbar-track,
 .sectors-grid::-webkit-scrollbar-track,
 .task-group-container::-webkit-scrollbar-track,
 .task-groups-list::-webkit-scrollbar-track,
@@ -1286,6 +1383,8 @@
 }
 
 .situation-overview::-webkit-scrollbar-thumb,
+.overview-section::-webkit-scrollbar-thumb,
+.fc-scroll-area::-webkit-scrollbar-thumb,
 .sectors-grid::-webkit-scrollbar-thumb,
 .task-group-container::-webkit-scrollbar-thumb,
 .task-groups-list::-webkit-scrollbar-thumb,
@@ -1296,12 +1395,21 @@
 }
 
 .situation-overview::-webkit-scrollbar-thumb:hover,
+.overview-section::-webkit-scrollbar-thumb:hover,
+.fc-scroll-area::-webkit-scrollbar-thumb:hover,
 .sectors-grid::-webkit-scrollbar-thumb:hover,
 .task-group-container::-webkit-scrollbar-thumb:hover,
 .task-groups-list::-webkit-scrollbar-thumb:hover,
 .timeline-container::-webkit-scrollbar-thumb:hover,
 .operations-card::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--fi-accent) 40%, var(--fi-bg-card) 60%);
+}
+
+/* Firefox */
+.overview-section,
+.fc-scroll-area {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fi-accent) 25%, var(--fi-bg-card) 75%) var(--fi-bg-card-soft);
 }
 
 /* EVENT DETAILS & INFO BUTTON - REMOVED (entire card is now clickable) */

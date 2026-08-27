@@ -4,6 +4,8 @@ import { EventFeed } from './EventFeed.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { Shield, Flame, Ambulance, MapPin, AlertTriangle, ChevronRight } from 'lucide-react';
 import { useDashboardStore } from '../store/dashboard.js';
+import { nearestCityName } from '../utils/israelGeo.js';
+import { calculateDistanceKm } from '../utils/units.js';
 import {
   updateIncidentStatus,
   goLiveIncident,
@@ -42,18 +44,6 @@ const submitButtonStyle = {
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
-
-const getDistanceKm = (lat1, lon1, lat2, lon2) => {
-  const R = 6371;
-  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Infinity;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-};
 
 const TYPE_META = {
   POLICE: { label: 'Police', color: '#3b82f6', Icon: Shield },
@@ -322,7 +312,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       .map((u) => ({
         ...u,
         type: normalizeUnitType(u.type),
-        distance: getDistanceKm(u.location_lat, u.location_lng, incidentLat, incidentLng),
+        distance: calculateDistanceKm(u.location_lat, u.location_lng, incidentLat, incidentLng),
       }))
       .filter((u) => u.distance !== Infinity)
       .sort((a, b) => a.distance - b.distance);
@@ -496,7 +486,11 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       subtitle={(
         <>
           <MapPin size={14} style={{ marginRight: 6 }} />
-          {incident.location_name || 'Unknown location'}
+          {incident.location_name
+            || (() => {
+              const city = nearestCityName(incident.location_lat, incident.location_lng);
+              return city ? `Near ${city}` : 'Unknown location';
+            })()}
         </>
       )}
       onClose={handleClose}

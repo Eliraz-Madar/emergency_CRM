@@ -2,7 +2,6 @@
 Real-time update service using Server-Sent Events (SSE).
 Simulates live updates for the dashboard demo.
 """
-import json
 import time
 import threading
 from datetime import datetime

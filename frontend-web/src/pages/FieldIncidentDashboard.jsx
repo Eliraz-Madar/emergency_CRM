@@ -12,7 +12,7 @@
  * - Operational timeline for decision trail
  */
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useFieldIncidentStore, generateRoutineEvent } from '../store/fieldIncident';
 import {
@@ -29,6 +29,7 @@ import SectorMap from '../components/field-incident/SectorMap';
 import TaskGroupPanel from '../components/field-incident/TaskGroupPanel';
 import OperationalTimeline from '../components/field-incident/OperationalTimeline';
 import PerimeterMapPicker from '../components/field-incident/PerimeterMapPicker';
+import FieldCommandAssignmentsPanel from '../components/field-incident/FieldCommandAssignmentsPanel';
 import '../styles/field-incident-dashboard.css';
 import { formatTime, formatDateTime } from '../utils/time.js';
 
@@ -36,13 +37,39 @@ import { formatTime, formatDateTime } from '../utils/time.js';
 // — neither MajorIncident nor FieldCommand has a dedicated events/timeline
 // endpoint wired up yet, so both are rough approximations from whatever
 // timestamped data genuinely exists, not a real event log:
-// - LIVE (escalated): Sector/TaskGroup rows' own created_at/updated_at and
-//   status/hazard fields, synthesized into timeline-shaped entries.
-// - FIELD_COMMAND (not escalated): FieldCommand.operational_notes
-//   ({timestamp, message} pairs, from FieldCommandSerializer), mapped
-//   straight across — no severity/type info exists on a note, so these
-//   always render as a plain informational "Field Note" entry.
-const buildLiveTimelineEvents = (sectors, taskGroups) => {
+// - FieldCommand.operational_notes ({timestamp, message, kind} — from
+//   FieldCommandSerializer) — mapped across in BOTH modes. `kind` is set by
+//   the backend when the central room links an incident / attaches a force /
+//   assigns a mission (see FieldCommandNote.Kind) so those show as distinct,
+//   typed timeline entries; plain operator notes stay "Field Note".
+// - LIVE (escalated) also folds in the linked MajorIncident's Sector/
+//   TaskGroup rows' own created_at/updated_at + status/hazard fields,
+//   synthesized into timeline-shaped entries.
+const NOTE_KIND_META = {
+  NOTE: { event_type: 'UPDATE', title: 'Field Note' },
+  INCIDENT_LINKED: { event_type: 'ASSIGNMENT', title: 'Incident Assigned' },
+  FORCE_ASSIGNED: { event_type: 'RESOURCE_ARRIVAL', title: 'Force Attached' },
+  MISSION: { event_type: 'MISSION', title: 'Mission' },
+  STATUS: { event_type: 'STATUS_CHANGE', title: 'Status Update' },
+};
+
+const buildFieldCommandNoteEvents = (operationalNotes) => (
+  (operationalNotes || []).map((note) => {
+    const meta = NOTE_KIND_META[note.kind] || NOTE_KIND_META.NOTE;
+    return {
+      event_type: meta.event_type,
+      severity: 'INFO',
+      title: meta.title,
+      description: note.message,
+      created_at: note.timestamp,
+    };
+  })
+);
+
+const sortByCreatedAtDesc = (events) =>
+  events.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+const buildLiveTimelineEvents = (sectors, taskGroups, operationalNotes) => {
   const sectorEvents = (sectors || []).map((s) => ({
     event_type: 'STATUS_CHANGE',
     severity: s.hazard_level === 'CRITICAL' ? 'CRITICAL' : 'INFO',
@@ -57,20 +84,15 @@ const buildLiveTimelineEvents = (sectors, taskGroups) => {
     description: `${tg.status} — ${tg.progress_percent}% complete`,
     created_at: tg.updated_at || tg.created_at,
   }));
-  return [...sectorEvents, ...taskEvents].sort(
-    (a, b) => new Date(b.created_at) - new Date(a.created_at),
-  );
+  return sortByCreatedAtDesc([
+    ...buildFieldCommandNoteEvents(operationalNotes),
+    ...sectorEvents,
+    ...taskEvents,
+  ]);
 };
 
-const buildFieldCommandTimelineEvents = (operationalNotes) => (
-  (operationalNotes || []).map((note) => ({
-    event_type: 'UPDATE',
-    severity: 'INFO',
-    title: 'Field Note',
-    description: note.message,
-    created_at: note.timestamp,
-  })).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-);
+const buildFieldCommandTimelineEvents = (operationalNotes) =>
+  sortByCreatedAtDesc(buildFieldCommandNoteEvents(operationalNotes));
 
 const FieldIncidentDashboard = () => {
   const navigate = useNavigate();
@@ -125,6 +147,10 @@ const FieldIncidentDashboard = () => {
   const moveUnits = useFieldIncidentStore((s) => s.moveUnits);
   const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
   const fieldCommandStatus = useFieldIncidentStore((s) => s.fieldCommandStatus);
+  // Raw FieldCommandSerializer payload — drives the "Central Command
+  // Assignments" panel below (assigned incidents + attached forces), the same
+  // data the regional/war-room dashboard shows for this post.
+  const fieldCommandSummary = useFieldIncidentStore((s) => s.fieldCommandSummary);
   const setFieldId = useFieldIncidentStore((s) => s.setFieldId);
   const fieldId = useFieldIncidentStore((s) => s.fieldId);
   const resetFieldIncidentStore = useFieldIncidentStore((s) => s.reset);
@@ -141,6 +167,43 @@ const FieldIncidentDashboard = () => {
   const routineEventTimerRef = useRef(null);
   const movementTimerRef = useRef(null);
   const lastLoadedFieldIdRef = useRef(null);
+
+  // Fetch the real FieldCommand and push it into the store. Shared by the
+  // initial-load effect and the real-time refresh (a field_command_* event
+  // relayed from the central room), so both apply data identically — one
+  // fetch path, no duplicated mapping. Does NOT touch loading/error; the
+  // caller owns that (the initial load shows a spinner, a live refresh is
+  // silent).
+  const applyFieldCommandData = useCallback(async (targetFieldId) => {
+    const fieldCommandData = await getFieldCommand(targetFieldId);
+    if (fieldCommandData?.name) setActiveFieldName(fieldCommandData.name);
+    setFieldCommandData(fieldCommandData);
+
+    if (fieldCommandData?.major_incident) {
+      const majorIncidentId = fieldCommandData.major_incident.id;
+      const [sectors, taskGroups] = await Promise.all([
+        getMajorIncidentSectors(majorIncidentId),
+        getMajorIncidentTaskGroups(majorIncidentId),
+      ]);
+      setSectors(Array.isArray(sectors) ? sectors : []);
+      setTaskGroups(Array.isArray(taskGroups) ? taskGroups : []);
+      setEvents(buildLiveTimelineEvents(sectors, taskGroups, fieldCommandData?.operational_notes));
+    } else {
+      setSectors([]);
+      setTaskGroups([]);
+      setEvents(buildFieldCommandTimelineEvents(fieldCommandData?.operational_notes));
+    }
+  }, [setFieldCommandData, setSectors, setTaskGroups, setEvents]);
+
+  // Kept current for the SSE effect (empty deps — see its comment) so a
+  // relayed central-room update can refresh the currently-shown post without
+  // resubscribing the stream on every fieldId change.
+  const fieldIdRef = useRef(fieldId);
+  const modeRef = useRef(mode);
+  const applyFieldCommandDataRef = useRef(applyFieldCommandData);
+  useEffect(() => { fieldIdRef.current = fieldId; }, [fieldId]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { applyFieldCommandDataRef.current = applyFieldCommandData; }, [applyFieldCommandData]);
 
   const userRole = typeof window !== 'undefined' ? localStorage.getItem('userRole') : null;
   const deepLinkFieldId = searchParams.get('fieldId');
@@ -267,43 +330,35 @@ const FieldIncidentDashboard = () => {
       return;
     }
 
-    // LIVE / FIELD_COMMAND mean this effect's own real-data branch below
-    // already ran for this fieldId and populated the store (setFieldCommandData
-    // sets one of these two modes) — don't re-fetch and clobber it.
+    // NOTE: we do NOT short-circuit here on mode === 'LIVE' / 'FIELD_COMMAND'.
+    // Those modes are persistent store state that survives client-side
+    // navigation, so after viewing one FieldCommand and picking a different
+    // one in DashboardSelector, we'd arrive here with the *previous* field's
+    // mode still set. Line 260 already guaranteed lastLoadedFieldIdRef.current
+    // !== fieldId, so reaching this point means THIS field has not been
+    // loaded by this component yet — always fall through and fetch it.
+    // (The normal post-load effect re-run, triggered when setFieldCommandData
+    // flips mode, is caught by the ref check on line 260, not here.)
+    //
+    // Clear the previous field's sectors/task-groups/major-incident stand-in
+    // so no stale data leaks into the child panels while the fetch is in
+    // flight; reset() also sets loading:true, which loadInitialData clears.
     if (mode === 'LIVE' || mode === 'FIELD_COMMAND') {
-      setLoading(false);
-      lastLoadedFieldIdRef.current = fieldId;
-      return;
+      resetFieldIncidentStore();
+      setActiveFieldName('');
     }
 
     // Real data path: fetch the actual FieldCommand (GET
-    // /api/field-commands/{fieldId}/) once, use it both for the cosmetic
-    // header name and to decide LIVE (escalated to a real MajorIncident)
-    // vs FIELD_COMMAND (not escalated — no sector/task-group data exists).
+    // /api/field-commands/{fieldId}/) once via the shared applyFieldCommandData
+    // — it decides LIVE (escalated to a real MajorIncident) vs FIELD_COMMAND
+    // (not escalated) and populates sectors/task-groups/events/summary.
     // This replaces the old unconditional loadFieldIncident() call, which
     // hit the mock/fabricating GET /api/field/incident/ endpoint for every
     // real fieldId regardless of what it actually was.
     const loadInitialData = async () => {
       try {
         lastLoadedFieldIdRef.current = fieldId;
-        const fieldCommandData = await getFieldCommand(fieldId);
-        if (fieldCommandData?.name) setActiveFieldName(fieldCommandData.name);
-        setFieldCommandData(fieldCommandData);
-
-        if (fieldCommandData?.major_incident) {
-          const majorIncidentId = fieldCommandData.major_incident.id;
-          const [sectors, taskGroups] = await Promise.all([
-            getMajorIncidentSectors(majorIncidentId),
-            getMajorIncidentTaskGroups(majorIncidentId),
-          ]);
-          setSectors(Array.isArray(sectors) ? sectors : []);
-          setTaskGroups(Array.isArray(taskGroups) ? taskGroups : []);
-          setEvents(buildLiveTimelineEvents(sectors, taskGroups));
-        } else {
-          setSectors([]);
-          setTaskGroups([]);
-          setEvents(buildFieldCommandTimelineEvents(fieldCommandData?.operational_notes));
-        }
+        await applyFieldCommandData(fieldId);
         setLoading(false);
       } catch (err) {
         console.error('Failed to load field command data:', err);
@@ -313,7 +368,7 @@ const FieldIncidentDashboard = () => {
     };
 
     loadInitialData();
-  }, [fieldId, mode, isTrainingEntry, initialFieldResolutionDone, resetFieldIncidentStore, setFieldCommandData, setSectors, setTaskGroups, setEvents, setError, setLoading]);
+  }, [fieldId, mode, isTrainingEntry, initialFieldResolutionDone, resetFieldIncidentStore, applyFieldCommandData, setError, setLoading]);
 
   // Connect to real-time updates
   useEffect(() => {
@@ -360,6 +415,25 @@ const FieldIncidentDashboard = () => {
               if (update.new_event) {
                 addEvent(update.new_event);
               }
+            } else if (data.type === 'user_action' && (
+              data.action === 'field_command_incident_assigned' ||
+              data.action === 'field_command_unit_assigned' ||
+              data.action === 'field_command_closed' ||
+              data.action === 'field_command_mission_created' ||
+              data.action === 'field_command_mission_updated'
+            )) {
+              // The central room linked an incident, attached a force, gave a
+              // mission, or closed this post. These are relayed onto this
+              // stream by the backend's _broadcast_realtime
+              // (_FIELD_DASHBOARD_RELAYED_ACTIONS). Refresh silently if it's
+              // the post this dashboard is showing, so its assigned incidents
+              // / forces / missions / status stay in lockstep with the
+              // war-room view. field_command_id is the public field_key.
+              if (data.field_command_id && data.field_command_id === fieldIdRef.current) {
+                applyFieldCommandDataRef.current?.(fieldIdRef.current).catch((err) => {
+                  console.error('Failed to refresh field command after central-room update:', err);
+                });
+              }
             } else if (data.type === 'heartbeat') {
               // Keep-alive signal
             }
@@ -372,8 +446,21 @@ const FieldIncidentDashboard = () => {
           setConnectionStatus('CONNECTING');
           eventSource.close();
           reconnectTimeout = setTimeout(() => {
-            // Re-fetch events to catch anything missed during the disconnect
-            loadFieldIncident?.();
+            // Re-sync to catch anything missed during the disconnect. For a
+            // real post (LIVE / FIELD_COMMAND) re-fetch the actual
+            // FieldCommand — NOT loadFieldIncident(), which hits the
+            // fabricating GET /api/field/incident/ mock and would overwrite
+            // the real assigned incidents / forces / sectors with random
+            // demo data. loadFieldIncident() stays for the drill/legacy path.
+            if (modeRef.current === 'LIVE' || modeRef.current === 'FIELD_COMMAND') {
+              if (fieldIdRef.current) {
+                applyFieldCommandDataRef.current?.(fieldIdRef.current).catch((err) => {
+                  console.error('Failed to re-sync field command after reconnect:', err);
+                });
+              }
+            } else {
+              loadFieldIncident?.();
+            }
             connect();
           }, 2000);
         };
@@ -932,8 +1019,17 @@ const FieldIncidentDashboard = () => {
 
       {/* Main Layout */}
       <main className="dashboard-main">
-        {/* Left Column: Situation Overview */}
+        {/* Left Column: Central Command panel + Situation Overview.
+            The Central Command panel is first / always visible without
+            scrolling — it's what this post receives from the war room
+            (incidents, forces, missions), the same data the regional
+            dashboard shows for it on the map (shared FieldCommandSummaryView
+            rows). Real posts only; a drill has no FieldCommand behind it.
+            Situation Overview (metrics/alerts) sits below as reference. */}
         <section className="dashboard-section overview-section">
+          {(mode === 'FIELD_COMMAND' || mode === 'LIVE') && fieldCommandSummary && (
+            <FieldCommandAssignmentsPanel summary={fieldCommandSummary} />
+          )}
           <SituationOverview />
         </section>
 

@@ -2,7 +2,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from .models import (
     Incident, Task, Unit, IncidentEvent, ReportMedia,
-    FieldCommand, FieldCommandNote,
+    FieldCommand, FieldCommandNote, FieldCommandMission,
     MajorIncident, Sector, TaskGroup, Perimeter,
 )
 from .permissions import effective_role
@@ -224,14 +224,44 @@ class IncidentEventSerializer(serializers.ModelSerializer):
 class FieldCommandNoteSerializer(serializers.ModelSerializer):
     class Meta:
         model = FieldCommandNote
-        fields = ["id", "message", "created_at"]
+        fields = ["id", "message", "kind", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+
+class FieldCommandMissionSerializer(serializers.ModelSerializer):
+    assigned_unit_name = serializers.CharField(
+        source="assigned_unit.name", read_only=True, default=None)
+    assigned_unit_type = serializers.CharField(
+        source="assigned_unit.type", read_only=True, default=None)
+
+    class Meta:
+        model = FieldCommandMission
+        fields = [
+            "id", "title", "details", "status",
+            "assigned_unit", "assigned_unit_name", "assigned_unit_type",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_assigned_unit(self, unit):
+        """A mission can only be handed to a force that is actually attached
+        to this field command post."""
+        if unit is None:
+            return unit
+        field_command = self.context.get("field_command")
+        if field_command is not None and unit.field_command_id != field_command.id:
+            raise serializers.ValidationError(
+                "That force is not attached to this field command.")
+        return unit
 
 
 class FieldCommandIncidentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Incident
-        fields = ["id", "title", "status", "priority"]
+        # `channel` (Police/Fire/EMS/...) lets the Field Command panels show
+        # the right agency icon for each linked incident, same as the
+        # regional dashboard's incident list — see utils/agencyMeta.js.
+        fields = ["id", "title", "status", "priority", "channel"]
 
 
 class FieldCommandUnitSerializer(serializers.ModelSerializer):
@@ -249,6 +279,7 @@ class FieldCommandSerializer(serializers.ModelSerializer):
     operational_notes = serializers.SerializerMethodField()
     incidents = FieldCommandIncidentSerializer(many=True, read_only=True)
     units = FieldCommandUnitSerializer(many=True, read_only=True)
+    missions = FieldCommandMissionSerializer(many=True, read_only=True)
     incidents_count = serializers.SerializerMethodField()
     units_count = serializers.SerializerMethodField()
     # Write-only: append an operational note in the same create/update request
@@ -282,6 +313,7 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             "operational_notes",
             "incidents",
             "units",
+            "missions",
             "incidents_count",
             "units_count",
             "note",
@@ -296,7 +328,11 @@ class FieldCommandSerializer(serializers.ModelSerializer):
 
     def get_operational_notes(self, obj):
         return [
-            {"timestamp": note.created_at.isoformat(), "message": note.message}
+            {
+                "timestamp": note.created_at.isoformat(),
+                "message": note.message,
+                "kind": note.kind,
+            }
             for note in obj.notes.all()
         ]
 

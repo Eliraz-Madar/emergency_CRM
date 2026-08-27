@@ -166,11 +166,6 @@ export const dispatchUnitsToIncident = async (incidentId, unitIds, details = {})
   };
 };
 
-export const addIncidentNote = async (incidentId, note) => {
-  const res = await api.post(`/incidents/${incidentId}/note/`, { note });
-  return res.data;
-};
-
 // Real, DB-backed units (the actual Unit model) — carries a live, staleness
 // aware `is_online`. Used for the map/dispatch panel, which must only ever
 // show real, actively-connected units — never the seeded mock/demo roster.
@@ -181,6 +176,13 @@ export const getUnits = async () => {
 };
 
 export const getRealUnits = getUnits;
+
+// Tasks assigned to one real Unit (strict FK match) — the regional
+// dashboard's selected-vehicle panel.
+export const getUnitTasks = async (unitId) => {
+  const res = await api.get(`/units/${unitId}/tasks/`);
+  return res.data;
+};
 
 // Real event feed — backed by IncidentEvent rows written by the Incident/Unit
 // viewsets. Only ever contains events tied to a real Incident.
@@ -227,8 +229,22 @@ export const closeFieldCommand = async (fieldId, reason, closedByRole) => {
   return res.data;
 };
 
-export const updateFieldMetrics = async (payload, fieldId) => {
-  const res = await api.patch(`/field-commands/${fieldId}/metrics/`, payload);
+// Field command missions (central-room taskings). Both calls return the
+// full FieldCommandSerializer shape so callers can refresh the panel with
+// no extra GET. payload for create: { title, details?, assigned_unit?, status? }.
+export const createFieldMission = async (fieldId, payload) => {
+  const res = await api.post(
+    `/field-commands/${fieldId}/missions/`, payload,
+    actorRoleHeaders("COMMAND_CENTER"),
+  );
+  return res.data;
+};
+
+export const updateFieldMission = async (fieldId, missionId, payload) => {
+  const res = await api.patch(
+    `/field-commands/${fieldId}/missions/${missionId}/`, payload,
+    actorRoleHeaders("COMMAND_CENTER"),
+  );
   return res.data;
 };
 
@@ -317,66 +333,19 @@ export const submitMajorIncidentPerimeter = async (majorIncidentId, points) => {
 };
 
 // ============================================
-// FIELD INCIDENT COMMAND DASHBOARD API
+// FIELD INCIDENT COMMAND DASHBOARD API (training simulation)
 // ============================================
 
-// Get major incident with all data
+// Legacy fabricating endpoint — only still called by the field store's
+// loadFieldIncident() on an SSE reconnect while in ROUTINE/SIMULATION (drill)
+// mode. Real posts re-sync via getFieldCommand(). See FieldIncidentDashboard.jsx.
 export const getFieldIncident = async (fieldId = null) => {
   const params = fieldId ? { fieldId } : undefined;
   const res = await api.get("/field/incident/", { params });
   return res.data;
 };
 
-// Get sectors for current incident
-export const getFieldIncidentSectors = async (fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.get("/field/sectors/", { params });
-  return res.data;
-};
-
-// Get task groups for current incident
-export const getFieldIncidentTaskGroups = async (fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.get("/field/task-groups/", { params });
-  return res.data;
-};
-
-// Get operational timeline events
-export const getFieldIncidentEvents = async (fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.get("/field/events/", { params });
-  return res.data;
-};
-
-// Update sector
-export const updateFieldSector = async (sectorId, updates, fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.patch(`/field/sectors/${sectorId}/`, updates, { params });
-  return res.data;
-};
-
-// Update task group
-export const updateFieldTaskGroup = async (taskGroupId, updates, fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.patch(`/field/task-groups/${taskGroupId}/`, updates, { params });
-  return res.data;
-};
-
-// Update casualty estimates
-export const updateFieldCasualties = async (updates, fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.patch("/field/casualty-update/", updates, { params });
-  return res.data;
-};
-
-// Add event to timeline
-export const addFieldEvent = async (eventData, fieldId = null) => {
-  const params = fieldId ? { fieldId } : undefined;
-  const res = await api.post("/field/add-event/", eventData, { params });
-  return res.data;
-};
-
-// Simulate update to field incident
+// Advances the seeded training scenario one step (drill mode only).
 export const simulateFieldIncidentUpdate = async (fieldId = null) => {
   const params = fieldId ? { fieldId } : undefined;
   const res = await api.get("/field/simulate/", { params });

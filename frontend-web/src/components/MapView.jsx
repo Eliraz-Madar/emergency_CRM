@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle } from 'react-leaflet';
 import { useDashboardStore } from '../store/dashboard.js';
 import { getSortedAvailableUnits } from '../utils/units.js';
+import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
 
 /**
  * Map View Component - displays incidents and units on map (regional
@@ -178,20 +178,13 @@ export function MapView({
   };
 
   const createUnitIcon = (type, isSelected = false, status = 'PATROL') => {
-    const icons = {
-      POLICE: { emoji: '🚓', color: '#3b82f6' },
-      FIRE: { emoji: '🚒', color: '#ef4444' },
-      MEDICAL: { emoji: '🚑', color: '#10b981' }
-    };
-    // Callers pass the raw backend Unit.type ("Police"/"Fire"/"EMS"/"HomeFront",
-    // already uppercased) — only POLICE/FIRE match `icons` directly, so an EMS
-    // (or HomeFront) unit fell through to the POLICE fallback below and always
-    // rendered as a police car. Normalize to the same POLICE/FIRE/MEDICAL bucket
-    // scheme used elsewhere (e.g. KPICards.jsx's normalizeUnitType).
-    const normalizedType = type === 'EMS' || type === 'AMBULANCE' ? 'MEDICAL' : type;
-    const config = icons[normalizedType] || icons.POLICE;
+    // Callers pass the raw backend Unit.type, uppercased
+    // ("POLICE"/"FIRE"/"EMS"/"HOMEFRONT"). The shared palette
+    // (utils/agencyMeta.js) covers all four — EMS gets an ambulance, HomeFront
+    // a house (both previously fell through to a blue police car).
+    const config = getUnitTypeMeta({ type });
     return L.divIcon({
-      className: `marker-unit-${normalizedType?.toLowerCase() || 'police'}`,
+      className: `marker-unit-${(type || 'police').toLowerCase()}`,
       html: unitHtml(config.emoji, isSelected, config.color, status),
       iconSize: isSelected ? [90, 90] : [60, 60],
       iconAnchor: isSelected ? [45, 90] : [30, 60],
@@ -222,27 +215,6 @@ export function MapView({
       iconAnchor: [17, 34],
     });
   };
-
-  const policeIcon = L.divIcon({
-    className: 'marker-unit-police',
-    html: unitHtml('🚓', false, '#3b82f6'),
-    iconSize: [60, 60],
-    iconAnchor: [30, 60],
-  });
-
-  const fireIcon = L.divIcon({
-    className: 'marker-unit-fire',
-    html: unitHtml('🚒', false, '#ef4444'),
-    iconSize: [60, 60],
-    iconAnchor: [30, 60],
-  });
-
-  const medicalIcon = L.divIcon({
-    className: 'marker-unit-medical',
-    html: unitHtml('🚑', false, '#10b981'),
-    iconSize: [60, 60],
-    iconAnchor: [30, 60],
-  });
 
   // Helper to determine pin color based on priority/severity
   const getPinColor = (priority) => {
@@ -306,6 +278,9 @@ export function MapView({
       }
       setContextMenu(null);
       setSelectedIncident(null);
+      // Also drop any selected vehicle — an empty-map click means "deselect
+      // everything", same as the incident panel's own dismiss.
+      setSelectedUnit(null);
     });
 
     map.on('contextmenu', (event) => {
@@ -456,15 +431,12 @@ export function MapView({
       // of the standard circle, using this hardcoded description as the only
       // signal available (there's no dedicated backend flag for it).
       const isPointDispatch = incident.description === 'Force dispatched directly from the map.';
-      // Same POLICE/FIRE/MEDICAL palette as createUnitIcon() below, keyed by
-      // incident.channel (set to the dispatched agency — "POLICE"/"FIRE"/"EMS" —
-      // in Dashboard.jsx's handleMapDispatchForce), so a point-dispatch marker
-      // matches the color/vehicle of the unit that was actually sent.
-      const dispatchAgencyMeta = {
-        POLICE: { emoji: '🚓', color: '#3b82f6' },
-        FIRE: { emoji: '🚒', color: '#ef4444' },
-        EMS: { emoji: '🚑', color: '#10b981' },
-      }[(incident.channel || '').toUpperCase()] || { emoji: '⚡', color: pinColor };
+      // Shared agency palette (utils/agencyMeta.js), keyed by incident.channel
+      // (set to the dispatched agency — "POLICE"/"FIRE"/"EMS" — in Dashboard.jsx's
+      // handleMapDispatchForce), so a point-dispatch marker matches the
+      // color/vehicle of the unit that was actually sent. Unknown channel →
+      // a ⚡ bolt in the priority colour, not the generic 🚨.
+      const dispatchAgencyMeta = getIncidentChannelMeta(incident, { emoji: '⚡', color: pinColor });
       const assignedStar = hasAssignedUnits(incident)
         ? `
           <div style="
@@ -866,63 +838,8 @@ export function MapView({
 
   return (
     <div className="map-container">
-      {/* React-leaflet render to force reactive marker updates */}
-      <MapContainer center={[31.77, 35.22]} zoom={11} style={{ height: '0px', width: '0px', position: 'absolute', opacity: 0, pointerEvents: 'none' }}>
-        <TileLayer
-          attribution="© OpenStreetMap contributors"
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-        {incidents.map((incident) => {
-          const lat = incident.latitude ?? incident.location_lat ?? incident.lat;
-          const lng = incident.longitude ?? incident.location_lng ?? incident.lng;
-          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-          const priorityClass =
-            incident.priority === 'HIGH' || incident.priority === 'CRITICAL'
-              ? 'text-red-500'
-              : incident.priority === 'MEDIUM' || incident.priority === 'MED'
-                ? 'text-orange-500'
-                : 'text-green-500';
-
-          // Dynamic color based on priority
-          const color = getPinColor(incident.priority);
-          const assignedStar = hasAssignedUnits(incident)
-            ? `<div style='position:absolute; top:-10px; right:-10px; width:18px; height:18px; background:#fbbf24; color:#111827; border-radius:50%; font-size:12px; display:flex; align-items:center; justify-content:center; border:2px solid #111827; box-shadow:0 1px 2px rgba(0,0,0,0.4);'>★</div>`
-            : '';
-          const pinHtml = `<div style='position:relative;'><div style='background-color: ${color}; width: 24px; height: 24px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px ${color};'></div>${assignedStar}</div>`;
-          const customIcon = L.divIcon({ html: pinHtml, className: 'marker-pin', iconSize: [24, 24], iconAnchor: [12, 12] });
-
-          return (
-            <Marker
-              key={`inc-${incident.id}`}
-              position={[lat, lng]}
-              icon={customIcon}
-              eventHandlers={{ click: () => setSelectedIncident(incident.id) }}
-            >
-              <Popup>
-                <h3>{incident.subtype || incident.title || 'Incident'}</h3>
-                <p className={priorityClass}>Priority: {incident.priority || 'UNKNOWN'}</p>
-                <p>Status: {incident.status || 'UNKNOWN'}</p>
-              </Popup>
-            </Marker>
-          );
-        })}
-
-        {activeUnits.map((unit, idx) => {
-          const hasPosition = Array.isArray(unit.position) && unit.position.length >= 2;
-          const unitLat = hasPosition ? unit.position[0] : unit.latitude;
-          const unitLng = hasPosition ? unit.position[1] : unit.longitude;
-          if (!Number.isFinite(unitLat) || !Number.isFinite(unitLng)) return null;
-          return (
-            <Marker
-              key={`unit-rfl-${unit.id || idx}`}
-              position={[unitLat, unitLng]}
-              icon={policeIcon}
-            />
-          );
-        })}
-      </MapContainer>
-
-      {/* Existing Leaflet map (visible) */}
+      {/* Leaflet map — rendered imperatively into this div via the effects
+          above (L.map / L.marker / L.divIcon), not react-leaflet. */}
       <div ref={mapRef} className="map-view" />
       <div className="map-legend">
         <div className="legend-item">

@@ -4,7 +4,6 @@ Provides realistic simulation data with WebSocket real-time updates.
 Supports seeded random generation for reproducible demos.
 """
 import random
-import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 from faker import Faker
@@ -477,7 +476,7 @@ class MockDataService:
             unit["location_lat"] += random.uniform(-0.002, 0.002)
             unit["location_lng"] += random.uniform(-0.002, 0.002)
             unit["last_update"] = datetime.now(timezone.utc).isoformat()
-            self._add_event("unit", unit["id"], f"Location updated", "info")
+            self._add_event("unit", unit["id"], "Location updated", "info")
             return {"type": "unit_updated", "data": unit}
 
         return None

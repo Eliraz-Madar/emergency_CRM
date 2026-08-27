@@ -3,12 +3,11 @@ from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, parser_classes, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from django.http import JsonResponse, StreamingHttpResponse
+from django.http import StreamingHttpResponse
 from django.db.models import Q
 from django.utils import timezone
 import json
 import time
-import random
 import os
 import queue
 import threading
@@ -28,16 +27,16 @@ def _push_field_sse(event: dict):
 
 from .models import (
     Incident, Task, Unit, IncidentEvent, ReportMedia, PushToken,
-    FieldCommand,
-    MajorIncident, Sector, TaskGroup, Perimeter,
+    FieldCommand, FieldCommandNote, FieldCommandMission,
+    MajorIncident,
 )
 from .serializers import (
     IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer,
-    FieldCommandSerializer,
+    FieldCommandSerializer, FieldCommandMissionSerializer,
     MajorIncidentSerializer, MajorIncidentGoLiveSerializer,
     PerimeterSerializer, SectorSerializer, TaskGroupSerializer,
 )
-from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission, effective_role, ACTOR_ROLE_HEADER
+from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission, ACTOR_ROLE_HEADER
 # Kept solely because field_incident_detail() below (part of the training
 # simulation, out of scope for the mock->real migration) still uses it for an
 # optional cosmetic location lookup. Every dashboard-facing mock_* endpoint
@@ -83,6 +82,25 @@ def _log_status_change(*, incident=None, actor, title, description, severity=Non
     )
 
 
+# Actions whose broadcasts must ALSO reach the Field Incident Command
+# dashboard's own SSE stream (field_incident_updates_stream / _field_sse_queues
+# — a separate channel from get_realtime_service()). These are the
+# central-room writes that change what a single field command's own dashboard
+# should display (its linked incidents, attached forces, open/closed state),
+# so an already-open field dashboard reflects them without a manual reload.
+# The payload is the full FieldCommandSerializer shape plus incident_id/
+# unit_id — see FieldCommandViewSet.perform_create/assign_unit/assign_incident/
+# close — and carries field_command_id (the public field_key) so the client
+# can ignore events for other posts.
+_FIELD_DASHBOARD_RELAYED_ACTIONS = frozenset({
+    "field_command_incident_assigned",
+    "field_command_unit_assigned",
+    "field_command_closed",
+    "field_command_mission_created",
+    "field_command_mission_updated",
+})
+
+
 def _broadcast_realtime(event: dict):
     """
     Push a real-time event to every client connected to /api/mock/updates/stream/.
@@ -92,6 +110,8 @@ def _broadcast_realtime(event: dict):
     """
     event.setdefault("timestamp", _time.time())
     get_realtime_service().broadcast(event)
+    if event.get("action") in _FIELD_DASHBOARD_RELAYED_ACTIONS:
+        _push_field_sse(event)
 
 
 def _actor_fields(actor):
@@ -100,6 +120,17 @@ def _actor_fields(actor):
         "username": getattr(actor, "username", "") or "system",
         "role": getattr(actor, "role", "") or "",
     }
+
+
+def _log_field_command_note(field_command, kind, message):
+    """Append a typed entry to a field command's operational log. These
+    surface on the field command's own Operational Timeline (via
+    FieldCommandSerializer.get_operational_notes) so the post sees every
+    tasking / assignment it receives from the central room — persisted, not
+    just a transient toast."""
+    FieldCommandNote.objects.create(
+        field_command=field_command, kind=kind, message=message,
+    )
 
 
 class IncidentViewSet(viewsets.ModelViewSet):
@@ -316,6 +347,17 @@ class UnitViewSet(viewsets.ModelViewSet):
                 pass
         return response
 
+    @action(detail=True, methods=["get"], url_path="tasks")
+    def tasks(self, request, pk=None):
+        """Tasks currently assigned to this unit (strict FK — never the legacy
+        mock_unit_id namespace). Powers the regional dashboard's
+        selected-vehicle panel; a freshly-claimed unit with no dispatch has
+        none. Inherits UnitViewSet's read permission (no auth required)."""
+        unit = self.get_object()
+        qs = (unit.tasks.select_related("incident")
+              .all().order_by("-timestamp"))
+        return Response(TaskSerializer(qs, many=True, context={"request": request}).data)
+
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated])
     def claim(self, request):
         """
@@ -460,9 +502,15 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             unit = Unit.objects.get(pk=unit_id)
         except (Unit.DoesNotExist, ValueError, TypeError):
             return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
+        already_here = unit.field_command_id == field_command.id
         unit.field_command = field_command
         unit.save(update_fields=["field_command"])
         actor = request.user
+        if not already_here:
+            _log_field_command_note(
+                field_command, FieldCommandNote.Kind.FORCE_ASSIGNED,
+                f"Force attached by command center: {unit.name} ({unit.type}).",
+            )
         _broadcast_realtime({
             "type": "user_action",
             "action": "field_command_unit_assigned",
@@ -492,9 +540,15 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        already_here = incident.field_command_id == field_command.id
         incident.field_command = field_command
         incident.save(update_fields=["field_command"])
         actor = request.user
+        if not already_here:
+            _log_field_command_note(
+                field_command, FieldCommandNote.Kind.INCIDENT_LINKED,
+                f"Incident assigned by command center: {incident.title}.",
+            )
         _broadcast_realtime({
             "type": "user_action",
             "action": "field_command_incident_assigned",
@@ -504,6 +558,76 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             "status": field_command.status,
             **FieldCommandSerializer(field_command).data,
         })
+        return Response(self.get_serializer(field_command).data)
+
+    def _broadcast_mission(self, action, field_command, mission, actor):
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": action,
+            **_actor_fields(actor),
+            "field_command_id": field_command.field_key,
+            "mission_id": mission.id,
+            "status": field_command.status,
+            **FieldCommandSerializer(field_command).data,
+        })
+
+    @action(detail=True, methods=["get", "post"], url_path="missions")
+    def missions(self, request, field_key=None):
+        """List (GET) or create (POST) missions for this field command post.
+        A mission is a titled tasking, optionally handed to one of the post's
+        attached forces — see FieldCommandMission."""
+        field_command = self.get_object()
+        if request.method == "GET":
+            return Response(FieldCommandMissionSerializer(
+                field_command.missions.all(), many=True).data)
+
+        if field_command.status == FieldCommand.Status.CLOSED:
+            return Response(
+                {"detail": "This field command is closed."},
+                status=status.HTTP_409_CONFLICT)
+
+        serializer = FieldCommandMissionSerializer(
+            data=request.data, context={"field_command": field_command})
+        serializer.is_valid(raise_exception=True)
+        mission = serializer.save(field_command=field_command)
+        actor = request.user
+        assignee = (
+            f" → {mission.assigned_unit.name}" if mission.assigned_unit_id else ""
+        )
+        _log_field_command_note(
+            field_command, FieldCommandNote.Kind.MISSION,
+            f"Mission assigned by command center: {mission.title}{assignee}.",
+        )
+        self._broadcast_mission("field_command_mission_created", field_command, mission, actor)
+        return Response(
+            self.get_serializer(field_command).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["patch"], url_path=r"missions/(?P<mission_id>[^/]+)")
+    def mission_detail(self, request, field_key=None, mission_id=None):
+        """Update a mission (status, assignee, title, details)."""
+        field_command = self.get_object()
+        if field_command.status == FieldCommand.Status.CLOSED:
+            return Response(
+                {"detail": "This field command is closed."},
+                status=status.HTTP_409_CONFLICT)
+        try:
+            mission = field_command.missions.get(pk=mission_id)
+        except (FieldCommandMission.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Mission not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        old_status = mission.status
+        serializer = FieldCommandMissionSerializer(
+            mission, data=request.data, partial=True,
+            context={"field_command": field_command})
+        serializer.is_valid(raise_exception=True)
+        mission = serializer.save()
+        actor = request.user
+        if mission.status != old_status:
+            _log_field_command_note(
+                field_command, FieldCommandNote.Kind.MISSION,
+                f"Mission '{mission.title}' — {mission.get_status_display()}.",
+            )
+        self._broadcast_mission("field_command_mission_updated", field_command, mission, actor)
         return Response(self.get_serializer(field_command).data)
 
     @action(detail=True, methods=["patch"], url_path="metrics")
@@ -788,128 +912,12 @@ def field_incident_detail(request):
     return Response(data)
 
 
-@api_view(["GET"])
-def field_incident_sectors(request):
-    """Get all sectors for current major incident."""
-    field_id = request.query_params.get("fieldId")
-    data = _get_field_incident_data(field_id)
-
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
-    return Response({
-        "sectors": data.get("sectors", []),
-        "major_incident": data.get("major_incident", {})
-    })
-
-
-@api_view(["GET"])
-def field_incident_task_groups(request):
-    """Get all task groups for current major incident."""
-    field_id = request.query_params.get("fieldId")
-    data = _get_field_incident_data(field_id)
-
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
-    return Response({
-        "task_groups": data.get("task_groups", []),
-    })
-
-
-@api_view(["GET"])
-def field_incident_events(request):
-    """Get operational timeline events."""
-    field_id = request.query_params.get("fieldId")
-    data = _get_field_incident_data(field_id)
-
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
-    return Response({
-        "events": data.get("events", []),
-    })
-
-
-@api_view(["PATCH"])
-def field_incident_sector_update(request, sector_id):
-    """Update sector hazard level and status."""
-    field_id = request.query_params.get("fieldId")
-    data = _get_field_incident_data(field_id)
-
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
-    sectors = data.get("sectors", [])
-    if sector_id >= len(sectors):
-        return Response({"detail": "Sector not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    sector = sectors[sector_id]
-
-    # Update fields if provided
-    if "hazard_level" in request.data:
-        sector["hazard_level"] = request.data["hazard_level"]
-    if "status" in request.data:
-        sector["status"] = request.data["status"]
-    if "estimated_survivors" in request.data:
-        sector["estimated_survivors"] = request.data["estimated_survivors"]
-
-    _push_field_sse({"type": "incident_update", "data": {"sector_update": {"index": sector_id, "sector": sector}}})
-
-    return Response(sector)
-
-
-@api_view(["PATCH"])
-def field_incident_task_group_update(request, task_group_id):
-    """Update task group progress and status."""
-    field_id = request.query_params.get("fieldId")
-    data = _get_field_incident_data(field_id)
-
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
-    task_groups = data.get("task_groups", [])
-    if task_group_id >= len(task_groups):
-        return Response({"detail": "Task group not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    task_group = task_groups[task_group_id]
-
-    # Update fields if provided
-    if "progress_percent" in request.data:
-        task_group["progress_percent"] = request.data["progress_percent"]
-    if "status" in request.data:
-        task_group["status"] = request.data["status"]
-    if "completed_subtasks" in request.data:
-        task_group["completed_subtasks"] = request.data["completed_subtasks"]
-    if "notes" in request.data:
-        task_group["notes"] = request.data["notes"]
-
-    _push_field_sse({"type": "incident_update", "data": {"task_group_update": {"index": task_group_id, "task_group": task_group}}})
-
-    return Response(task_group)
-
-
-@api_view(["PATCH"])
-def field_incident_casualty_update(request):
-    """Update casualty estimates for major incident."""
-    field_id = request.query_params.get("fieldId")
-    data = _get_field_incident_data(field_id)
-
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
-    major_incident = data.get("major_incident", {})
-
-    if "estimated_casualties" in request.data:
-        major_incident["estimated_casualties"] = request.data["estimated_casualties"]
-    if "confirmed_deaths" in request.data:
-        major_incident["confirmed_deaths"] = request.data["confirmed_deaths"]
-    if "displaced_persons" in request.data:
-        major_incident["displaced_persons"] = request.data["displaced_persons"]
-
-    _push_field_sse({"type": "incident_update", "data": {"casualty_update": major_incident}})
-
-    return Response(major_incident)
+# NOTE: the old read/patch endpoints for the training-sim's fabricated
+# sectors / task-groups / casualty numbers (field_incident_sectors,
+# field_incident_task_groups, field_incident_events, field_incident_sector_update,
+# field_incident_task_group_update, field_incident_casualty_update) were removed
+# — nothing called them anymore. The field dashboard reads real data via the
+# major-incident endpoints and advances the drill through /field/simulate/.
 
 
 @api_view(["POST"])

@@ -20,6 +20,7 @@ const OperationalTimeline = ({ onShowDetails }) => {
   const eventTypeIcons = {
     STATUS_CHANGE: '📊',
     ASSIGNMENT: '👤',
+    MISSION: '🎯',
     UPDATE: '📝',
     HAZARD_ALERT: '⚠️',
     CASUALTY_UPDATE: '🚑',
