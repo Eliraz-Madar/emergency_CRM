@@ -15,6 +15,12 @@ export function IncidentList({
     selectedIncidentId,
     setSelectedIncident,
   } = useDashboardStore();
+  // Total active (non-CLOSED) incidents — the same figure the map and the
+  // KPI "Active Incidents" card show. Used to make the header honest when a
+  // filter is narrowing the list.
+  const activeTotal = useDashboardStore(
+    (s) => s.incidents.filter((i) => i.status !== 'CLOSED').length,
+  );
 
   const incidents = getFilteredIncidents();
 
@@ -90,7 +96,10 @@ export function IncidentList({
   return (
     <div className="incident-list">
       <div className="incident-list-header">
-        <h2>Incidents ({filteredIncidents.length})</h2>
+        <h2>
+          Incidents ({filteredIncidents.length}
+          {filteredIncidents.length !== activeTotal ? ` of ${activeTotal}` : ''})
+        </h2>
       </div>
 
       <div className="incident-filter-bar">

@@ -6,7 +6,10 @@ dashboard/mobile dispatches into the database as Tasks.
 from rest_framework.test import APITestCase
 from rest_framework import status
 
-from api.models import User, Incident, Unit, Task, FieldCommand, MajorIncident
+from api.models import (
+    User, Incident, Unit, Task, FieldCommand, FieldCommandNote,
+    IncidentEvent, MajorIncident,
+)
 
 
 def _make_dispatcher():
@@ -227,6 +230,26 @@ class UnitClaimingTests(APITestCase):
         self.assertNotIn(claimed_online.id, ids)
         self.assertIn(unclaimed.id, ids)
         self.assertIn(offline_but_claimed.id, ids)
+
+    def test_claimable_allows_reclaiming_own_and_stale_units(self):
+        from django.utils import timezone as _tz
+        stale = _tz.now() - Unit.HEARTBEAT_STALE_AFTER * 2
+
+        mine = Unit.objects.create(
+            name="Mine", type="Police", location_lat=1.0, location_lng=1.0, is_online=True)
+        User.objects.get(username="field_claim").unit = mine
+        User.objects.get(username="field_claim").save()
+
+        stale_other = Unit.objects.create(
+            name="Stale", type="Police", location_lat=1.0, location_lng=1.0,
+            is_online=True, last_seen=stale)
+        User.objects.create_user(
+            username="dead_app", password="x", role=User.Roles.FIELD, unit=stale_other)
+
+        self.client.force_authenticate(User.objects.get(username="field_claim"))
+        ids = [u["id"] for u in self.client.get("/api/units/?claimable=true").json()]
+        self.assertIn(mine.id, ids)          # can always re-claim my own
+        self.assertIn(stale_other.id, ids)   # dead-app holder -> claimable again
 
     def test_claim_requires_authentication(self):
         unit = Unit.objects.create(name="Engine 5", type="Fire", location_lat=1.0, location_lng=1.0)
@@ -493,3 +516,132 @@ class FieldCommandMissionTests(APITestCase):
             {"title": "Too late"}, format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+
+
+class AssignUnitAndEnRouteTests(APITestCase):
+    """assign-unit hits the real incident (never a mock_incident_id mirror) and
+    a unit accepting its task ("On My Way") flows through to the incident state
+    and any linked Field Command Post."""
+
+    def setUp(self):
+        from django.utils import timezone as _tz
+        self.dispatcher = _make_dispatcher()
+        self.field_unit = User.objects.create_user(
+            username="en_route_unit", password="pass1234", role=User.Roles.FIELD)
+        # Actively online — assigned_unit_ids only lists connected vehicles.
+        self.unit = Unit.objects.create(
+            name="Medic 3", type=Unit.UnitType.EMS, location_lat=32.05, location_lng=34.75,
+            is_online=True, last_seen=_tz.now())
+        self.incident = Incident.objects.create(
+            title="Collapse", location_lat=32.08, location_lng=34.78, priority="HIGH")
+
+    def test_assign_unit_uses_real_incident_and_advances_to_pending(self):
+        self.client.force_authenticate(self.dispatcher)
+        res = self.client.post(
+            f"/api/incidents/{self.incident.id}/assign-unit/",
+            {"unit_id": self.unit.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        task = Task.objects.get(assigned_unit=self.unit)
+        self.assertEqual(task.incident_id, self.incident.id)
+        # No mirror Incident keyed on mock_incident_id was created.
+        self.assertEqual(Incident.objects.count(), 1)
+
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.status, Incident.Status.PENDING)
+
+    def test_field_unit_accept_advances_incident_and_logs_field_command_note(self):
+        fc = FieldCommand.objects.create(
+            name="North Post", location_lat=32.08, location_lng=34.78)
+        self.incident.field_command = fc
+        self.incident.status = Incident.Status.PENDING
+        self.incident.save(update_fields=["field_command", "status"])
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+
+        self.client.force_authenticate(self.field_unit)
+        res = self.client.patch(
+            f"/api/tasks/{task.id}/", {"status": "IN_PROGRESS"}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.status, Incident.Status.EN_ROUTE)
+        self.assertTrue(
+            FieldCommandNote.objects.filter(
+                field_command=fc, kind=FieldCommandNote.Kind.STATUS).exists())
+
+    def test_add_event_with_incident_id_links_event_and_logs_note(self):
+        fc = FieldCommand.objects.create(
+            name="West Post", location_lat=32.08, location_lng=34.78)
+        self.incident.field_command = fc
+        self.incident.save(update_fields=["field_command"])
+
+        self.client.force_authenticate(self.field_unit)
+        res = self.client.post(
+            "/api/field/add-event/?fieldId=default",
+            {
+                "event_type": "STATUS_CHANGE",
+                "title": "Task Update: Respond",
+                "description": "Notes: heavy smoke on arrival",
+                "incident_id": self.incident.id,
+            },
+            format="multipart",
+            HTTP_X_ACTOR_ROLE="UNIT",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        event = IncidentEvent.objects.get(title="Task Update: Respond")
+        self.assertEqual(event.incident_id, self.incident.id)
+        self.assertTrue(
+            FieldCommandNote.objects.filter(
+                field_command=fc, kind=FieldCommandNote.Kind.STATUS).exists())
+
+    def test_assigned_unit_ids_excludes_terminal_tasks_and_closed_incident(self):
+        self.client.force_authenticate(self.dispatcher)
+        Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+
+        body = self.client.get(f"/api/incidents/{self.incident.id}/").json()
+        self.assertEqual(body["assigned_unit_ids"], [self.unit.id])
+
+        # Cancel the task -> no longer "assigned".
+        Task.objects.filter(incident=self.incident).update(status=Task.Status.CANCELLED)
+        body = self.client.get(f"/api/incidents/{self.incident.id}/").json()
+        self.assertEqual(body["assigned_unit_ids"], [])
+
+    def test_assigned_unit_ids_drops_a_disconnected_vehicle(self):
+        self.client.force_authenticate(self.dispatcher)
+        Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+        self.assertEqual(
+            self.client.get(f"/api/incidents/{self.incident.id}/").json()["assigned_unit_ids"],
+            [self.unit.id])
+
+        # Vehicle's app disconnects — it's no longer on the map, so it can't be
+        # shown as assigned to the event.
+        self.unit.is_online = False
+        self.unit.save(update_fields=["is_online"])
+        self.assertEqual(
+            self.client.get(f"/api/incidents/{self.incident.id}/").json()["assigned_unit_ids"],
+            [])
+
+    def test_closing_incident_cancels_open_tasks(self):
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+        self.incident.status = Incident.Status.RESOLVED
+        self.incident.save(update_fields=["status"])
+
+        self.client.force_authenticate(self.dispatcher)
+        res = self.client.patch(
+            f"/api/incidents/{self.incident.id}/",
+            {"status": "CLOSED", "closed_reason": "resolved on site",
+             "closed_by_role": "COMMAND_CENTER"},
+            format="json", HTTP_X_ACTOR_ROLE="COMMAND_CENTER")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        task.refresh_from_db()
+        self.assertEqual(task.status, Task.Status.CANCELLED)

@@ -145,14 +145,20 @@ export const useDashboardStore = create(
 
       setSortBy: (sortBy) => set({ sortBy }),
 
-      // Get filtered and sorted incidents
+      // Get filtered and sorted incidents.
+      // A filter only ever HIDES an incident that carries a value explicitly
+      // deselected — an incident with no channel (or an unrecognised
+      // severity/status) is never dropped by the channel/severity chips, so
+      // the list count stays consistent with the map (which only hides
+      // CLOSED). CLOSED itself is hidden unless 'CLOSED' is in filters.statuses.
       getFilteredIncidents: () => {
         const state = get();
         let incidents = state.incidents.filter(inc => {
           const sev = inc.priority || inc.severity;
-          if (!state.filters.severities.includes(sev)) return false;
-          if (!state.filters.statuses.includes(inc.status)) return false;
-          if (!state.filters.channels.includes(inc.channel)) return false;
+          if (sev && !state.filters.severities.includes(sev)) return false;
+          if (inc.status === 'CLOSED' && !state.filters.statuses.includes('CLOSED')) return false;
+          if (inc.status && inc.status !== 'CLOSED' && !state.filters.statuses.includes(inc.status)) return false;
+          if (inc.channel && !state.filters.channels.includes(inc.channel)) return false;
           if (state.filters.searchText) {
             const text = state.filters.searchText.toLowerCase();
             return (

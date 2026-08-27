@@ -6,6 +6,7 @@ import { Surface } from "react-native-paper";
 import { API_BASE_URL } from "../config";
 import { useUser } from "../context/UserContext";
 import { getAuthHeaders } from "../utils/apiClient";
+import { markOnMyWay, markArrived } from "../utils/taskActions";
 
 const STATUS_CONFIG = {
   DONE:        { bg: "#E8F5E9", color: "#2E7D32", label: "Done" },
@@ -22,6 +23,7 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewR
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [enRouteId, setEnRouteId] = useState(null);
   const { user } = useUser();
 
   const fetchTasks = async (isPull = false) => {
@@ -41,7 +43,15 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewR
       clearTimeout(timeout);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setTasks(data);
+      // Drop finished/cancelled tasks and anything on a closed incident — the
+      // dispatch is over, the unit shouldn't still see it in its queue.
+      setTasks(
+        (Array.isArray(data) ? data : []).filter(
+          (t) => t.status !== "DONE"
+            && t.status !== "CANCELLED"
+            && t.incident_status !== "CLOSED",
+        ),
+      );
       setError("");
     } catch (err) {
       setError("Could not load tasks. Pull to refresh.");
@@ -57,6 +67,30 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewR
     const interval = setInterval(() => fetchTasks(), 8000); // 8s silent background poll
     return () => clearInterval(interval);
   }, [token, selectedUnit?.id]);
+
+  const handleOnMyWay = async (task) => {
+    setEnRouteId(task.id);
+    try {
+      await markOnMyWay(task, token, user);
+      await fetchTasks();
+    } catch (_) {
+      setError("Could not mark en route. Pull to refresh.");
+    } finally {
+      setEnRouteId(null);
+    }
+  };
+
+  const handleArrived = async (task) => {
+    setEnRouteId(task.id);
+    try {
+      await markArrived(task, token, user);
+      await fetchTasks();
+    } catch (_) {
+      setError("Could not mark arrived. Pull to refresh.");
+    } finally {
+      setEnRouteId(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -106,6 +140,30 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewR
                 {item.incident ? (
                   <Text style={styles.incidentRef}>Incident #{item.incident}</Text>
                 ) : null}
+                {["OPEN", "PENDING", undefined, null].includes(item.incident_status) && (
+                  <TouchableOpacity
+                    style={styles.enRouteBtn}
+                    onPress={() => handleOnMyWay(item)}
+                    disabled={enRouteId === item.id}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.enRouteBtnText}>
+                      {enRouteId === item.id ? "SENDING…" : "🚗  ON MY WAY"}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {item.incident_status === "EN_ROUTE" && (
+                  <TouchableOpacity
+                    style={styles.arrivedBtn}
+                    onPress={() => handleArrived(item)}
+                    disabled={enRouteId === item.id}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.enRouteBtnText}>
+                      {enRouteId === item.id ? "SENDING…" : "✓  ARRIVED ON SCENE"}
+                    </Text>
+                  </TouchableOpacity>
+                )}
                 <View style={styles.actionRow}>
                   {onViewRoute && item.incident_lat != null && item.incident_lng != null && (
                     <TouchableOpacity
@@ -184,6 +242,22 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: 12, fontWeight: "600", letterSpacing: 0.3 },
 
   incidentRef: { fontSize: 12, color: "#90A4AE", marginBottom: 12 },
+
+  enRouteBtn: {
+    backgroundColor: "#E65100",
+    borderRadius: 9,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  arrivedBtn: {
+    backgroundColor: "#1565C0",
+    borderRadius: 9,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  enRouteBtnText: { color: "#FFFFFF", fontSize: 14, fontWeight: "800", letterSpacing: 0.6 },
 
   actionRow: { flexDirection: "row", gap: 10 },
   reportBtn: {

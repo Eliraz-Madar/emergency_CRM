@@ -87,8 +87,20 @@ class IncidentSerializer(serializers.ModelSerializer):
         read_only_fields = ["field_command", "closed_at"]
 
     def get_assigned_unit_ids(self, obj):
+        # "Currently assigned" only. A unit is dropped from this list when its
+        # task is DONE/CANCELLED, the incident is CLOSED, or the unit is no
+        # longer actively online (its device disconnected) — a vehicle that
+        # isn't on the map can't be shown as committed to an incident. It
+        # re-appears here automatically if the crew reconnects while the task
+        # is still open.
+        if obj.status == Incident.Status.CLOSED:
+            return []
         return sorted({
-            t.assigned_unit_id for t in obj.tasks.all() if t.assigned_unit_id
+            t.assigned_unit_id for t in obj.tasks.select_related("assigned_unit").all()
+            if t.assigned_unit_id
+            and t.status not in Task.TERMINAL_STATUSES
+            and t.assigned_unit is not None
+            and t.assigned_unit.is_actively_online
         })
 
     def get_major_incident(self, obj):
@@ -429,6 +441,13 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             # Release resources tied to this post, mirroring
             # MockDataService.close_field_command.
             Unit.objects.filter(field_command=instance).update(field_command=None)
+            linked_incident_ids = list(
+                Incident.objects.filter(field_command=instance).values_list("id", flat=True))
+            # Cancel any still-open task on those incidents so no unit stays
+            # "assigned" to a closed incident.
+            Task.objects.filter(
+                incident_id__in=linked_incident_ids,
+            ).exclude(status__in=Task.TERMINAL_STATUSES).update(status=Task.Status.CANCELLED)
             Incident.objects.filter(field_command=instance).update(
                 status=Incident.Status.CLOSED,
                 field_command=None,

@@ -14,6 +14,8 @@ import {
   getMajorIncidentTaskGroups,
   createMajorIncidentTaskGroup,
   dispatchUnitsToIncident,
+  assignUnitToIncident,
+  unassignUnitFromIncident,
 } from '../api/client.js';
 
 // Same inline-form look as MapView.jsx's operator action menu (labelStyle/
@@ -42,8 +44,6 @@ const submitButtonStyle = {
   fontSize: '0.82rem',
   marginTop: '10px',
 };
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
 const TYPE_META = {
   POLICE: { label: 'Police', color: '#3b82f6', Icon: Shield },
@@ -344,7 +344,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       await dispatchUnitsToIncident(incident.id, [majorDispatchUnitId], { mode: 'incident' });
       const unit = (onlineUnits || []).find((u) => String(u.id) === String(majorDispatchUnitId));
       if (unit) {
-        upsertOnlineUnit({ id: unit.id, assignedTo: incident.id, status: 'EN_ROUTE' });
+        upsertOnlineUnit({ id: unit.id, assignedTo: incident.id, status: 'ASSIGNED' });
       }
       updateIncident(incident.id, { status: 'IN_PROGRESS' });
       setMajorDispatchUnitId('');
@@ -356,13 +356,13 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
     }
   };
 
-  // Dispatches real, currently-online units by mirroring into the DB as
-  // Tasks (mobile_dispatch), the same bridge the mobile app's claim flow
-  // reconciles with by name — see
-  // final changes/05_user_unit_claiming_and_live_sync.md. Deliberately does
-  // NOT go through fieldIncident.js's dispatchUnitsToIncident(), which
-  // drives the fake-roster route/movement animation task 04 removed —
-  // a real unit's marker moves on its own via its live GPS heartbeat.
+  // Dispatches real, currently-online units straight onto the real Incident
+  // via POST /incidents/{id}/assign-unit/ — one DB Task per unit against the
+  // actual incident row (never the mock_incident_id mirror the old
+  // /mobile/dispatch/ bridge created). The backend advances OPEN -> PENDING,
+  // pushes the mobile notification, and logs the dispatch to a linked Field
+  // Command Post. A real unit's marker moves on its own via its GPS heartbeat;
+  // the road route is drawn once the unit taps "On My Way" in the app.
   const handleDispatch = async () => {
     if (!incident || selectedUnitIds.length === 0) return;
 
@@ -371,33 +371,27 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       .filter(Boolean);
     if (unitsToDispatch.length === 0) return;
 
-    try {
-      await fetch(`${API_BASE_URL}/mobile/dispatch/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          incident_id: incident.id,
-          incident_title: incident.title || `Incident ${incident.id}`,
-          location_lat: incidentLat,
-          location_lng: incidentLng,
-          priority: incident.priority || 'HIGH',
-          units: unitsToDispatch.map((u) => ({
-            mock_unit_num: u.id,
-            name: u.name,
-            type: u.type,
-          })),
-        }),
-      });
-    } catch (_) {
-      // non-critical — the incident is still marked in-progress locally below
+    let lastResponse = null;
+    for (const u of unitsToDispatch) {
+      try {
+        lastResponse = await assignUnitToIncident(incident.id, u.id);
+      } catch (error) {
+        console.error(`Failed to assign unit ${u.id} to incident ${incident.id}:`, error);
+      }
     }
 
     // Tag each dispatched unit so it disappears from the "available" picker
-    // and shows up in "Dispatched Units" — its marker keeps rendering at
-    // its own live GPS position, no fake route is drawn.
-    unitsToDispatch.forEach((u) => upsertOnlineUnit({ id: u.id, assignedTo: incident.id, status: 'EN_ROUTE' }));
+    // and shows up in "Dispatched Units" as "Awaiting acceptance" — it only
+    // becomes "On the way" once the crew taps "On My Way" in the app.
+    unitsToDispatch.forEach((u) => upsertOnlineUnit({ id: u.id, assignedTo: incident.id, status: 'ASSIGNED' }));
 
-    updateIncident(incident.id, { status: 'IN_PROGRESS' });
+    // Apply the authoritative incident shape from the last assign response
+    // (carries the backend OPEN -> PENDING transition + assigned_unit_ids).
+    if (lastResponse && typeof lastResponse === 'object') {
+      updateIncident(incident.id, lastResponse);
+    } else {
+      updateIncident(incident.id, { status: 'PENDING' });
+    }
     setSelectedUnitIds([]);
 
     // Keep panel open so the user sees the dispatched units list immediately.
@@ -409,17 +403,11 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   };
 
   const handleCancelDispatch = (unit) => {
-    // Real cancel-dispatch call — inlined directly (mirrors handleDispatch's
-    // raw-fetch style above) since this used to go through the shared field
-    // store's cancelUnitDispatch(), which had a real HTTP side effect here
-    // (not simulation bookkeeping) alongside fake-roster mutations that are
-    // dropped along with the store dependency.
-    fetch(`${API_BASE_URL}/mobile/cancel-dispatch/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mock_unit_id: unit.id, incident_id: incident.id }),
-    }).catch(() => {});
-    upsertOnlineUnit({ id: unit.id, assignedTo: null, status: null });
+    // Real unassign — cancels this unit's open Task on the incident.
+    unassignUnitFromIncident(incident.id, unit.id).catch((error) => {
+      console.error(`Failed to unassign unit ${unit.id} from incident ${incident.id}:`, error);
+    });
+    upsertOnlineUnit({ id: unit.id, assignedTo: null, status: null, route: null });
   };
 
   const renderUnitCard = (unit) => {
@@ -455,20 +443,41 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
     );
   };
 
-  // Live dispatched units for this incident: real online units tagged by
-  // handleDispatch above. See final changes/05_user_unit_claiming_and_live_sync.md.
+  // Dispatched units for this incident. Authoritative source is the incident's
+  // own assigned_unit_ids (server-computed from active Task rows) so this list
+  // always agrees with the vehicle card and the backend — never drifts because
+  // of client-only state. Any unit optimistically tagged by handleDispatch that
+  // the server hasn't confirmed yet is unioned in so the list updates instantly.
   const dispatchedUnits = useMemo(() => {
     if (!incident?.id) return [];
-    return (Array.isArray(onlineUnits) ? onlineUnits : [])
+    const unitById = new Map(
+      (Array.isArray(onlineUnits) ? onlineUnits : []).map((u) => [u.id, u]),
+    );
+    const serverIds = Array.isArray(incident.assigned_unit_ids) ? incident.assigned_unit_ids : [];
+    const optimisticIds = (Array.isArray(onlineUnits) ? onlineUnits : [])
       .filter((u) => String(u.assignedTo) === String(incident.id))
-      .map((u) => ({
-        id: u.id,
-        name: u.name || String(u.id),
+      .map((u) => u.id);
+    // Only vehicles that are actually here and connected — a unit that isn't
+    // on the map is never shown as dispatched to this event.
+    const ids = [...new Set([...serverIds, ...optimisticIds])]
+      .filter((id) => unitById.get(id)?.is_online === true);
+    return ids.map((id) => {
+      const u = unitById.get(id) || {};
+      return {
+        id,
+        name: u.name || `Unit ${id}`,
         type: normalizeUnitType(u.type),
-        status: u.status || 'EN_ROUTE',
+        // Server confirms the assignment but the phase (ASSIGNED / EN_ROUTE /
+        // ON_SCENE) is client-side — default to ASSIGNED, not EN_ROUTE, so a
+        // freshly dispatched unit doesn't read as "on the way" before the crew
+        // accepts.
+        status: u.status || 'ASSIGNED',
+        etaMin: u.etaMin,
+        distanceKm: u.distanceKm,
         isReal: true,
-      }));
-  }, [incident?.id, onlineUnits]);
+      };
+    });
+  }, [incident?.id, incident?.assigned_unit_ids, onlineUnits]);
 
   const headerIcon = (() => {
     const type = (incident?.incident_type || '').toUpperCase();
@@ -954,10 +963,19 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '180px', overflowY: 'auto' }}>
               {dispatchedUnits.map((unit) => {
                 const meta = TYPE_META[unit.type] || TYPE_META.POLICE;
-                const isArrived = unit.status === 'ON_SCENE';
-                const statusLabel = isArrived ? 'Arrived' : 'On the Way';
-                const statusColor = isArrived ? '#10b981' : '#f59e0b';
-                const statusBg = isArrived ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.12)';
+                // ASSIGNED = dispatched, crew hasn't accepted in the app yet;
+                // EN_ROUTE = accepted and driving; ON_SCENE = arrived.
+                const phase = unit.status === 'ON_SCENE'
+                  ? { label: 'On scene', color: '#10b981', bg: 'rgba(16,185,129,0.12)' }
+                  : unit.status === 'EN_ROUTE'
+                    ? { label: 'On the way', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' }
+                    : { label: 'Awaiting acceptance', color: '#38bdf8', bg: 'rgba(56,189,248,0.12)' };
+                const statusLabel = phase.label
+                  + (unit.status === 'EN_ROUTE' && Number.isFinite(unit.etaMin) && unit.etaMin > 0
+                    ? ` · ${Math.max(1, Math.round(unit.etaMin))} min`
+                    : '');
+                const statusColor = phase.color;
+                const statusBg = phase.bg;
                 return (
                   <div key={unit.id} style={{
                     display: 'flex',

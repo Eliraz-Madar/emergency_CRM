@@ -98,6 +98,10 @@ _FIELD_DASHBOARD_RELAYED_ACTIONS = frozenset({
     "field_command_closed",
     "field_command_mission_created",
     "field_command_mission_updated",
+    # A unit on a linked incident sent a status change / field report — the
+    # post's Operational Timeline should reflect it live (see
+    # TaskViewSet.perform_update / field_incident_add_event).
+    "field_command_note_added",
 })
 
 
@@ -131,6 +135,104 @@ def _log_field_command_note(field_command, kind, message):
     FieldCommandNote.objects.create(
         field_command=field_command, kind=kind, message=message,
     )
+
+
+# ── En-route trip (shared movement simulation) ─────────────────────────────
+# In-memory only, like _field_sse_queues — a trip is transient and it's fine
+# for it to vanish on restart (a reconnecting crew re-triggers it lazily). Both
+# the war-room map and the mobile map read the SAME trip via
+# GET /api/tasks/<id>/trip/, so the vehicle's position, ETA and distance always
+# agree between the two screens.
+_active_trips: dict = {}
+_active_trips_lock = threading.Lock()
+
+# Both clients compress the drive by this factor so a demo isn't a 15-minute
+# wait. MUST stay in sync with TRIP_SPEEDUP in the web Dashboard and the
+# mobile IncidentMapScreen.
+TRIP_SPEEDUP = 8
+
+
+def _fetch_osrm_route(from_lat, from_lng, to_lat, to_lng):
+    """Return (coords[[lat,lng]...], duration_s, distance_m). Falls back to a
+    straight line at ~40 km/h so a trip always has a drawable path."""
+    import urllib.request
+    import json as _json
+    url = (
+        "https://router.project-osrm.org/route/v1/driving/"
+        f"{from_lng},{from_lat};{to_lng},{to_lat}"
+        "?overview=full&geometries=geojson"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        route = (data.get("routes") or [None])[0]
+        geo = ((route or {}).get("geometry") or {}).get("coordinates") or []
+        if route and len(geo) >= 2:
+            coords = [[lat, lng] for lng, lat in geo]
+            return coords, float(route.get("duration") or 0.0), float(route.get("distance") or 0.0)
+    except Exception:
+        pass
+    import math
+    dlat, dlng = to_lat - from_lat, to_lng - from_lng
+    approx_km = math.hypot(dlat * 111.0, dlng * 96.0)
+    steps = 24
+    coords = [
+        [from_lat + dlat * i / steps, from_lng + dlng * i / steps]
+        for i in range(steps + 1)
+    ]
+    return coords, (approx_km / 40.0) * 3600.0, approx_km * 1000.0
+
+
+def _start_trip(task, from_lat, from_lng):
+    """Record that a drive began. The OSRM path is fetched lazily on the first
+    GET /tasks/<id>/trip/ so this stays fast inside the PATCH request."""
+    incident = task.incident
+    if from_lat is None or from_lng is None or incident is None:
+        return
+    with _active_trips_lock:
+        _active_trips[task.id] = {
+            "task_id": task.id,
+            "incident_id": incident.id,
+            "unit_id": task.assigned_unit_id,
+            "from_lat": from_lat,
+            "from_lng": from_lng,
+            "incident_lat": incident.location_lat,
+            "incident_lng": incident.location_lng,
+            "coords": None,
+            "duration_s": None,
+            "distance_m": None,
+            "speedup": TRIP_SPEEDUP,
+            "accepted_at": timezone.now().isoformat(),
+        }
+
+
+def _resolved_trip(task_id):
+    """Return the trip with its OSRM path filled in (fetching it once)."""
+    with _active_trips_lock:
+        trip = _active_trips.get(task_id)
+        needs_path = trip is not None and not trip.get("coords")
+    if needs_path:
+        coords, duration_s, distance_m = _fetch_osrm_route(
+            trip["from_lat"], trip["from_lng"],
+            trip["incident_lat"], trip["incident_lng"])
+        with _active_trips_lock:
+            trip = _active_trips.get(task_id)
+            if trip is not None:
+                trip["coords"] = coords
+                trip["duration_s"] = duration_s
+                trip["distance_m"] = distance_m
+    return trip
+
+
+def _end_trip(task_id):
+    with _active_trips_lock:
+        _active_trips.pop(task_id, None)
+
+
+def _end_trips_for_incident(incident_id):
+    with _active_trips_lock:
+        for tid in [k for k, v in _active_trips.items() if v.get("incident_id") == incident_id]:
+            _active_trips.pop(tid, None)
 
 
 class IncidentViewSet(viewsets.ModelViewSet):
@@ -193,6 +295,30 @@ class IncidentViewSet(viewsets.ModelViewSet):
                 "new_status": instance.status,
             })
 
+            # Arriving on scene (or resolving/closing) ends the drive, so the
+            # war-room and mobile both stop the vehicle at the incident.
+            if instance.status in (
+                Incident.Status.ON_SCENE, Incident.Status.RESOLVED, Incident.Status.CLOSED,
+            ):
+                _end_trips_for_incident(instance.id)
+
+            # A closed incident releases its forces: cancel every non-terminal
+            # task so no unit stays "assigned" to it anywhere (dashboard panels,
+            # the vehicle card, the mobile task list).
+            if instance.status == Incident.Status.CLOSED:
+                stale = list(instance.tasks.exclude(status__in=Task.TERMINAL_STATUSES))
+                for t in stale:
+                    t.status = Task.Status.CANCELLED
+                    t.save(update_fields=["status"])
+                    if t.assigned_unit_id:
+                        _broadcast_realtime({
+                            "type": "user_action",
+                            "action": "incident_unit_unassigned",
+                            **_actor_fields(actor),
+                            "incident_id": instance.id,
+                            "unit_id": t.assigned_unit_id,
+                        })
+
     @action(detail=True, methods=["post"], url_path="assign-unit")
     def assign_unit(self, request, pk=None):
         """Assign a real Unit to this incident by creating a Task — the
@@ -224,6 +350,49 @@ class IncidentViewSet(viewsets.ModelViewSet):
                 "incident_id": incident.id,
                 "unit_id": unit.id,
             })
+
+            # Advance OPEN -> PENDING so the mobile app can accept the dispatch
+            # (PENDING -> EN_ROUTE). Never forces past a state the field/operator
+            # already advanced the incident to.
+            if incident.status == Incident.Status.OPEN:
+                allowed, _err = incident.can_transition_to(
+                    Incident.Status.PENDING, "dispatcher")
+                if allowed:
+                    old_status = incident.status
+                    incident.status = Incident.Status.PENDING
+                    incident.save(update_fields=["status"])
+                    _log_status_change(
+                        incident=incident, actor=actor,
+                        title=f"Incident status changed: {old_status} → {incident.status}",
+                        description="Automatically advanced on unit assignment.",
+                    )
+                    _broadcast_realtime({
+                        "type": "user_action",
+                        "action": "incident_status_update",
+                        **_actor_fields(actor),
+                        "incident_id": incident.id,
+                        "incident_title": incident.title,
+                        "old_status": old_status,
+                        "new_status": incident.status,
+                    })
+
+            # Field Command Post linked to this incident should log the dispatch.
+            if incident.field_command_id:
+                fc = incident.field_command
+                _log_field_command_note(
+                    fc, FieldCommandNote.Kind.FORCE_ASSIGNED,
+                    f"{unit.name} dispatched to '{incident.title}'.",
+                )
+                _broadcast_realtime({
+                    "type": "user_action",
+                    "action": "field_command_note_added",
+                    **_actor_fields(actor),
+                    "field_command_id": fc.field_key,
+                    "incident_id": incident.id,
+                    **FieldCommandSerializer(fc).data,
+                })
+
+            _notify_unit_dispatched(unit.id, incident.title, incident.id)
         return Response(self.get_serializer(incident).data)
 
     @action(detail=True, methods=["post"], url_path="note")
@@ -234,6 +403,41 @@ class IncidentViewSet(viewsets.ModelViewSet):
             return Response({"detail": "note is required."}, status=status.HTTP_400_BAD_REQUEST)
         actor = self.request.user
         _log_status_change(incident=incident, actor=actor, title="Note added", description=note)
+        return Response(self.get_serializer(incident).data)
+
+    @action(detail=True, methods=["post"], url_path="unassign-unit")
+    def unassign_unit(self, request, pk=None):
+        """Undo an assign-unit: cancel the unit's non-terminal Task on this
+        incident. Real equivalent of the old mobile_cancel_dispatch for
+        panel/map-driven dispatch."""
+        incident = self.get_object()
+        unit_id = request.data.get("unit_id")
+        if not unit_id:
+            return Response({"detail": "unit_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cancelled = (
+            Task.objects.filter(incident=incident, assigned_unit_id=unit_id)
+            .exclude(status__in=Task.TERMINAL_STATUSES)
+            .update(status=Task.Status.CANCELLED)
+        )
+        actor = self.request.user
+        if cancelled:
+            _log_status_change(
+                incident=incident, actor=actor,
+                title="Unit unassigned",
+                description=f"Dispatch cancelled by {getattr(actor, 'username', '') or 'command center'}.",
+            )
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "incident_unit_unassigned",
+                **_actor_fields(actor),
+                "incident_id": incident.id,
+                "unit_id": unit_id,
+            })
+            try:
+                _set_registry_status(int(unit_id), "Available")
+            except (TypeError, ValueError):
+                pass
         return Response(self.get_serializer(incident).data)
 
 
@@ -270,8 +474,14 @@ class TaskViewSet(viewsets.ModelViewSet):
         instance = serializer.save()
         if instance.status != old_status:
             actor = self.request.user
+            incident = instance.incident
+            unit = instance.assigned_unit
+            unit_name = (
+                unit.name if unit
+                else (f"Unit {instance.mock_unit_id}" if instance.mock_unit_id else "Unit")
+            )
             _log_status_change(
-                incident=instance.incident,
+                incident=incident,
                 actor=actor,
                 title=f"Task '{instance.title}' status changed",
                 description=(
@@ -280,9 +490,44 @@ class TaskViewSet(viewsets.ModelViewSet):
                     f"(role={getattr(actor, 'role', '') or 'unknown'})."
                 ),
             )
+
+            # "On My Way": a unit accepting its task starts the shared en-route
+            # trip and advances the incident into EN_ROUTE.
+            if instance.status == Task.Status.IN_PROGRESS and old_status != Task.Status.IN_PROGRESS:
+                _start_trip(
+                    instance,
+                    getattr(unit, "location_lat", None),
+                    getattr(unit, "location_lng", None),
+                )
+            if instance.status in Task.TERMINAL_STATUSES:
+                _end_trip(instance.id)
+
+            if instance.status == Task.Status.IN_PROGRESS and incident.status in (
+                Incident.Status.OPEN, Incident.Status.PENDING,
+            ):
+                inc_old = incident.status
+                incident.status = Incident.Status.EN_ROUTE
+                incident.save(update_fields=["status"])
+                _log_status_change(
+                    incident=incident, actor=actor,
+                    title=f"Incident status changed: {inc_old} → {incident.status}",
+                    description=f"{unit_name} en route.",
+                )
+                _broadcast_realtime({
+                    "type": "user_action",
+                    "action": "incident_status_update",
+                    **_actor_fields(actor),
+                    "incident_id": incident.id,
+                    "incident_title": incident.title,
+                    "old_status": inc_old,
+                    "new_status": incident.status,
+                })
+
             # Fires for every caller (field unit accepting/arriving/completing,
             # or a dispatcher/admin editing status directly) since both paths
-            # below funnel through perform_update().
+            # below funnel through perform_update(). Carries unit/incident
+            # context so the dashboard can draw the route + announce en route
+            # without a re-fetch.
             _broadcast_realtime({
                 "type": "user_action",
                 "action": "task_status_update",
@@ -291,7 +536,29 @@ class TaskViewSet(viewsets.ModelViewSet):
                 "task_title": instance.title,
                 "old_status": old_status,
                 "new_status": instance.status,
+                "unit_id": unit.id if unit else None,
+                "unit_name": unit_name,
+                "incident_id": incident.id,
+                "incident_lat": incident.location_lat,
+                "incident_lng": incident.location_lng,
             })
+
+            # Mirror the update into the linked Field Command Post's log so its
+            # Operational Timeline reflects everything its assigned units report.
+            if incident.field_command_id:
+                fc = incident.field_command
+                _log_field_command_note(
+                    fc, FieldCommandNote.Kind.STATUS,
+                    f"{unit_name}: {old_status} → {instance.status} on '{incident.title}'",
+                )
+                _broadcast_realtime({
+                    "type": "user_action",
+                    "action": "field_command_note_added",
+                    **_actor_fields(actor),
+                    "field_command_id": fc.field_key,
+                    "incident_id": incident.id,
+                    **FieldCommandSerializer(fc).data,
+                })
 
     def partial_update(self, request, *args, **kwargs):
         user_role = getattr(request.user, "role", "")
@@ -315,6 +582,28 @@ class TaskViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(tasks, many=True)
         return Response(serializer.data)
 
+    @action(detail=True, methods=["get"], url_path="trip",
+            permission_classes=[ReadOnlyOrAdminDispatcher])
+    def trip(self, request, pk=None):
+        """The active en-route trip for this task — the single source of truth
+        for the vehicle's road path, ETA and distance, read by BOTH the
+        war-room map and the mobile map so they never disagree. Anonymous-
+        readable (the war-room isn't an authenticated client)."""
+        task = self.get_object()
+        with _active_trips_lock:
+            exists = task.id in _active_trips
+        if not exists and task.status == Task.Status.IN_PROGRESS and (
+            task.incident and task.incident.status == Incident.Status.EN_ROUTE
+        ):
+            # Server restarted mid-drive, or the trip was never started — rebuild
+            # it now from the unit's current position.
+            unit = task.assigned_unit
+            _start_trip(task, getattr(unit, "location_lat", None), getattr(unit, "location_lng", None))
+        trip = _resolved_trip(task.id)
+        if trip is None:
+            return Response({"detail": "No active trip."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(trip)
+
 
 class UnitViewSet(viewsets.ModelViewSet):
     queryset = Unit.objects.all()
@@ -324,10 +613,22 @@ class UnitViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         params = self.request.query_params
-        # Mobile unit-selection: only units nobody currently holds, or that
-        # are offline (never claimed, or a previous holder disconnected).
+        # Mobile unit-selection: everything except units an *active* holder
+        # (someone else, heartbeating recently) currently controls. A unit
+        # whose previous holder's app died — stale last_seen — is claimable
+        # again, and a user can always re-claim their own unit (so a
+        # reconnecting device picks the same car instead of spawning a second).
         if params.get("claimable") == "true":
-            qs = qs.filter(Q(app_user__isnull=True) | Q(is_online=False))
+            user = getattr(self.request, "user", None)
+            stale_cutoff = timezone.now() - Unit.HEARTBEAT_STALE_AFTER
+            active_holder = (
+                Q(app_user__isnull=False)
+                & Q(is_online=True)
+                & (Q(last_seen__isnull=True) | Q(last_seen__gte=stale_cutoff))
+            )
+            if user is not None and getattr(user, "is_authenticated", False):
+                active_holder &= ~Q(app_user=user)
+            qs = qs.exclude(active_holder)
         if params.get("type"):
             qs = qs.filter(type=params["type"])
         return qs
@@ -931,9 +1232,6 @@ def field_incident_add_event(request):
     field_id = request.query_params.get("fieldId")
     data = _get_field_incident_data(field_id)
 
-    if data is None:
-        return Response({"detail": "No major incident active"}, status=status.HTTP_404_NOT_FOUND)
-
     # `source` identifies which of the three timeline contributors logged
     # this event. Read directly off the declared X-Actor-Role header rather
     # than effective_role() — that helper collapses FIELD_OPERATOR and UNIT
@@ -949,11 +1247,25 @@ def field_incident_add_event(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # A real field report from the mobile app carries the incident it belongs
+    # to. Linking the event to that incident makes it visible in the regional
+    # event feed too (incident_events filters incident__isnull=False) and lets
+    # it surface in a linked Field Command Post's timeline below. Text-only
+    # training-sim entries still send no incident_id and stay unlinked.
+    incident_obj = None
+    incident_id_raw = request.data.get("incident_id")
+    if incident_id_raw:
+        try:
+            incident_obj = Incident.objects.filter(pk=int(incident_id_raw)).first()
+        except (TypeError, ValueError):
+            incident_obj = None
+
     # Persist the event to the database. created_by/actor_id follow
     # _log_status_change's pattern (views.py) — the resolved real actor, not
     # a client-supplied "created_by" string from the request body.
     actor = request.user
     event_obj = IncidentEvent.objects.create(
+        incident=incident_obj,
         event_type=request.data.get("event_type", "UPDATE"),
         severity=request.data.get("severity", "INFO"),
         title=request.data.get("title", "Event"),
@@ -976,6 +1288,21 @@ def field_incident_add_event(request):
     serializer = IncidentEventSerializer(event_obj, context={"request": request})
     response_data = serializer.data
 
+    # Mirror the report into a linked Field Command Post's Operational Timeline.
+    if incident_obj is not None and incident_obj.field_command_id:
+        fc = incident_obj.field_command
+        note_msg = event_obj.title
+        if event_obj.description:
+            note_msg = f"{event_obj.title} — {event_obj.description}"
+        _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, note_msg)
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "field_command_note_added",
+            "field_command_id": fc.field_key,
+            "incident_id": incident_obj.id,
+            **FieldCommandSerializer(fc).data,
+        })
+
     # Mirror into the in-memory event list so SSE streaming stays consistent
     in_memory_event = {
         "id": event_obj.id,
@@ -988,9 +1315,9 @@ def field_incident_add_event(request):
         "created_at": event_obj.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "media": response_data["media"],
     }
-    data.setdefault("events", []).insert(0, in_memory_event)
-
-    _push_field_sse({"type": "incident_update", "data": {"new_event": in_memory_event}})
+    if data is not None:
+        data.setdefault("events", []).insert(0, in_memory_event)
+        _push_field_sse({"type": "incident_update", "data": {"new_event": in_memory_event}})
 
     return Response(response_data, status=status.HTTP_201_CREATED)
 
@@ -1102,6 +1429,27 @@ def _set_registry_status(mock_unit_id, mobile_status):
     entry = _routine_units_registry.get(mock_unit_id)
     if entry is not None and mobile_status in _VALID_MOBILE_STATUSES:
         entry["status"] = mobile_status
+
+
+def _notify_unit_dispatched(unit_pk, incident_title, incident_key=None):
+    """Push notification + mobile-registry side effects for a unit that was just
+    dispatched to an incident. Shared by IncidentViewSet.assign_unit (real
+    incident, panel/map dispatch) and mobile_dispatch (the SIMULATION drill's
+    mock-incident bridge). PushToken rows for app-claimed units are keyed on the
+    real Unit pk (see mobile-app UnitSelectScreen.registerPushToken)."""
+    try:
+        _set_registry_status(int(unit_pk), "Dispatched")
+    except (TypeError, ValueError):
+        pass
+    tokens = list(
+        PushToken.objects.filter(mock_unit_id=unit_pk).values_list("token", flat=True)
+    )
+    _send_expo_push(
+        tokens,
+        title="New Dispatch",
+        body=f"{incident_title} — respond immediately",
+        data={"incident_key": incident_key} if incident_key is not None else {},
+    )
 
 
 @api_view(["POST"])

@@ -70,6 +70,23 @@ export const assignUnitToIncident = async (incidentId, unitId) => {
   return res.data;
 };
 
+// Undo assignUnitToIncident — cancels the unit's open Task on this incident.
+export const unassignUnitFromIncident = async (incidentId, unitId) => {
+  const res = await api.post(`/incidents/${incidentId}/unassign-unit/`, { unit_id: unitId });
+  return res.data;
+};
+
+// The shared en-route trip for a task (road path + ETA + distance) — the same
+// object the mobile app reads, so the two maps agree. null if no active drive.
+export const getTaskTrip = async (taskId) => {
+  try {
+    const res = await api.get(`/tasks/${taskId}/trip/`);
+    return res.data;
+  } catch {
+    return null;
+  }
+};
+
 const formatDispatchError = async (response) => {
   let detail = "Unknown error";
   try {

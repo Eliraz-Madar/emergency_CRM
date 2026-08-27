@@ -9,17 +9,29 @@ import { saveReport } from "../storage/offlineDB";
 import { API_BASE_URL } from "../config";
 import { useUser } from "../context/UserContext";
 import { getAuthHeaders } from "../utils/apiClient";
+import { markOnMyWay, markArrived } from "../utils/taskActions";
 
+// Field workflow, not raw task states:
+//  EN_ROUTE  -> markOnMyWay  (task IN_PROGRESS + incident EN_ROUTE)
+//  ON_SCENE  -> markArrived  (task IN_PROGRESS + incident ON_SCENE) = "in progress"
+//  DONE      -> task DONE
 const STATUS_OPTIONS = [
-  { value: "PENDING",     label: "Pending",     color: "#546E7A", bg: "#ECEFF1" },
-  { value: "IN_PROGRESS", label: "In Progress", color: "#E65100", bg: "#FFF3E0" },
-  { value: "DONE",        label: "Done",        color: "#2E7D32", bg: "#E8F5E9" },
+  { value: "EN_ROUTE", label: "En Route",    color: "#E65100", bg: "#FFF3E0" },
+  { value: "ON_SCENE", label: "In Progress", color: "#1565C0", bg: "#E3F2FD" },
+  { value: "DONE",     label: "Done",        color: "#2E7D32", bg: "#E8F5E9" },
 ];
+
+// Pre-select the option that matches where the crew already is.
+function defaultStatusFor(task) {
+  if (task?.status === "DONE") return "DONE";
+  if (task?.incident_status === "ON_SCENE") return "ON_SCENE";
+  return "EN_ROUTE";
+}
 
 const MAX_ATTACHMENTS = 5;
 
 export default function ReportScreen({ selectedTask, token, online, onDone }) {
-  const originalStatus = selectedTask?.status || "PENDING";
+  const originalStatus = defaultStatusFor(selectedTask);
   const [status, setStatus] = useState(originalStatus);
   const [notes, setNotes] = useState("");
   const [mediaFiles, setMediaFiles] = useState([]);
@@ -104,12 +116,22 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
   // ── Network calls ──────────────────────────────────────────────────────────
 
   const sendTaskUpdate = async () => {
+    // "En Route" / "In Progress" (arrived) are field-workflow steps, not raw
+    // Task statuses — the helpers move both the task and the incident.
+    if (status === "EN_ROUTE") {
+      await markOnMyWay(selectedTask, token, user);
+      return;
+    }
+    if (status === "ON_SCENE") {
+      await markArrived(selectedTask, token, user);
+      return;
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(`${API_BASE_URL}/api/tasks/${selectedTask.id}/`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", ...getAuthHeaders(token, user) },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status: "DONE" }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -132,12 +154,22 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
       formData.append("title", `Task Update: ${taskTitle}`);
       formData.append("description", descParts.join("\n"));
       formData.append("created_by", user?.username || "Field Unit");
+      // Link the report to its incident so it reaches the regional event feed
+      // and any linked Field Command Post's timeline.
+      if (selectedTask?.incident != null) {
+        formData.append("incident_id", String(selectedTask.incident));
+      }
+      if (selectedTask?.id != null) {
+        formData.append("task_id", String(selectedTask.id));
+      }
       for (const file of mediaFiles) {
         formData.append("files", { uri: file.uri, type: file.type, name: file.name });
       }
       await fetch(`${API_BASE_URL}/api/field/add-event/?fieldId=default`, {
         method: "POST",
-        headers: getAuthHeaders(token, user),
+        // add-event requires X-Actor-Role to tag the timeline source; the
+        // mobile app always reports as a field UNIT.
+        headers: { ...getAuthHeaders(token, user), "X-Actor-Role": "UNIT" },
         body: formData,
       });
     } catch (err) {
@@ -147,6 +179,9 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
 
   const handleSubmit = async () => {
     if (!selectedTask) { setError("No task selected."); return; }
+    // Offline queue stores a raw task status: EN_ROUTE / ON_SCENE both map to
+    // IN_PROGRESS; DONE stays DONE.
+    const offlineStatus = status === "DONE" ? "DONE" : "IN_PROGRESS";
     setLoading(true);
     setError("");
     try {
@@ -154,12 +189,12 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
         await sendTaskUpdate();
         await sendEventWithMedia();
       } else {
-        await saveReport(taskTitle, notes, status, null);
+        await saveReport(taskTitle, notes, offlineStatus, null);
       }
       onDone();
     } catch (err) {
       setError(err.message || "Failed to submit report.");
-      try { await saveReport(taskTitle, notes, status, null); } catch (_) {}
+      try { await saveReport(taskTitle, notes, offlineStatus, null); } catch (_) {}
     } finally {
       setLoading(false);
     }

@@ -42,8 +42,11 @@ export function getSortedAvailableUnits(units, point, filterFn) {
 
   const pool = (Array.isArray(units) ? units : []).filter((unit) => {
     if (unit.is_online !== true) return false;
+    // Already committed to an incident (dispatched / en route / on scene) —
+    // not available for a new assignment.
+    if (unit.assignedTo != null) return false;
     const status = (unit.status || '').toUpperCase();
-    if (status === 'EN_ROUTE' || status === 'ON_SCENE') return false;
+    if (status === 'EN_ROUTE' || status === 'ON_SCENE' || status === 'ASSIGNED') return false;
     // Confirmed gap fix: a unit already attached to a FieldCommand should
     // not show up as available for a new dispatch/assignment. Checked as
     // `field_id`, not the raw model field name `field_command` — UnitSerializer

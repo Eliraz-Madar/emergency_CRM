@@ -5,6 +5,7 @@ import { formatTime } from '../utils/time.js';
 import { useDashboardStore } from '../store/dashboard.js';
 import { getSortedAvailableUnits } from '../utils/units.js';
 import { RealtimeService } from '../services/realtime.js';
+import { calculateDistanceKm } from '../utils/units.js';
 import { KPICards } from '../components/KPICards.jsx';
 import { FilterBar } from '../components/FilterBar.jsx';
 import { IncidentList } from '../components/IncidentList.jsx';
@@ -80,6 +81,155 @@ const normalizeCreateFieldUnitType = (type) => {
   return 'POLICE';
 };
 
+// onlineUnits carries client-only fields (assignedTo / status / route) that are
+// NOT persisted and NOT part of GET /api/units/. Rebuild assignedTo/status from
+// the DB Task rows carried on each incident so a dispatch survives navigating
+// away and back. An existing road route is kept when the unit is still assigned
+// to the same incident.
+export function reconcileUnitAssignments(incidents, units, prevUnits = []) {
+  const overlay = new Map();
+  (incidents || []).forEach((inc) => {
+    // A closed incident holds no forces — never re-associate a unit to one on
+    // reload (the crew may have been reassigned or stood down). Same rule the
+    // backend applies in IncidentSerializer.get_assigned_unit_ids.
+    if (inc.status === 'CLOSED') return;
+    (inc.tasks || []).forEach((task) => {
+      if (!task.assigned_unit) return;
+      if (task.status === 'DONE' || task.status === 'CANCELLED') return;
+      // Status reflects where the unit is in the flow:
+      //  - task PENDING            -> ASSIGNED  (dispatched, awaiting the crew's
+      //                                          "On My Way" tap in the app)
+      //  - task IN_PROGRESS + inc ON_SCENE -> ON_SCENE
+      //  - task IN_PROGRESS        -> EN_ROUTE  (accepted, driving)
+      let status = 'ASSIGNED';
+      if (task.status === 'IN_PROGRESS') {
+        status = inc.status === 'ON_SCENE' ? 'ON_SCENE' : 'EN_ROUTE';
+      }
+      overlay.set(task.assigned_unit, { assignedTo: inc.id, status });
+    });
+  });
+  const prevById = new Map((prevUnits || []).map((u) => [u.id, u]));
+  return (units || []).map((u) => {
+    const ov = overlay.get(u.id);
+    // Only a unit that's actually here and connected can be shown as
+    // associated with an event — a vehicle that isn't on the map must not
+    // carry a phantom assignment left over from a previous run. The backing
+    // Task still exists, so it re-associates if the crew reconnects.
+    if (!ov || u.is_online !== true) return u;
+    const prev = prevById.get(u.id);
+    const keepRoute = prev && Array.isArray(prev.route) && prev.assignedTo === ov.assignedTo
+      ? { route: prev.route }
+      : {};
+    return { ...u, ...ov, ...keepRoute };
+  });
+}
+
+// Total length of a [ [lat,lng], ... ] polyline, in km.
+function polylineLengthKm(coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return 0;
+  let km = 0;
+  for (let i = 1; i < coords.length; i += 1) {
+    const d = calculateDistanceKm(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+    if (Number.isFinite(d)) km += d;
+  }
+  return km;
+}
+
+// Point at cumulative-distance fraction `frac` along a polyline, plus the index
+// of the segment it lands on. Identical maths to the mobile app's utils/trip.js
+// so both screens place the vehicle in exactly the same spot.
+function pointAtFraction(coords, frac) {
+  if (!Array.isArray(coords) || coords.length < 2) {
+    return { point: coords?.[0] ?? null, segIndex: 0 };
+  }
+  const segLen = [];
+  let total = 0;
+  for (let i = 1; i < coords.length; i += 1) {
+    const d = calculateDistanceKm(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+    segLen.push(Number.isFinite(d) ? d : 0);
+    total += segLen[i - 1];
+  }
+  if (total === 0) return { point: coords[coords.length - 1], segIndex: coords.length - 2 };
+  let target = Math.max(0, Math.min(1, frac)) * total;
+  for (let i = 0; i < segLen.length; i += 1) {
+    if (target <= segLen[i] || i === segLen.length - 1) {
+      const t = segLen[i] > 0 ? Math.max(0, Math.min(1, target / segLen[i])) : 0;
+      return {
+        point: [
+          coords[i][0] + (coords[i + 1][0] - coords[i][0]) * t,
+          coords[i][1] + (coords[i + 1][1] - coords[i][1]) * t,
+        ],
+        segIndex: i,
+      };
+    }
+    target -= segLen[i];
+  }
+  return { point: coords[coords.length - 1], segIndex: coords.length - 2 };
+}
+
+const SIM_TICK_MS = 1000;
+// Drive compression — MUST match TRIP_SPEEDUP on the backend and in the mobile
+// IncidentMapScreen. Only used as a fallback if the trip payload omits it.
+const TRIP_SPEEDUP = 8;
+
+// Fetch the shared en-route trip for a task and stash it on the unit so the
+// simulation tick can interpolate the vehicle's position. The trip is the same
+// object the mobile app reads, so the two screens agree on path/ETA/distance.
+async function startUnitTrip(unitId, taskId) {
+  if (taskId == null) return;
+  const trip = await api.getTaskTrip(taskId);
+  const coords = Array.isArray(trip?.coords) ? trip.coords : null;
+  if (!coords || coords.length < 2) return;
+  useDashboardStore.getState().upsertOnlineUnit({
+    id: unitId,
+    tripTaskId: taskId,
+    fullRoute: coords,
+    route: coords,
+    position: coords[0],
+    tripAcceptedAt: trip.accepted_at,
+    tripDurationS: trip.duration_s || 0,
+    tripDistanceKm: (trip.distance_m || 0) / 1000 || polylineLengthKm(coords),
+    tripSpeedup: trip.speedup || TRIP_SPEEDUP,
+  });
+}
+
+// One simulation tick: place every EN_ROUTE unit at the point on its trip that
+// matches the (compressed) elapsed time, trim the drawn route, refresh ETA and
+// distance. Deterministic from tripAcceptedAt, so a reload lands in the same
+// place and the mobile app stays in lock-step.
+function stepEnRouteUnits() {
+  const { onlineUnits, incidents, upsertOnlineUnit } = useDashboardStore.getState();
+  (onlineUnits || []).forEach((u) => {
+    if (u.status !== 'EN_ROUTE') return;
+    const coords = u.fullRoute;
+    if (!Array.isArray(coords) || coords.length < 2) return;
+    if (!u.tripAcceptedAt || !u.tripDurationS) return;
+
+    const inc = u.assignedTo != null
+      ? (incidents || []).find((i) => i.id === u.assignedTo) : null;
+    if (inc && inc.status === 'CLOSED') return;
+
+    const speedup = u.tripSpeedup || TRIP_SPEEDUP;
+    const elapsedS = (Date.now() - new Date(u.tripAcceptedAt).getTime()) / 1000;
+    const progress = Math.max(0, Math.min(1, (elapsedS * speedup) / u.tripDurationS));
+    const { point, segIndex } = pointAtFraction(coords, progress);
+    if (!point) return;
+    const arrived = progress >= 1;
+    const remaining = arrived ? [] : [point, ...coords.slice(segIndex + 1)];
+    const totalKm = u.tripDistanceKm || polylineLengthKm(coords);
+    upsertOnlineUnit({
+      id: u.id,
+      position: point,
+      location_lat: point[0],
+      location_lng: point[1],
+      route: remaining,
+      routeIndex: arrived ? coords.length - 1 : segIndex,
+      distanceKm: arrived ? 0 : totalKm * (1 - progress),
+      etaMin: arrived ? 0 : (u.tripDurationS / 60 / speedup) * (1 - progress),
+    });
+  });
+}
+
 /**
  * Dashboard Page - Main operational dashboard (War-Room)
  *
@@ -133,6 +283,9 @@ export default function Dashboard() {
   // effect's own closure would still be the initial `null` when cleanup
   // fires).
   const realtimeServiceRef = useRef(null);
+  // Read inside the (once-created) SSE callback closure to refresh the open
+  // Field Command panel when a remote note lands on it.
+  const selectedFieldCommandRef = useRef(null);
   const [showEventFeed, setShowEventFeed] = useState(false);
   // activeFilter is persisted in the store so it survives page refresh
   const activeFilter = storedActiveFilter;
@@ -209,6 +362,10 @@ export default function Dashboard() {
       setSelectedFieldCommand(null);
     }
   }, [selectedUnitId, setSelectedIncident]);
+
+  useEffect(() => {
+    selectedFieldCommandRef.current = selectedFieldCommand;
+  }, [selectedFieldCommand]);
 
   // Load the selected control-center name from localStorage on mount
   useEffect(() => {
@@ -575,7 +732,7 @@ export default function Dashboard() {
       }
 
       const [realUnits] = await Promise.all([api.getRealUnits(), refreshFieldCommands()]);
-      setOnlineUnits(realUnits || []);
+      setOnlineUnits(reconcileUnitAssignments(incidents, realUnits || [], onlineUnits));
       if (created?.id) {
         await handleFieldCommandSelect(created);
       }
@@ -710,8 +867,23 @@ export default function Dashboard() {
 
         setIncidents(incidents);
         setUnits(units);
-        setOnlineUnits(realUnits);
+        setOnlineUnits(reconcileUnitAssignments(
+          incidents, realUnits, useDashboardStore.getState().onlineUnits,
+        ));
         setEvents(events);
+
+        // Re-attach the shared trip for any unit already en route — the drawn
+        // route + interpolation state are client-only and lost on reload, but
+        // the backend still has (or lazily rebuilds) the trip.
+        incidents.forEach((inc) => {
+          if (inc.status !== 'EN_ROUTE') return;
+          (inc.tasks || []).forEach((task) => {
+            if (task.assigned_unit && task.status === 'IN_PROGRESS') {
+              startUnitTrip(task.assigned_unit, task.id);
+            }
+          });
+        });
+
         try {
           await refreshFieldCommands();
         } catch (error) {
@@ -761,16 +933,46 @@ export default function Dashboard() {
               // claim, or disconnect — see api/views.py::_broadcast_realtime
               // calls in UnitViewSet/unit_heartbeat and
               // final changes/05_user_unit_claiming_and_live_sync.md.
-              upsertOnlineUnit({
-                id: update.unit_id,
-                name: update.unit_name,
-                ...(update.location_lat != null && update.location_lng != null
-                  ? { location_lat: update.location_lat, location_lng: update.location_lng }
-                  : {}),
-                is_online: update.action !== 'unit_disconnected',
-              });
+              {
+                const known = useDashboardStore.getState().onlineUnits
+                  .find((x) => x.id === update.unit_id);
+                // While a unit is EN_ROUTE the client-side movement simulation
+                // owns its position (a stationary test phone would otherwise
+                // keep snapping the marker back to the dispatch point). Real
+                // GPS resumes control once it is no longer en route.
+                const simOwnsPosition = known && known.status === 'EN_ROUTE';
+                upsertOnlineUnit({
+                  id: update.unit_id,
+                  name: update.unit_name,
+                  ...(update.location_lat != null && update.location_lng != null && !simOwnsPosition
+                    ? { location_lat: update.location_lat, location_lng: update.location_lng }
+                    : {}),
+                  is_online: update.action !== 'unit_disconnected',
+                  last_seen: new Date().toISOString(),
+                });
+              }
             } else if (update.type === 'user_action' && update.action === 'incident_status_update') {
               updateIncident(update.incident_id, { status: update.new_status });
+              // Move the incident's units through the flow with it.
+              if (['ON_SCENE', 'RESOLVED', 'CLOSED'].includes(update.new_status)) {
+                useDashboardStore.getState().onlineUnits
+                  .filter((u) => String(u.assignedTo) === String(update.incident_id))
+                  .forEach((u) => {
+                    if (update.new_status === 'ON_SCENE') {
+                      upsertOnlineUnit({
+                        id: u.id, status: 'ON_SCENE', route: [],
+                        routeIndex: undefined, etaMin: 0, distanceKm: 0,
+                        fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                      });
+                    } else {
+                      upsertOnlineUnit({
+                        id: u.id, assignedTo: null, status: null, route: null,
+                        routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
+                        fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                      });
+                    }
+                  });
+              }
             } else if (update.type === 'user_action' && update.action === 'incident_created') {
               // update itself is the full IncidentSerializer shape (see
               // IncidentViewSet.perform_create) — safe to insert as-is.
@@ -787,7 +989,8 @@ export default function Dashboard() {
               update.action === 'field_command_created' ||
               update.action === 'field_command_closed' ||
               update.action === 'field_command_unit_assigned' ||
-              update.action === 'field_command_incident_assigned'
+              update.action === 'field_command_incident_assigned' ||
+              update.action === 'field_command_note_added'
             )) {
               // update itself is the full FieldCommandSerializer shape (see
               // FieldCommandViewSet's perform_create/assign_unit/
@@ -810,20 +1013,52 @@ export default function Dashboard() {
               if (update.action === 'field_command_unit_assigned' && update.unit_id != null) {
                 upsertOnlineUnit({ id: update.unit_id, field_id: update.field_command_id });
               }
-            } else if (update.type === 'user_action' && (
-              update.action === 'task_status_update' ||
-              update.action === 'incident_unit_assigned'
-            )) {
-              // Known gap, not silently dropped: this dashboard holds no
-              // standalone Task state (useDashboardStore has no `tasks`
-              // array/updateTask action) — the only task-derived data an
-              // Incident carries is its serializer-computed
-              // assigned_unit_ids, which these two events would affect but
-              // which this handler has no accurate way to recompute
-              // without re-fetching the incident. Logged so the gap is
-              // visible rather than invisible; not wired to any store
-              // mutation this stage.
-              console.log(`[Realtime] ${update.action} received but not yet consumed (no task state on this dashboard):`, update);
+              // Refresh the open Field Command panel so a note logged by a
+              // remote write (an assigned unit's status change / report)
+              // shows up without a manual reload.
+              if (update.action === 'field_command_note_added') {
+                const openId = selectedFieldCommandRef.current?.id;
+                if (openId && openId === update.field_command_id) {
+                  api.getFieldCommand(openId).then(setFieldCommandSummary).catch(() => {});
+                }
+              }
+            } else if (update.type === 'user_action' && update.action === 'incident_unit_assigned') {
+              // Dispatched, but the crew hasn't accepted yet — ASSIGNED, no
+              // route, no announcement. (Also rebuilt from DB tasks on the next
+              // mount via reconcileUnitAssignments.)
+              if (update.unit_id != null) {
+                upsertOnlineUnit({
+                  id: update.unit_id, assignedTo: update.incident_id ?? null, status: 'ASSIGNED',
+                });
+              }
+            } else if (update.type === 'user_action' && update.action === 'incident_unit_unassigned') {
+              if (update.unit_id != null) {
+                upsertOnlineUnit({
+                  id: update.unit_id, assignedTo: null, status: null, route: null,
+                  routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
+                  fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                });
+              }
+            } else if (update.type === 'user_action' && update.action === 'task_status_update') {
+              const unitId = update.unit_id;
+              if (unitId != null) {
+                if (update.new_status === 'IN_PROGRESS') {
+                  // Crew tapped "On My Way" — go EN_ROUTE and attach the shared
+                  // trip; the sim tick then interpolates the vehicle position.
+                  upsertOnlineUnit({
+                    id: unitId, assignedTo: update.incident_id ?? null, status: 'EN_ROUTE',
+                    routeIndex: 0,
+                  });
+                  startUnitTrip(unitId, update.task_id);
+                } else if (update.new_status === 'DONE' || update.new_status === 'CANCELLED') {
+                  upsertOnlineUnit({
+                    id: unitId,
+                    status: update.new_status === 'DONE' ? 'ON_SCENE' : null,
+                    route: null, routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
+                    fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                  });
+                }
+              }
             }
           },
           (error) => {
@@ -857,6 +1092,30 @@ export default function Dashboard() {
     };
   }, []);
 
+  // Drive the en-route vehicle movement simulation.
+  useEffect(() => {
+    const interval = setInterval(stepEnRouteUnits, SIM_TICK_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Client-side staleness sweep: a claimed unit whose device stopped sending
+  // heartbeats (~90s) drops off the live map even if no unit_disconnected
+  // event arrived (app killed, phone lost signal). GET /api/units/ already
+  // applies the same rule server-side on the next reload/poll.
+  useEffect(() => {
+    const STALE_MS = 90 * 1000;
+    const interval = setInterval(() => {
+      const { onlineUnits, upsertOnlineUnit } = useDashboardStore.getState();
+      (onlineUnits || []).forEach((u) => {
+        if (u.is_online !== true || !u.last_seen) return;
+        if (Date.now() - new Date(u.last_seen).getTime() > STALE_MS) {
+          upsertOnlineUnit({ id: u.id, is_online: false });
+        }
+      });
+    }, 30 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Fallback polling when realtime is unavailable.
   // Covers both DEGRADED (SSE parse errors) and OFFLINE (backend unreachable on load).
   // On OFFLINE we also attempt to re-initialise the SSE stream once data loads.
@@ -873,7 +1132,9 @@ export default function Dashboard() {
         ]);
         setIncidents(incidents);
         setUnits(units);
-        setOnlineUnits(realUnits);
+        setOnlineUnits(reconcileUnitAssignments(
+          incidents, realUnits, useDashboardStore.getState().onlineUnits,
+        ));
         setEvents(events);
         setIsLoading(false);
 

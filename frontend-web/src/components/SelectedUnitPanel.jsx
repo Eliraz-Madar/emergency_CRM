@@ -14,6 +14,12 @@ const TASK_STATUS_META = {
   PENDING: { label: 'Pending', color: '#f59e0b' },
 };
 
+const STATUS_LABEL = {
+  ASSIGNED: 'Awaiting acceptance',
+  EN_ROUTE: 'On the way',
+  ON_SCENE: 'On scene',
+};
+
 export function SelectedUnitPanel({ unit, destination }) {
   const [tasks, setTasks] = useState([]);
   const [tasksError, setTasksError] = useState(false);
@@ -26,7 +32,17 @@ export function SelectedUnitPanel({ unit, destination }) {
     let cancelled = false;
     setTasksError(false);
     getUnitTasks(unit.id)
-      .then((data) => { if (!cancelled) setTasks(Array.isArray(data) ? data : []); })
+      .then((data) => {
+        if (cancelled) return;
+        // Only tasks that still represent a live assignment — a DONE/CANCELLED
+        // task, or one on a closed incident, is history, not a current link.
+        const active = (Array.isArray(data) ? data : []).filter(
+          (t) => t.status !== 'DONE'
+            && t.status !== 'CANCELLED'
+            && t.incident_status !== 'CLOSED',
+        );
+        setTasks(active);
+      })
       .catch(() => { if (!cancelled) { setTasks([]); setTasksError(true); } });
     return () => { cancelled = true; };
   }, [unit?.id]);
@@ -64,8 +80,16 @@ export function SelectedUnitPanel({ unit, destination }) {
         </div>
       </div>
       <div style={{ marginTop: '10px', color: '#94a3b8', fontSize: '0.85rem' }}>
-        Status: {unit.status || 'Unknown'}
+        Status: {STATUS_LABEL[unit.status] || unit.status || 'Unknown'}
       </div>
+      {unit.status === 'EN_ROUTE' && Number.isFinite(unit.etaMin) && (
+        <div style={{ marginTop: '6px', display: 'flex', gap: '14px', color: '#e2e8f0', fontSize: '0.85rem' }}>
+          <span>ETA: <strong>{Math.max(1, Math.round(unit.etaMin))} min</strong></span>
+          {Number.isFinite(unit.distanceKm) && (
+            <span>Distance: <strong>{unit.distanceKm.toFixed(1)} km</strong></span>
+          )}
+        </div>
+      )}
 
       {/* ── Assigned tasks ── */}
       <div style={{ marginTop: '12px', borderTop: '1px solid #1e293b', paddingTop: '10px' }}>

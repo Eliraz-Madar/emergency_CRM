@@ -33,27 +33,29 @@ export function KPICards() {
   const fireCount = availableUnits.filter((u) => u.type === 'FIRE').length;
   const medicalCount = availableUnits.filter((u) => u.type === 'MEDICAL').length;
 
-  // const totalIncidents = incidents.length;
-  const totalIncidents = incidents.length;
-  const activeIncidents = incidents.filter(
-    (inc) => inc.status !== 'CLOSED'
+  // "Active" = every incident that isn't CLOSED — the exact set the map and
+  // the "Incidents (N)" list header count, so the numbers always agree.
+  const activeList = incidents.filter((inc) => inc.status !== 'CLOSED');
+  const activeIncidents = activeList.length;
+  const awaitingDispatch = activeList.filter(
+    (inc) => inc.status === 'OPEN' || inc.status === 'PENDING'
   ).length;
-  const criticalIncidents = incidents.filter(
-    (inc) => inc.severity === 'CRITICAL'
+  const criticalIncidents = activeList.filter(
+    (inc) => (inc.priority || inc.severity) === 'CRITICAL'
   ).length;
 
   const kpis = [
-    {
-      label: 'Total Incidents',
-      value: totalIncidents,
-      color: '#3b82f6',
-      icon: '📋',
-    },
     {
       label: 'Active Incidents',
       value: activeIncidents,
       color: '#f59e0b',
       icon: '🔴',
+    },
+    {
+      label: 'Awaiting Dispatch',
+      value: awaitingDispatch,
+      color: '#3b82f6',
+      icon: '📋',
     },
     {
       label: 'Critical',

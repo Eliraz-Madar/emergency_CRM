@@ -27,6 +27,16 @@ export function MapView({
   const prevStatusRef = useRef(new Map());
   const arrivalAnnouncedRef = useRef(new Set());
   const prevEnRouteRef = useRef(new Set());
+  // unitId -> boolean: whether the unit was EN_ROUTE-with-a-route on the
+  // previous render. The "on its way" announcement fires only on the
+  // false -> true transition, and enRouteAnnouncedRef guarantees it happens
+  // at most once per en-route stint even if the effect re-runs many times.
+  const prevRouteRef = useRef(new Map());
+  const enRouteAnnouncedRef = useRef(new Set());
+  // Suppress the "on its way" announcement for units that were already en route
+  // when the page loaded (routes are rebuilt from the backend on mount) — only
+  // arm it a few seconds in, so it fires for genuine live acceptances only.
+  const announceArmedRef = useRef(false);
   const onMapCreateFieldCommandRef = useRef(onMapCreateFieldCommand);
   const onMapReportIncidentRef = useRef(onMapReportIncident);
   const onMapDispatchForceRef = useRef(onMapDispatchForce);
@@ -192,27 +202,33 @@ export function MapView({
   };
 
   const createFieldCommandIcon = (isSelected = false) => {
-    const borderColor = isSelected ? '#f59e0b' : '#0f172a';
+    const borderColor = isSelected ? '#f59e0b' : '#1d4ed8';
+    // A planted command flag on a mast — reads as "field command post
+    // established here", clearly distinct from the round unit markers and the
+    // teardrop incident pins.
     return L.divIcon({
       className: 'marker-field-command',
       html: `
-        <div style="
-          width: 34px;
-          height: 34px;
-          border-radius: 50%;
-          background: #111827;
-          border: 3px solid ${borderColor};
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 18px;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.35);
-        ">
-          🧭
+        <div style="position: relative; width: 40px; height: 44px;">
+          <div style="
+            position: absolute; left: 4px; top: 0;
+            width: 40px; height: 40px;
+            border-radius: 10px;
+            background: #0b1220;
+            border: 3px solid ${borderColor};
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+          ">🎖️</div>
+          <div style="
+            position: absolute; left: 0; bottom: -3px;
+            width: 4px; height: 24px; background: ${borderColor};
+            border-radius: 2px;
+          "></div>
         </div>
       `,
-      iconSize: [34, 34],
-      iconAnchor: [17, 34],
+      iconSize: [40, 44],
+      iconAnchor: [2, 44],
     });
   };
 
@@ -235,6 +251,8 @@ export function MapView({
     zoomToIncidentId,
     clearZoomToIncident,
     flashingIncidentId,
+    getFilteredIncidents,
+    filters,
   } = useDashboardStore();
 
   // Real, DB-backed units only, filtered to actively-connected devices.
@@ -253,6 +271,13 @@ export function MapView({
 
   // Real, DB-backed incidents only.
   const incidents = Array.isArray(dashboardIncidents) ? dashboardIncidents : [];
+
+  // Arm the "on its way" voice announcement a few seconds after mount so a
+  // reload (which rebuilds en-route routes from the backend) stays silent.
+  useEffect(() => {
+    const t = setTimeout(() => { announceArmedRef.current = true; }, 4000);
+    return () => clearTimeout(t);
+  }, []);
 
   // Initialize map
   useEffect(() => {
@@ -341,10 +366,11 @@ export function MapView({
     ];
 
     try {
-      if (validPoints.length > 1) {
-        map.flyToBounds(validPoints, { padding: [80, 80], animate: true, duration: 1.2 });
-      } else {
-        map.flyTo([incLat, incLng], 15, { animate: true, duration: 1.2 });
+      const bounds = L.latLngBounds(validPoints);
+      // Don't disturb the view if the incident (and its units) are already
+      // on screen, and never zoom the operator out — pan at the current zoom.
+      if (!map.getBounds().pad(-0.15).contains(bounds)) {
+        map.panTo(bounds.getCenter(), { animate: true, duration: 1.0 });
       }
     } catch { /* ignore Leaflet animation errors */ }
 
@@ -400,14 +426,26 @@ export function MapView({
       }
     });
 
+    // Remove stale unit markers — a unit that went offline / was released (so
+    // it's no longer in activeUnits) must not leave a ghost car on the map.
+    const liveUnitKeys = new Set(
+      (Array.isArray(activeUnits) ? activeUnits : []).map((u) => `unit-${u.id}`),
+    );
+    Object.keys(markersRef.current).forEach((key) => {
+      if (key.startsWith('unit-') && !liveUnitKeys.has(key)) {
+        map.removeLayer(markersRef.current[key]);
+        delete markersRef.current[key];
+      }
+    });
+
     // Simulation mode now relies on incidents array containing only the simulated incident
 
-    // ROUTINE MODE: Add incident markers (with filtering).
-    // Closed incidents never get a marker — the GET /api/incidents/ list
-    // itself stays unfiltered (sidebar/KPI counts need every row), this is
-    // purely a map-rendering exclusion. "CLOSED" matches Incident.Status.CLOSED
-    // exactly (backend/api/models.py).
-    const openIncidents = incidents.filter(inc => inc.status !== 'CLOSED');
+    // Add incident markers. Use the exact same filtered set the sidebar list
+    // renders (store.getFilteredIncidents — hides CLOSED + whatever the
+    // FilterBar chips/search exclude) so the map marker count and the
+    // "Incidents (N)" header never disagree. The channel tab (ALL/FIRE/...)
+    // is applied on top, matching IncidentList.
+    const openIncidents = getFilteredIncidents();
     const filteredIncidents = activeFilter === 'ALL'
       ? openIncidents
       : openIncidents.filter(inc => {
@@ -639,6 +677,9 @@ export function MapView({
       } else if (unitStatus === 'ON_SCENE') {
         statusDisplay = 'On Scene';
         statusTextColor = '#ef4444';
+      } else if (unitStatus === 'ASSIGNED') {
+        statusDisplay = 'Awaiting acceptance';
+        statusTextColor = '#38bdf8';
       } else if (unitStatus === 'AVAILABLE' || unitStatus === 'PATROL') {
         statusDisplay = 'Available';
         statusTextColor = '#10b981';
@@ -685,7 +726,7 @@ export function MapView({
         marker.openPopup();
       }
     });
-  }, [incidents, selectedIncidentId, selectedUnitId, activeFilter, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, activeUnits]);
+  }, [incidents, filters, selectedIncidentId, selectedUnitId, activeFilter, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, activeUnits]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {
@@ -718,6 +759,49 @@ export function MapView({
         const isSelected = selectedUnitIds.includes(unit.id);
         const unitIcon = createUnitIcon(type, isSelected, unit.status);
         marker.setIcon(unitIcon);
+      }
+
+      // "On its way" announcement — fires exactly once, on the transition to
+      // EN_ROUTE-with-a-route (i.e. the unit tapped "On My Way"). Never on the
+      // initial mount of an already-routed unit (hadRoute === undefined), and
+      // enRouteAnnouncedRef stops any repeat from effect re-runs.
+      if (unit.id) {
+        const hadRoute = prevRouteRef.current.get(unit.id);
+        const hasRoute = unit.status === 'EN_ROUTE'
+          && Array.isArray(unit.route) && unit.route.length > 0;
+        if (
+          hasRoute && hadRoute === false
+          && announceArmedRef.current
+          && !unit.isScenarioUnit
+          && !enRouteAnnouncedRef.current.has(unit.id)
+        ) {
+          enRouteAnnouncedRef.current.add(unit.id);
+          const unitLabel = unit.name || `Unit ${unit.id}`;
+          const targetIncident = unit.assignedTo
+            ? (incidents || []).find((i) => i.id === unit.assignedTo)
+            : null;
+          const dest = targetIncident?.title || targetIncident?.location_name || 'the incident';
+          const message = `${unitLabel} is on its way to ${dest}.`;
+          if (Number.isFinite(unitLat) && Number.isFinite(unitLng)) {
+            const popup = L.popup({ autoPan: false, closeButton: false, className: 'unit-arrival-popup' })
+              .setLatLng([unitLat, unitLng])
+              .setContent(`<div style="font-weight:600; padding:4px 6px;">${message}</div>`);
+            popup.openOn(map);
+            setTimeout(() => { if (map && map.closePopup) map.closePopup(popup); }, 3000);
+          }
+          if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(message);
+            utterance.lang = 'en-US';
+            window.speechSynthesis.speak(utterance);
+          }
+        }
+        // Reset once the unit is no longer en route, so a fresh dispatch later
+        // announces again.
+        if (unit.status !== 'EN_ROUTE') {
+          enRouteAnnouncedRef.current.delete(unit.id);
+        }
+        prevRouteRef.current.set(unit.id, hasRoute);
       }
 
       // Arrival notification when unit reaches ON_SCENE
@@ -765,65 +849,76 @@ export function MapView({
     });
   }, [activeUnits, selectedUnitIds]);
 
-  // Fly to selected incident when changed from list selection
+  // Pan to a newly-selected incident. Runs only when the SELECTION changes
+  // (not on every incidents-array update), never zooms the operator out — it
+  // keeps the current zoom and only zooms in if they were further out than 14 —
+  // and does nothing if the marker is already comfortably in view.
+  const flownToIncidentRef = useRef(null);
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!map || !selectedIncidentId) return;
+    if (!map || !selectedIncidentId) {
+      flownToIncidentRef.current = null;
+      return;
+    }
+    if (flownToIncidentRef.current === selectedIncidentId) return;
 
     const targetIncident = (incidents || []).find((inc) => inc.id === selectedIncidentId);
     if (!targetIncident || !Number.isFinite(targetIncident.location_lat) || !Number.isFinite(targetIncident.location_lng)) {
       return;
     }
+    flownToIncidentRef.current = selectedIncidentId;
 
-    const dest = [targetIncident.location_lat, targetIncident.location_lng];
-    map.flyTo(dest, 14, { animate: true, duration: 1.5 });
-
+    const dest = L.latLng(targetIncident.location_lat, targetIncident.location_lng);
     const incidentMarker = markersRef.current[`incident-${targetIncident.id}`];
+    if (!map.getBounds().pad(-0.25).contains(dest)) {
+      map.flyTo(dest, Math.max(map.getZoom(), 14), { animate: true, duration: 1.0 });
+    }
     if (incidentMarker && incidentMarker.openPopup) {
       incidentMarker.openPopup();
     }
   }, [selectedIncidentId, incidents]);
 
-  // Auto-zoom to show all dispatched (EN_ROUTE) units when new ones are dispatched
+  // When a unit is freshly dispatched, make sure the action is on screen — but
+  // never yank the operator's zoom out. If the unit + its incident are already
+  // (even partly) visible we leave the view alone; otherwise we pan to the
+  // midpoint keeping the current zoom.
+  const firstEnRouteFrameRef = useRef(false);
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
 
     const renderedUnits = Array.isArray(activeUnits) ? activeUnits : [];
-
     const enRouteUnits = renderedUnits.filter(u => u.status === 'EN_ROUTE');
     const currentEnRouteIds = new Set(enRouteUnits.map(u => u.id));
 
-    // Only zoom if there are NEW EN_ROUTE units (i.e. just dispatched)
-    const hasNewEnRoute = enRouteUnits.some(u => !prevEnRouteRef.current.has(u.id));
+    const newlyEnRoute = enRouteUnits.filter(u => !prevEnRouteRef.current.has(u.id));
     prevEnRouteRef.current = currentEnRouteIds;
 
-    if (!hasNewEnRoute || enRouteUnits.length === 0) return;
+    // Skip the batch that first appears on mount (rebuilt from DB assignments) —
+    // only react to units that go en route while the operator is watching.
+    if (!firstEnRouteFrameRef.current) {
+      firstEnRouteFrameRef.current = true;
+      return;
+    }
+    if (newlyEnRoute.length === 0) return;
 
-    // Build bounds: include every EN_ROUTE unit position
-    const points = enRouteUnits
-      .map(u => {
-        if (Array.isArray(u.position) && u.position.length >= 2) return u.position;
-        const lat = u.latitude ?? u.location_lat;
-        const lng = u.longitude ?? u.location_lng;
-        if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
-        return null;
-      })
-      .filter(Boolean);
-
-    // Also include the target incident location so it's in frame
-    enRouteUnits.forEach(u => {
-      if (!u.assignedTo) return;
-      const inc = incidents.find(i => String(i.id) === String(u.assignedTo));
+    const points = [];
+    newlyEnRoute.forEach(u => {
+      const lat = (Array.isArray(u.position) && u.position[0]) ?? u.latitude ?? u.location_lat;
+      const lng = (Array.isArray(u.position) && u.position[1]) ?? u.longitude ?? u.location_lng;
+      if (Number.isFinite(lat) && Number.isFinite(lng)) points.push([lat, lng]);
+      const inc = u.assignedTo ? incidents.find(i => String(i.id) === String(u.assignedTo)) : null;
       if (inc && Number.isFinite(inc.location_lat) && Number.isFinite(inc.location_lng)) {
         points.push([inc.location_lat, inc.location_lng]);
       }
     });
-
     if (points.length === 0) return;
 
     const bounds = L.latLngBounds(points);
-    map.fitBounds(bounds, { padding: [80, 80], maxZoom: 14, animate: true });
+    // Already visible? Don't touch the view.
+    if (map.getBounds().pad(-0.15).contains(bounds)) return;
+    // Otherwise pan (no zoom change) so we never zoom the operator out.
+    map.panTo(bounds.getCenter(), { animate: true, duration: 0.8 });
   }, [activeUnits, incidents]);
 
   // Units eligible for dispatch: matching agency, not already committed
