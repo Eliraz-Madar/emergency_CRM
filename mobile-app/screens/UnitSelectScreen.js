@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  View, Text, FlatList, TouchableOpacity,
+  View, Text, SectionList, TouchableOpacity,
   StyleSheet, ActivityIndicator, StatusBar, Platform,
 } from "react-native";
 import * as Notifications from "expo-notifications";
@@ -22,6 +22,28 @@ const TYPE_ICON = {
   Fire:      "🚒",
   HomeFront: "🏠",
 };
+
+const STATUS_LABEL = {
+  OPEN: "Open", PENDING: "Awaiting response", EN_ROUTE: "En route",
+  ON_SCENE: "On scene", IN_PROGRESS: "In progress", RESOLVED: "Resolved",
+};
+
+// Split the claimable units into the ones that already have a live dispatch
+// attached (so a reconnecting crew re-claims the vehicle their event is on)
+// and the plain available ones. Empty sections are dropped so the list never
+// shows a bare header. Input order (distance-sorted by the backend) is kept.
+function buildSections(units) {
+  const withDispatch = units.filter((u) => u.active_assignment);
+  const available = units.filter((u) => !u.active_assignment);
+  return [
+    withDispatch.length
+      ? { title: "UNITS WITH AN ACTIVE DISPATCH", data: withDispatch }
+      : null,
+    available.length
+      ? { title: "AVAILABLE UNITS", data: available }
+      : null,
+  ].filter(Boolean);
+}
 
 function distanceKm(lat1, lng1, lat2, lng2) {
   if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) return null;
@@ -92,6 +114,7 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
 
       const params = new URLSearchParams({
         claimable: "true",
+        with_assignment: "true",
         lat: String(location.latitude),
         lng: String(location.longitude),
       });
@@ -176,12 +199,13 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
           </TouchableOpacity>
         </View>
       ) : (
-        <FlatList
-          data={units}
+        <SectionList
+          sections={buildSections(units)}
           keyExtractor={(u) => String(u.id)}
           contentContainerStyle={styles.list}
           onRefresh={loadUnits}
           refreshing={false}
+          stickySectionHeadersEnabled={false}
           ListHeaderComponent={
             error ? (
               <View style={styles.errorBanner}>
@@ -192,33 +216,52 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
           ListEmptyComponent={
             <Text style={styles.emptyText}>No {user?.unit_type ?? ""} units available nearby.</Text>
           }
+          renderSectionHeader={({ section }) => (
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeaderText}>{section.title}</Text>
+              <Text style={styles.sectionHeaderCount}>{section.data.length}</Text>
+            </View>
+          )}
           renderItem={({ item }) => {
             const dist = deviceLocation
               ? distanceKm(deviceLocation.latitude, deviceLocation.longitude, item.location_lat, item.location_lng)
               : null;
             const isClaiming = claimingId === item.id;
+            const dispatch = item.active_assignment;
             return (
               <TouchableOpacity
-                style={styles.card}
+                style={[styles.card, dispatch && styles.cardDispatched]}
                 onPress={() => handleSelect(item)}
                 activeOpacity={0.85}
                 disabled={!!claimingId}
               >
                 <View style={styles.cardLeft}>
                   <Text style={[styles.cardIcon, { color: accentColor }]}>{icon}</Text>
-                  <View>
+                  <View style={{ flex: 1 }}>
                     <Text style={styles.cardName}>{item.name}</Text>
                     <Text style={styles.cardId}>
                       ID #{item.id}  ·  {item.type}
                       {dist != null ? `  ·  ${dist.toFixed(1)} km away` : ""}
                     </Text>
+                    {dispatch ? (
+                      <View style={styles.dispatchTag}>
+                        <Text style={styles.dispatchTagText} numberOfLines={1}>
+                          🚨  {dispatch.incident_title}
+                        </Text>
+                        <Text style={styles.dispatchTagStatus}>
+                          {STATUS_LABEL[dispatch.incident_status] ?? dispatch.incident_status}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
                 {isClaiming ? (
                   <ActivityIndicator size="small" color={accentColor} />
                 ) : (
-                  <View style={styles.badge}>
-                    <Text style={styles.badgeText}>CLAIM</Text>
+                  <View style={[styles.badge, dispatch && styles.badgeResume]}>
+                    <Text style={[styles.badgeText, dispatch && styles.badgeResumeText]}>
+                      {dispatch ? "RESUME" : "CLAIM"}
+                    </Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -263,6 +306,26 @@ const styles = StyleSheet.create({
   list: { padding: 16, paddingBottom: 32 },
   emptyText: { textAlign: "center", color: "rgba(255,255,255,0.7)", fontSize: 15, marginTop: 48 },
 
+  sectionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 8,
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  sectionHeaderText: {
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  sectionHeaderCount: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
   card: {
     backgroundColor: "#FFFFFF",
     borderRadius: 14,
@@ -278,6 +341,22 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 3,
   },
+  cardDispatched: {
+    borderLeftWidth: 4,
+    borderLeftColor: "#E65100",
+  },
+  dispatchTag: {
+    marginTop: 6,
+    alignSelf: "flex-start",
+    backgroundColor: "#FFF3E0",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  dispatchTagText:   { fontSize: 12, fontWeight: "700", color: "#E65100" },
+  dispatchTagStatus: { fontSize: 11, color: "#BF6000", marginTop: 1 },
+  badgeResume:     { backgroundColor: "#E65100" },
+  badgeResumeText: { color: "#FFFFFF" },
   cardLeft: { flexDirection: "row", alignItems: "center", gap: 12, flex: 1 },
   cardIcon: { fontSize: 26 },
   cardName: { fontSize: 16, fontWeight: "700", color: "#1E2A3A" },

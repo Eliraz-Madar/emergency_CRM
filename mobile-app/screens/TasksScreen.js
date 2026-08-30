@@ -18,6 +18,14 @@ function getStatusCfg(status) {
   return STATUS_CONFIG[status] || STATUS_CONFIG.PENDING;
 }
 
+// Button visibility is driven by THIS task's own status, not the shared
+// incident status — a crew added to an incident that another unit already
+// took ON_SCENE must still be able to tap "On My Way" for its own leg.
+//   task PENDING      -> show "On My Way"   (this crew hasn't accepted yet)
+//   task IN_PROGRESS  -> show "Arrived"     (accepted, driving — until on scene)
+//   incident finished -> show nothing
+const FINISHED_INCIDENT_STATUSES = ["RESOLVED", "CLOSED"];
+
 export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewRoute }) {
   const [tasks, setTasks] = useState([]);
   const [error, setError] = useState("");
@@ -140,7 +148,9 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewR
                 {item.incident ? (
                   <Text style={styles.incidentRef}>Incident #{item.incident}</Text>
                 ) : null}
-                {["OPEN", "PENDING", undefined, null].includes(item.incident_status) && (
+                {item.incident != null
+                  && item.status === "PENDING"
+                  && !FINISHED_INCIDENT_STATUSES.includes(item.incident_status) && (
                   <TouchableOpacity
                     style={styles.enRouteBtn}
                     onPress={() => handleOnMyWay(item)}
@@ -152,7 +162,10 @@ export default function TasksScreen({ token, selectedUnit, onSelectTask, onViewR
                     </Text>
                   </TouchableOpacity>
                 )}
-                {item.incident_status === "EN_ROUTE" && (
+                {item.incident != null
+                  && item.status === "IN_PROGRESS"
+                  && item.incident_status !== "ON_SCENE"
+                  && !FINISHED_INCIDENT_STATUSES.includes(item.incident_status) && (
                   <TouchableOpacity
                     style={styles.arrivedBtn}
                     onPress={() => handleArrived(item)}

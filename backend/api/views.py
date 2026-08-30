@@ -183,12 +183,19 @@ def _fetch_osrm_route(from_lat, from_lng, to_lat, to_lng):
     return coords, (approx_km / 40.0) * 3600.0, approx_km * 1000.0
 
 
-def _start_trip(task, from_lat, from_lng):
+def _start_trip(task, from_lat, from_lng, accepted_at=None):
     """Record that a drive began. The OSRM path is fetched lazily on the first
-    GET /tasks/<id>/trip/ so this stays fast inside the PATCH request."""
+    GET /tasks/<id>/trip/ so this stays fast inside the PATCH request.
+
+    `accepted_at` is normally "now" (the crew just tapped "On My Way"), but a
+    lazy rebuild after a server restart passes the task's own timestamp so the
+    vehicle resumes at the right point on the road instead of snapping back to
+    the start."""
     incident = task.incident
     if from_lat is None or from_lng is None or incident is None:
         return
+    if accepted_at is None:
+        accepted_at = timezone.now()
     with _active_trips_lock:
         _active_trips[task.id] = {
             "task_id": task.id,
@@ -202,7 +209,7 @@ def _start_trip(task, from_lat, from_lng):
             "duration_s": None,
             "distance_m": None,
             "speedup": TRIP_SPEEDUP,
-            "accepted_at": timezone.now().isoformat(),
+            "accepted_at": accepted_at.isoformat(),
         }
 
 
@@ -592,17 +599,43 @@ class TaskViewSet(viewsets.ModelViewSet):
         task = self.get_object()
         with _active_trips_lock:
             exists = task.id in _active_trips
-        if not exists and task.status == Task.Status.IN_PROGRESS and (
-            task.incident and task.incident.status == Incident.Status.EN_ROUTE
+        # A crew is driving for as long as its own task is IN_PROGRESS and the
+        # incident hasn't been resolved/closed — NOT only while the incident
+        # sits at EN_ROUTE (a second unit, or this crew arriving, can push the
+        # shared incident to ON_SCENE while this drive is still in progress).
+        if not exists and task.status == Task.Status.IN_PROGRESS and task.incident and (
+            task.incident.status not in (Incident.Status.RESOLVED, Incident.Status.CLOSED)
         ):
             # Server restarted mid-drive, or the trip was never started — rebuild
-            # it now from the unit's current position.
+            # it from the unit's position, resuming at the task's accept time so
+            # the vehicle doesn't jump back to the start.
             unit = task.assigned_unit
-            _start_trip(task, getattr(unit, "location_lat", None), getattr(unit, "location_lng", None))
+            _start_trip(
+                task,
+                getattr(unit, "location_lat", None),
+                getattr(unit, "location_lng", None),
+                accepted_at=task.timestamp,
+            )
         trip = _resolved_trip(task.id)
         if trip is None:
             return Response({"detail": "No active trip."}, status=status.HTTP_404_NOT_FOUND)
         return Response(trip)
+
+    @action(detail=True, methods=["get"], url_path="reports",
+            permission_classes=[ReadOnlyOrAdminDispatcher])
+    def reports(self, request, pk=None):
+        """Field reports already filed against this task, newest first — the
+        history the mobile report screen shows above the form so a crew can
+        see what they've already sent. Each row is the full IncidentEvent
+        shape (status line + notes in `description`, plus any `media`)."""
+        task = self.get_object()
+        events = (
+            task.events.prefetch_related("media")
+            .order_by("-created_at")
+        )
+        return Response(
+            IncidentEventSerializer(events, many=True, context={"request": request}).data
+        )
 
 
 class UnitViewSet(viewsets.ModelViewSet):
@@ -1260,12 +1293,26 @@ def field_incident_add_event(request):
         except (TypeError, ValueError):
             incident_obj = None
 
+    # A mobile field report also carries the dispatched task it belongs to.
+    # Linking the event to that Task is what powers the per-task "previously
+    # sent" history the mobile report screen shows (GET /api/tasks/<id>/reports/).
+    task_obj = None
+    task_id_raw = request.data.get("task_id")
+    if task_id_raw:
+        try:
+            task_obj = Task.objects.filter(pk=int(task_id_raw)).first()
+        except (TypeError, ValueError):
+            task_obj = None
+    if task_obj is not None and incident_obj is None:
+        incident_obj = task_obj.incident
+
     # Persist the event to the database. created_by/actor_id follow
     # _log_status_change's pattern (views.py) — the resolved real actor, not
     # a client-supplied "created_by" string from the request body.
     actor = request.user
     event_obj = IncidentEvent.objects.create(
         incident=incident_obj,
+        task=task_obj,
         event_type=request.data.get("event_type", "UPDATE"),
         severity=request.data.get("severity", "INFO"),
         title=request.data.get("title", "Event"),
@@ -1288,19 +1335,19 @@ def field_incident_add_event(request):
     serializer = IncidentEventSerializer(event_obj, context={"request": request})
     response_data = serializer.data
 
-    # Mirror the report into a linked Field Command Post's Operational Timeline.
+    # Surface the report on a linked Field Command Post's Operational Timeline.
+    # The report itself (reporter, incident, notes, photos/videos) is carried by
+    # FieldCommandSerializer.get_operational_notes, which folds in this
+    # incident's UNIT-sourced IncidentEvents directly — so there's no flat
+    # FieldCommandNote to log here, just a nudge for open dashboards to re-pull.
     if incident_obj is not None and incident_obj.field_command_id:
         fc = incident_obj.field_command
-        note_msg = event_obj.title
-        if event_obj.description:
-            note_msg = f"{event_obj.title} — {event_obj.description}"
-        _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, note_msg)
         _broadcast_realtime({
             "type": "user_action",
             "action": "field_command_note_added",
             "field_command_id": fc.field_key,
             "incident_id": incident_obj.id,
-            **FieldCommandSerializer(fc).data,
+            **FieldCommandSerializer(fc, context={"request": request}).data,
         })
 
     # Mirror into the in-memory event list so SSE streaming stays consistent
@@ -1528,17 +1575,25 @@ def mobile_dispatch(request):
     inc_key = _parse_incident_key(incident_id_raw)
 
     try:
-        db_incident, _ = Incident.objects.update_or_create(
-            mock_incident_id=inc_key,
-            defaults={
-                "title":        incident_title,
-                "description":  "",
-                "location_lat": float(location_lat),
-                "location_lng": float(location_lng),
-                "priority":     str(priority)[:16],
-                "status":       "IN_PROGRESS",
-            },
-        )
+        # If the caller passed a real Incident pk, dispatch onto THAT incident —
+        # never spin up a parallel mock_incident_id mirror row. Those mirrors
+        # showed up as a duplicate "Theft"/"POLICE Dispatch" in the war-room
+        # list (same title, empty channel, its own separate task) that only a
+        # DB cleanup could remove. Only genuinely external/mock incident keys
+        # (no matching pk) still get a bridge row.
+        db_incident = Incident.objects.filter(pk=inc_key).first()
+        if db_incident is None:
+            db_incident, _ = Incident.objects.update_or_create(
+                mock_incident_id=inc_key,
+                defaults={
+                    "title":        incident_title,
+                    "description":  "",
+                    "location_lat": float(location_lat),
+                    "location_lng": float(location_lng),
+                    "priority":     str(priority)[:16],
+                    "status":       "IN_PROGRESS",
+                },
+            )
     except Exception:
         return Response({"detail": "DB error."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

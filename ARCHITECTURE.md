@@ -103,6 +103,16 @@ Incident
     ├── assigned_unit → Unit, mock_unit_id
     └── status (PENDING | IN_PROGRESS | DONE | CANCELLED) — terminal once DONE/CANCELLED
 
+    IncidentSerializer exposes two assigned-unit views:
+      • assigned_unit_ids — ids of units on a non-terminal task that are ALSO
+        actively online. Used for map markers (never draw a vehicle that isn't
+        reporting a position).
+      • assigned_units — every unit on a non-terminal task, connected or not,
+        each with { id, name, type, is_online, task_status }. The war-room
+        keeps a disconnected crew visibly attached to the incident, greyed
+        "Connection lost", instead of dropping it — the Task FK survives the
+        device going offline.
+
 FieldCommand                          ← NEW (real "Field Command Post")
 ├── field_key (public id, e.g. "field-1"), name, location_lat/lng
 ├── status (ACTIVE | CLOSED)
@@ -126,6 +136,10 @@ MajorIncident                         ← NEW (real "Go Live" flow)
 
 IncidentEvent
 ├── incident FK (nullable) | major_incident FK (nullable)
+├── task FK (nullable, SET_NULL) — the dispatched Task a mobile field report is
+│                                  filed against; powers /api/tasks/<id>/reports/
+│                                  and the field-report entries on a linked
+│                                  Field Command Post's Operational Timeline
 ├── event_type, severity, title, description
 ├── source  (COMMAND_CENTER | FIELD_OPERATOR | UNIT) — who logged it
 ├── created_by, actor_id (real authenticated user id, if any)
@@ -173,6 +187,51 @@ POST /api/units/heartbeat/   — authenticated; refreshes last_seen (+ GPS if pr
 
 `Unit.is_actively_online` (a computed property, not a stored/ticked value) is what the serializer reports as `is_online` — a unit that stops heartbeating silently stops appearing online after 60s, with no background job required.
 
+### Field-Unit Dispatch Lifecycle & Shared En-Route Trip
+
+**Dispatch → accept → drive → arrive** — one flow, driven by the crew's own `Task`, not the shared `Incident.status` (multiple units can be on one incident):
+
+```
+1. Dispatcher assigns a unit    → POST /api/incidents/<id>/assign-unit/ creates a
+   Task (PENDING) on the REAL incident, advances OPEN→PENDING, sends the Expo
+   push, logs the dispatch to a linked Field Command Post. Client unit status: ASSIGNED.
+2. Crew taps "On My Way" (app)   → PATCH /api/tasks/<id>/ status=IN_PROGRESS.
+   TaskViewSet.perform_update starts the shared trip and, if the incident is
+   still OPEN/PENDING, advances it to EN_ROUTE. Client unit status: EN_ROUTE.
+3. Drive                          → both maps interpolate the vehicle from the
+   shared trip (below).
+4. Crew taps "Arrived" (app)      → task stays IN_PROGRESS; incident EN_ROUTE→ON_SCENE.
+   The vehicle also flips to ON_SCENE on its own once its trip interpolation
+   reaches the incident.
+5. Undo a dispatch               → POST /api/incidents/<id>/unassign-unit/ cancels
+   the unit's non-terminal Task on that incident (the war-room "Cancel" button).
+```
+
+**Shared en-route trip** (`_active_trips` dict in `views.py`, in-memory, transient):
+
+```
+GET /api/tasks/<id>/trip/  → { coords[[lat,lng]...], duration_s, distance_m,
+                                accepted_at, speedup }
+```
+
+- One OSRM road path per task, fetched lazily on the first GET, cached until the
+  task reaches a terminal status / the incident resolves.
+- `speedup` (`TRIP_SPEEDUP = 8`) compresses the drive so a demo isn't a 15-minute
+  wait — the SAME constant is duplicated in `frontend-web/src/pages/Dashboard.jsx`
+  and `mobile-app/utils/trip.js`.
+- Both the war-room map and the mobile `IncidentMapScreen` read this one object
+  and interpolate the vehicle's position / ETA / remaining distance from it with
+  **identical maths** (`pointAtFraction`), so the two screens never disagree.
+- Served for **any** IN_PROGRESS task on a live incident — not only while the
+  incident sits at `EN_ROUTE` (another unit, or this crew arriving, can push the
+  shared incident to `ON_SCENE` mid-drive). Rebuilt after a server restart from
+  the unit's position, resuming at `Task.timestamp` so the vehicle doesn't snap
+  back to the start.
+- `frontend-web`: `reconcileUnitAssignments()` rebuilds each unit's
+  `assignedTo`/`status` from the DB Task rows on reload, and `stepEnRouteUnits()`
+  (1s tick) advances every EN_ROUTE vehicle and flips it to ON_SCENE when its own
+  trip reaches the incident, announcing the arrival aloud once.
+
 ### Field Command Post API (`FieldCommandViewSet`)
 
 ```
@@ -186,11 +245,21 @@ POST          /api/field-commands/<id>/close/            — cascades: releases 
 ```
 
 **Central ↔ field real-time sync.** `_broadcast_realtime()` relays the field-command
-assignment/mission/close actions (`_FIELD_DASHBOARD_RELAYED_ACTIONS`) onto the Field
-Incident Command dashboard's separate SSE stream (`/api/field/updates/stream/`, via
-`_push_field_sse`), so an open field dashboard re-fetches and stays in lockstep with
-the war-room view of that post — no reload. The regional dashboard already consumed
-these on `/api/updates/stream/`.
+assignment/mission/close actions AND `field_command_note_added` (a mobile unit filed
+a field report against a linked incident) — `_FIELD_DASHBOARD_RELAYED_ACTIONS` —
+onto the Field Incident Command dashboard's separate SSE stream
+(`/api/field/updates/stream/`, via `_push_field_sse`), so an open field dashboard
+re-fetches and stays in lockstep with the war-room view of that post — no reload.
+The regional dashboard already consumed these on `/api/updates/stream/`.
+
+**Field reports on a post's Operational Timeline.** `FieldCommandSerializer.get_operational_notes`
+returns the post's own typed `FieldCommandNote`s *plus* every `IncidentEvent` with
+`source == UNIT` on one of its linked incidents — each `REPORT` entry carrying the
+reporter (`created_by`), the incident name, and any photo/video attachments
+(`media[]`). The mobile report screen (`POST /api/field/add-event/`) no longer logs
+a flat note string; the merge in the serializer is the single source, so a report
+shows on the timeline in full (`📢 Field Report — <incident>`, `by <reporter>`,
+thumbnails) rather than as a one-line status string.
 
 ### Major Incident "Go Live" API
 
@@ -216,17 +285,26 @@ GET  /api/tasks/?mock_unit=<id>&incident=<id>  — matches Task.mock_unit_id OR
                                                    unit's dispatches often only set assigned_unit,
                                                    not the legacy mock_unit_id — see TaskViewSet.get_queryset)
 PATCH /api/tasks/<id>/                 — fieldunit: status only; dispatcher/admin: full
+GET  /api/tasks/<id>/trip/             — the shared en-route trip (OSRM path + accepted_at + speedup);
+                                          war-room map and mobile map both read this one object
+GET  /api/tasks/<id>/reports/          — this task's field-report history (IncidentEvent list, newest
+                                          first, with media) — the "Previously sent" list on ReportScreen
 POST /api/tasks/<id>/by-incident/<id>/
 POST /api/units/claim/  |  POST /api/units/disconnect/  |  POST /api/units/heartbeat/
 POST /api/push-token/
-POST /api/field/add-event/?fieldId=<id>
+POST /api/field/add-event/?fieldId=<id>  — a mobile report sends task_id + incident_id so the event
+                                            links to both (see IncidentEvent.task)
 ```
 
 #### Mobile Bridge Endpoints (no auth — dashboard/mobile mirror)
 ```
 POST /api/mobile/register-units/       — dashboard registers its 50 routine units
 GET  /api/mobile/units/?type=POLICE    — mobile unit-selection list
-POST /api/mobile/dispatch/             — mirrors a dashboard dispatch to DB Task + Expo push
+POST /api/mobile/dispatch/             — mirrors a dashboard dispatch to DB Task + Expo push.
+                                          When incident_id is a REAL Incident pk it dispatches
+                                          onto that row directly (never a second mock_incident_id
+                                          "mirror" incident — those showed up as duplicate list
+                                          entries; fixed + migration 0019 cleans up old ones)
 POST /api/mobile/cancel-dispatch/      — cancels a unit's pending/in-progress task
 POST /api/mobile/unit-status/          — mirrors live web status into the mobile registry
 ```
@@ -234,11 +312,22 @@ POST /api/mobile/unit-status/          — mirrors live web status into the mobi
 #### Regional Dashboard (real DB — DRF router)
 ```
 GET/POST/PATCH/DELETE /api/incidents/                — IncidentViewSet
-POST /api/incidents/<id>/assign-unit/  |  POST /api/incidents/<id>/note/
-GET/POST/PATCH/DELETE /api/units/                     — UnitViewSet (?claimable=true, ?type=, ?lat&lng sort)
+POST /api/incidents/<id>/assign-unit/    — create a Task on the REAL incident, advance
+                                            OPEN→PENDING, push, log to a linked post
+POST /api/incidents/<id>/unassign-unit/  — cancel the unit's non-terminal Task (war-room "Cancel")
+POST /api/incidents/<id>/note/
+GET/POST/PATCH/DELETE /api/units/                     — UnitViewSet (?claimable=true, ?type=,
+                                                        ?lat&lng sort, ?with_assignment=true)
+GET  /api/units/<id>/tasks/                           — tasks assigned to a unit
 GET  /api/events/?limit=50&incident_id=<id>           — real IncidentEvent feed
 GET  /api/updates/stream/                             — live SSE
 ```
+
+`?with_assignment=true` on the units list is opt-in (one query per unit) — only the
+mobile unit-selection screen passes it; it adds `active_assignment` (the incident a
+unit is currently dispatched to: `{task_id, task_status, incident_id, incident_title,
+incident_status, incident_priority}`) so the screen can split the list into "units
+with a live dispatch" (RESUME) and "available units" (CLAIM).
 
 #### Field Command Post (real DB)
 ```
@@ -275,6 +364,7 @@ GET  /api/field/updates/stream/     — SSE stream (present in api/client.js but
 #### `store/dashboard.js` (Regional)
 - `incidents`, `onlineUnits` (real DB `Unit` rows — this is now the map/dispatch source of truth), `fieldCommands` (real DB `FieldCommand` rows), `events`.
 - `units` (legacy/demo array) is kept for backward compatibility but superseded by `onlineUnits`.
+- Each `onlineUnits` entry also carries **client-only** fields that are never sent by `GET /api/units/`: `assignedTo`, `status` (`ASSIGNED`/`EN_ROUTE`/`ON_SCENE`), `route`/`fullRoute`, `tripAcceptedAt`/`tripDurationS`/`tripSpeedup`, `arrivalAnnounced`. `reconcileUnitAssignments(incidents, units, prev)` (in `Dashboard.jsx`) rebuilds `assignedTo`/`status` from the DB Task rows on every reload so a dispatch survives navigating away; `stepEnRouteUnits()` (a 1s `setInterval`) advances every `EN_ROUTE` vehicle along its trip and speaks its arrival once.
 - `upsertOnlineUnit()` / `upsertFieldCommand()` — merge-by-id-or-insert, used by SSE handlers so partial updates don't clobber the rest of the record.
 - `addIncident()` dedupes by id — defense-in-depth against duplicate delivery (e.g. a stray second SSE connection).
 - Persisted via `zustand/middleware persist` (key `ecm-dashboard-ui`), **schema version 2** with a `migrate()` that discards stale `filters`/`activeFilter` shapes across two prior breaking changes (channel vocabulary standardization, then dropping `CLOSED` from `DEFAULT_FILTERS.statuses`). Only `activeFilter`, `filters`, `sortBy` persist — `selectedIncidentId` is deliberately excluded so a closed/dismissed detail panel never silently reopens after a refresh.
@@ -358,8 +448,11 @@ FieldIncidentDashboard (/field-incident)
 ├── TaskGroupPanel       ← progress bars, category hierarchy
 ├── PerimeterMapPicker   — Leaflet click-to-draw polygon tool (react-leaflet)
 └── OperationalTimeline  ← event log; FieldCommandNote entries render typed by `kind`
-                           (Incident Assigned / Force Attached / Mission / Status), plus
-                           live central-room updates via the field SSE relay
+                           (Incident Assigned / Force Attached / Mission / Status),
+                           REPORT entries render mobile field reports in full
+                           (📢, "Field Report — <incident>", "by <reporter>",
+                           photo/video thumbnails), plus live central-room updates
+                           via the field SSE relay (incl. `field_command_note_added`)
 ```
 
 **Closed/read-only handling:** Closed incidents/field-commands are hidden by default rather than made globally read-only — `DEFAULT_FILTERS.statuses` excludes `CLOSED` (still viewable via the FilterBar status chip); `DashboardSelector.jsx`'s field-command picker filters out `status === 'CLOSED'` entries; `FieldCommandDetailsPanel.jsx`'s "Link Incident" list excludes closed incidents. `IncidentDetailsPanel.jsx` hides the "Close Incident" action once already closed but does not otherwise lock the panel.
@@ -402,13 +495,36 @@ mobile-app/utils/routing.js
   fetchRealRoute(origin, destination) — public OSRM API (8s timeout) for a real
     driving route + distance/duration; falls back to a straight-line haversine
     route ({ isFallback: true }) on any failure so a route always renders.
+
+mobile-app/utils/trip.js
+  fetchTrip(taskId) / tripState(trip, now) — reads GET /api/tasks/<id>/trip/
+    (the SAME object the war-room reads) and interpolates the vehicle's position,
+    remaining road, ETA and distance from it with the same maths as the web
+    dashboard (TRIP_SPEEDUP = 8). This is what keeps the two maps in lock-step.
+
+mobile-app/utils/taskActions.js
+  markOnMyWay(task) — PATCH task IN_PROGRESS (+ advance the incident to EN_ROUTE
+    only when it's still OPEN/PENDING). markArrived(task) — incident → ON_SCENE.
 ```
 
-`IncidentMapScreen.js` uses `watchDeviceLocation` + `fetchRealRoute` together to show a live-updating route to the assigned incident, with a "straight-line estimate" fallback hint when OSRM is unreachable.
+### Dispatch acceptance & live route (`IncidentMapScreen.js`, `TasksScreen.js`)
 
-### Polymorphic Report Submission (unchanged)
+- `TasksScreen` shows **On My Way** while the crew's own task is `PENDING`, then
+  **Arrived on scene** while it's `IN_PROGRESS` — gated on the task, not the shared
+  incident status, so a unit added to an already-`ON_SCENE` incident can still accept.
+- After accepting, `IncidentMapScreen` fetches the shared trip and draws the road
+  route + a moving vehicle marker, shows live distance / ETA, and the camera
+  **follows the vehicle** as it advances. "En Route" vs "On Scene" is read from the
+  trip (`ts.arrived`), not the incident status.
+
+### Polymorphic Report Submission
 ```
-ReportScreen → PATCH /api/tasks/<id>/ (status) + POST /api/field/add-event/?fieldId=mobile (notes + files)
+ReportScreen → PATCH /api/tasks/<id>/ (status) + POST /api/field/add-event/?fieldId=default
+                 (notes + files + task_id + incident_id)
+  → the event links to the Task (IncidentEvent.task) and appears on the Field
+    Command Post's Operational Timeline with the reporter + media.
+  → a "Previously sent" list under the form shows this task's past reports
+    (GET /api/tasks/<id>/reports/).
 Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back online
 ```
 
@@ -481,6 +597,9 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 | `0014_incidentevent_source` | IncidentEvent.source (COMMAND_CENTER/FIELD_OPERATOR/UNIT) |
 | `0015_fieldcommand_major_incident` | FieldCommand.major_incident FK (escalation link) |
 | `0016_fieldcommand_unique_active_major_incident_link` | DB constraint: one active FieldCommand per MajorIncident |
+| `0017_fieldcommandnote_kind_fieldcommandmission` | FieldCommandNote.kind; **FieldCommandMission model** |
+| `0018_incidentevent_task` | IncidentEvent.task FK (nullable, SET_NULL) — links a mobile field report to its Task |
+| `0019_merge_mobile_dispatch_mirror_incidents` | **Data migration:** fold every `mobile_dispatch` "mirror" Incident (a second row with `mock_incident_id` == a real Incident's pk) back into the real one — moves open tasks + events, deletes the duplicate. One-off cleanup for rows the old bridge left behind |
 
 ---
 
@@ -501,8 +620,28 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 
 ---
 
-**Last Updated:** 2026-08-25
-**Architecture Version:** 4.1
+**Last Updated:** 2026-08-30
+**Architecture Version:** 4.2
+
+**Changelog v4.2 (Aug 27–30, 2026 — field-unit dispatch lifecycle, shared en-route trip, timeline reports):**
+
+*Field-unit dispatch lifecycle & war-room ↔ mobile sync (commit `57dfd05`):*
+- `assign-unit` writes the Task to the **real** incident (never a `mock_incident_id` mirror), advances `OPEN→PENDING`, sends the mobile push, logs the dispatch to a linked Field Command Post. New `POST /api/incidents/<id>/unassign-unit/` cancels a unit's non-terminal Task.
+- New client unit status `ASSIGNED` ("Awaiting acceptance") — a unit only reads as "On the way" once the crew taps **On My Way** in the app (`task → IN_PROGRESS`). Mobile: **On My Way / Arrived** buttons + `En Route / In Progress / Done` report flow; `mobile-app/utils/taskActions.js`.
+- **Shared en-route trip** — `GET /api/tasks/<id>/trip/`: one OSRM path + `accepted_at` + `speedup` (`TRIP_SPEEDUP = 8`), fetched lazily, rebuilt after a restart. The war-room map and the mobile `IncidentMapScreen` interpolate the vehicle / ETA / distance from the same object with identical maths (`pointAtFraction` / `mobile-app/utils/trip.js`). `reconcileUnitAssignments()` rebuilds unit `assignedTo`/`status` from DB Task rows on reload.
+- `IncidentSerializer.assigned_unit_ids` is server-computed (active Task rows, online-only) — drops DONE/CANCELLED tasks, closed incidents, disconnected units. Closing an incident cancels its open tasks.
+- War-room: stale (ghost) unit markers removed via a client staleness sweep; the "on its way" **voice announcement** fires exactly once, armed a few seconds after load so reloads stay silent; field-command marker compass → command flag; map / list header / KPI "Active Incidents" now all count non-closed incidents; selecting an incident never zooms the operator out.
+- Mobile: `claimable` filter lets a crew re-claim its own unit / a unit whose holder's app died (no second car spawned).
+
+*This session (Aug 30):*
+- **Duplicate incidents fixed:** `mobile_dispatch` now dispatches onto a real Incident pk directly instead of spawning a parallel `mock_incident_id` mirror row. Data migration `0019` folds the mirrors the old bridge already created back into their real incidents.
+- **`IncidentSerializer.assigned_units`** (NEW, alongside `assigned_unit_ids`) — every unit on a non-terminal task, connected or not, with `is_online` + `task_status`. The war-room keeps a disconnected crew visibly attached to the incident (greyed "Connection lost") instead of dropping it; the panel's **Cancel** now prunes reactively (no page refresh).
+- **`UnitSerializer.active_assignment`** (opt-in, `?with_assignment=true`) — the incident a unit is dispatched to. Powers the mobile unit-select screen's two-section split (units with a live dispatch / available units).
+- **Mobile accept button** is now gated on the crew's **own** task status (`PENDING` → On My Way, `IN_PROGRESS` → Arrived), so a unit added to an already-`ON_SCENE` incident can still accept and drive.
+- **En-route route decoupled from `Incident.status`:** `/api/tasks/<id>/trip/` serves the trip for any `IN_PROGRESS` task on a live incident (not only `EN_ROUTE`); on a rebuild it resumes from `Task.timestamp` so the vehicle doesn't snap back to the start. Mobile map: route / motion / ETA / "En Route vs On Scene" driven by the crew's own task + live trip; **continuous camera follow**; first-load-only spinner (no 8-second flash). Web: trip re-attach + `reconcileUnitAssignments` keyed on the task being `IN_PROGRESS`; a vehicle flips to `ON_SCENE` only when its own trip reaches the incident (an incident going `ON_SCENE` no longer yanks a still-moving vehicle); **voice announces arrival**, once.
+- **`IncidentEvent.task` FK** (migration `0018`) + **`GET /api/tasks/<id>/reports/`** — per-task field-report history (with media). Mobile `ReportScreen` shows a "Previously sent" list.
+- **Mobile field reports on the Field Command Post's Operational Timeline:** `FieldCommandSerializer.operational_notes` folds in the linked incidents' `UNIT`-sourced `IncidentEvent`s as `REPORT` entries with reporter + incident name + photo/video attachments; `FieldIncidentDashboard` now refreshes on the `field_command_note_added` relay (previously ignored) and renders them (`📢 Field Report — <incident>`, `by <reporter>`, thumbnails).
+- Tests: `+5` endpoint tests (task reports action, `assigned_units` keeps a disconnected vehicle, `active_assignment` opt-in, `mobile_dispatch` reuses a real incident, report surfaces on the Operational Timeline).
 
 **Changelog v4.1 (Aug 25, 2026 — Field Command Post real-time consistency + UI polish):**
 - **Fixed stale unit list on Field Command "Assign" tab:** `Dashboard.jsx`'s `sortedAssignableUnits` was computed from `units` (the legacy array, populated once on load) instead of `onlineUnits` (the real, SSE-kept-fresh array) — a unit claimed from the mobile app never appeared there without a full page refresh.

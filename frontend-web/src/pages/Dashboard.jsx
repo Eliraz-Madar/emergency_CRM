@@ -89,22 +89,21 @@ const normalizeCreateFieldUnitType = (type) => {
 export function reconcileUnitAssignments(incidents, units, prevUnits = []) {
   const overlay = new Map();
   (incidents || []).forEach((inc) => {
-    // A closed incident holds no forces — never re-associate a unit to one on
+    // A finished incident holds no forces — never re-associate a unit to one on
     // reload (the crew may have been reassigned or stood down). Same rule the
     // backend applies in IncidentSerializer.get_assigned_unit_ids.
-    if (inc.status === 'CLOSED') return;
+    if (inc.status === 'CLOSED' || inc.status === 'RESOLVED') return;
     (inc.tasks || []).forEach((task) => {
       if (!task.assigned_unit) return;
       if (task.status === 'DONE' || task.status === 'CANCELLED') return;
-      // Status reflects where the unit is in the flow:
-      //  - task PENDING            -> ASSIGNED  (dispatched, awaiting the crew's
-      //                                          "On My Way" tap in the app)
-      //  - task IN_PROGRESS + inc ON_SCENE -> ON_SCENE
-      //  - task IN_PROGRESS        -> EN_ROUTE  (accepted, driving)
-      let status = 'ASSIGNED';
-      if (task.status === 'IN_PROGRESS') {
-        status = inc.status === 'ON_SCENE' ? 'ON_SCENE' : 'EN_ROUTE';
-      }
+      // Status reflects where the CREW is in ITS OWN leg, not the shared
+      // incident status (another unit may already have driven the incident to
+      // ON_SCENE):
+      //  - task PENDING     -> ASSIGNED  (dispatched, awaiting "On My Way")
+      //  - task IN_PROGRESS -> EN_ROUTE  (accepted, driving — stepEnRouteUnits
+      //                                   flips it to ON_SCENE once the trip
+      //                                   interpolation reaches the incident)
+      const status = task.status === 'IN_PROGRESS' ? 'EN_ROUTE' : 'ASSIGNED';
       overlay.set(task.assigned_unit, { assignedTo: inc.id, status });
     });
   });
@@ -226,7 +225,21 @@ function stepEnRouteUnits() {
       routeIndex: arrived ? coords.length - 1 : segIndex,
       distanceKm: arrived ? 0 : totalKm * (1 - progress),
       etaMin: arrived ? 0 : (u.tripDurationS / 60 / speedup) * (1 - progress),
+      // Once the vehicle reaches the incident, its leg is done — flip to
+      // ON_SCENE so the panel stops saying "on the way" and this tick stops
+      // re-animating it. Announce the arrival aloud, once.
+      ...(arrived ? { status: 'ON_SCENE', arrivalAnnounced: true } : {}),
     });
+    if (arrived && !u.arrivalAnnounced
+        && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      const inc = u.assignedTo != null
+        ? (incidents || []).find((i) => i.id === u.assignedTo) : null;
+      const utterance = new SpeechSynthesisUtterance(
+        `${u.name || `Unit ${u.id}`} has arrived at ${inc?.title || 'the incident'}.`,
+      );
+      utterance.lang = 'en-US';
+      window.speechSynthesis.speak(utterance);
+    }
   });
 }
 
@@ -872,11 +885,15 @@ export default function Dashboard() {
         ));
         setEvents(events);
 
-        // Re-attach the shared trip for any unit already en route — the drawn
-        // route + interpolation state are client-only and lost on reload, but
-        // the backend still has (or lazily rebuilds) the trip.
+        // Re-attach the shared trip for every crew still mid-drive — the drawn
+        // route + interpolation state are client-only and lost on navigating
+        // away, but the backend keeps (or lazily rebuilds) the trip. Keyed on
+        // the TASK being IN_PROGRESS, not the incident sitting at EN_ROUTE — a
+        // second unit (or this crew arriving) can push the shared incident to
+        // ON_SCENE while this drive is still running, and the route must
+        // survive that.
         incidents.forEach((inc) => {
-          if (inc.status !== 'EN_ROUTE') return;
+          if (inc.status === 'CLOSED' || inc.status === 'RESOLVED') return;
           (inc.tasks || []).forEach((task) => {
             if (task.assigned_unit && task.status === 'IN_PROGRESS') {
               startUnitTrip(task.assigned_unit, task.id);
@@ -959,6 +976,11 @@ export default function Dashboard() {
                   .filter((u) => String(u.assignedTo) === String(update.incident_id))
                   .forEach((u) => {
                     if (update.new_status === 'ON_SCENE') {
+                      // Another unit may have driven the incident to ON_SCENE
+                      // while THIS crew is still en route — don't yank a moving
+                      // vehicle to the scene. stepEnRouteUnits flips it once its
+                      // own trip interpolation actually reaches the incident.
+                      if (u.status === 'EN_ROUTE' && Array.isArray(u.fullRoute) && u.tripAcceptedAt) return;
                       upsertOnlineUnit({
                         id: u.id, status: 'ON_SCENE', route: [],
                         routeIndex: undefined, etaMin: 0, distanceKm: 0,
@@ -1038,6 +1060,16 @@ export default function Dashboard() {
                   routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
                   fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
                 });
+                // Prune the unit from the incident's own assigned lists so it
+                // leaves the panel immediately (not only after the next poll).
+                const inc = useDashboardStore.getState().incidents
+                  .find((i) => i.id === update.incident_id);
+                if (inc) {
+                  updateIncident(update.incident_id, {
+                    assigned_unit_ids: (inc.assigned_unit_ids || []).filter((id) => id !== update.unit_id),
+                    assigned_units: (inc.assigned_units || []).filter((u) => u.id !== update.unit_id),
+                  });
+                }
               }
             } else if (update.type === 'user_action' && update.action === 'task_status_update') {
               const unitId = update.unit_id;

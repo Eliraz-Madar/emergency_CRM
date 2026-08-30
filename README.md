@@ -80,7 +80,10 @@ Coordinates multiple incidents across a region, backed by real DB data (not simu
 - Live incident list with sorting, filtering, and search — closed incidents hidden by default
 - Explicit status workflow: Open → Pending → En Route → On Scene → Resolved → Closed (Closed requires a reason and can only be set by a dispatcher/admin)
 - Severity/priority levels: LOW, MED, HIGH, CRITICAL with color coding
-- Unit dispatch with road routing (OSRM) — dispatched units travel to the incident on the map in real time
+- Unit dispatch with road routing (OSRM) — a dispatched unit shows as "Awaiting acceptance" until the crew taps **On My Way** in the app, then drives to the incident on the map in real time
+- The vehicle's road route, position, ETA and remaining distance come from **one shared trip object** that the mobile app reads too, so the war-room map and the phone are always in lock-step
+- A spoken announcement ("Unit … has arrived at …") fires once when a vehicle reaches its incident
+- A crew whose phone disconnects mid-dispatch stays attached to the incident, greyed "Connection lost" — one click on **Cancel** removes it (no page refresh needed); it reappears live if the crew reconnects
 - Map auto-zooms to incident + dispatched units after every dispatch
 - Incident marker pulses with an amber ring after dispatch for visual confirmation
 - Details panel stays open after dispatch for continued monitoring
@@ -101,7 +104,7 @@ Command-level management of a single large-scale incident (earthquake, missile s
 - Sector-based operational map with hazard levels
 - Task group hierarchy with progress tracking
 - **Central Command panel** (left column) — the incidents, forces, and missions the war-room has assigned to this post, tabbed and readable without scrolling; kept in sync live
-- Operational timeline (decision trail) — central-room assignments/missions show as distinct typed entries
+- Operational timeline (decision trail) — central-room assignments/missions show as distinct typed entries, and every **field report a mobile unit sends** (status + notes + photos/videos) appears here in full, listed with the incident name and who reported it — updated live, no reload
 - Critical alerts and resource tracking
 - Real-time SSE: the training-simulation stream (training mode) and live central-room updates for a real post
 - **Go Live**: declare a Major Incident from a real Incident, draw a danger-zone perimeter on the map, and create real sectors/task groups tied to it
@@ -117,16 +120,18 @@ The mobile app runs via Expo — scan the QR code with Expo Go on your phone, or
 | Screen | How to reach | What it does |
 |---|---|---|
 | Login | App start | Authenticates with the backend; JWT includes unit_type |
-| Unit Select | After login | Shows the same units as the dashboard (e.g. "Unit 43"); user picks their unit |
-| Tasks | After unit select | Lists tasks for the selected unit; auto-refreshes every 8 s |
-| Report | Tap **FILE REPORT** on a task | Updates task status; saves offline if no connection |
-| Incident Map | Menu (⋮) → Incident Map | Map of incidents assigned to the selected unit |
+| Unit Select | After login | Two sections — **units with an active dispatch** (shows the incident, "RESUME") and **available units** ("CLAIM"); pick one to claim it and start GPS heartbeats |
+| Tasks | After unit select | Lists tasks for the selected unit; auto-refreshes every 8 s. Each task: **🚗 ON MY WAY** (accept), then **✓ ARRIVED ON SCENE**, above the **ROUTE** and **FILE REPORT** buttons |
+| Report | Tap **FILE REPORT** on a task | Status (En Route / In Progress / Done) + notes + photos/videos; a **Previously sent** list below the form shows this task's past reports. Saves offline if no connection |
+| Incident Map | **ROUTE** on a task, or Menu (⋮) → Incident Map | After accepting a dispatch: the OSRM road route to the incident, a moving vehicle marker, live distance + ETA, and the camera follows the vehicle |
 | Sync | Menu (⋮) → Sync | Shows offline reports and syncs when back online |
 
 ### Navigation
 
-- **REPORT** button → opens the Report screen for that task
-- **Sync** button (top-right header on Tasks screen) → opens Sync screen
+- **ON MY WAY** → accepts the dispatch (war-room starts drawing the route)
+- **ROUTE** button → opens the Incident Map with the live moving route for that task
+- **FILE REPORT** button → opens the Report screen for that task
+- Menu (⋮) → Sync / Incident Map / Change Unit / Disconnect
 - Back arrow (native stack) → returns to the previous screen
 
 ### Offline Support
@@ -156,9 +161,12 @@ curl -X POST http://localhost:8000/api/token/ \
 | POST | `/api/token/refresh/` | No | Refresh access token |
 | GET | `/api/tasks/` | Yes | List tasks (`?incident=`, `?mock_unit=`) |
 | PATCH | `/api/tasks/<id>/` | Yes | Update task status |
+| GET | `/api/tasks/<id>/trip/` | No | Shared en-route trip (OSRM path + accepted_at + speedup) — war-room + mobile |
+| GET | `/api/tasks/<id>/reports/` | No | This task's field-report history (with media) |
 | GET/POST | `/api/incidents/` | Partial* | List/create real incidents |
-| POST | `/api/incidents/<id>/assign-unit/` | Partial* | Assign a unit (creates a Task) |
-| GET/POST | `/api/units/` | Partial* | List/create real units (`?claimable=true`, `?type=`) |
+| POST | `/api/incidents/<id>/assign-unit/` | Partial* | Assign a unit (creates a Task on the real incident) |
+| POST | `/api/incidents/<id>/unassign-unit/` | Partial* | Cancel a unit's non-terminal Task (war-room "Cancel") |
+| GET/POST | `/api/units/` | Partial* | List/create real units (`?claimable=true`, `?type=`, `?with_assignment=true`) |
 | POST | `/api/units/claim/` | Yes | Claim a unit, mark it online, set GPS |
 | POST | `/api/units/disconnect/` | Yes | Release the caller's claimed unit |
 | POST | `/api/units/heartbeat/` | Yes | Refresh a claimed unit's last-seen + GPS |
@@ -201,7 +209,7 @@ backend/
         permissions.py      # Role-based: admin, dispatcher, fieldunit (see known gap in ARCHITECTURE.md)
         urls.py
         test_auth.py         # JWT + unit-heartbeat routing tests
-        test_endpoints.py    # Incident/Task/mobile-bridge/unit-claim/field-command tests
+        test_endpoints.py    # Incident/Task/mobile-bridge/unit-claim/field-command/en-route tests
         test_permissions.py  # Task + permission-gap regression tests
     simulated/
         mock_data.py            # Training-sim mock data generator (field-incident dashboard only)
@@ -253,19 +261,25 @@ frontend-web/
 
 mobile-app/
     App.js                  # Navigation container, auth state, JWT token
+    context/
+        UserContext.js       # { user: {id, username, role, unit_type} }
     screens/
         LoginScreen.js       # JWT login form
-        UnitSelectScreen.js  # Post-login unit selection / real unit claim
-        TasksScreen.js       # Task list with auto-refresh (8 s polling)
-        ReportScreen.js      # Task status update (online + offline)
+        UnitSelectScreen.js  # Unit selection — "with a dispatch" / "available" split + claim
+        TasksScreen.js       # Task list (8 s polling); On My Way / Arrived buttons
+        ReportScreen.js      # Status + notes + media; "Previously sent" report history
         SyncScreen.js        # Offline report sync
-        IncidentMapScreen.js # Live route to the assigned incident (OSRM + fallback)
+        IncidentMapScreen.js # Live moving route to the assigned incident (shared trip + OSRM)
     utils/
         heartbeat.js         # 25s live-location heartbeat loop
         location.js          # GPS permission handling + mock fallback
         routing.js           # OSRM route fetch + straight-line fallback
+        trip.js              # Reads /api/tasks/<id>/trip/ + interpolates the vehicle (matches web)
+        taskActions.js       # markOnMyWay / markArrived
+        apiClient.js         # Auth header helper
     storage/
         offlineDB.js        # expo-sqlite local storage
+    config.js               # API_BASE_URL (set to your machine's LAN IP)
     package.json
 
 run_project.bat             # One-command startup (Windows) — requires .venv at repo root
@@ -344,6 +358,14 @@ The unit list is populated when the War-Room Dashboard loads in a browser tab. O
 ### Mobile app shows no tasks after dispatch
 
 Make sure you selected the exact unit that was dispatched. Example: select "Unit 43" in the app, then dispatch "Unit 43" in the dashboard. Tasks are filtered strictly by unit ID.
+
+### No route / vehicle not moving on the app's Incident Map
+
+The moving route only appears **after** the crew taps **ON MY WAY** for that task (the button is on the task card, above ROUTE / FILE REPORT). Before that the map just shows the incident pin. If it still doesn't move after accepting, check that the backend is reachable — the vehicle position comes from `GET /api/tasks/<id>/trip/`.
+
+### Same incident shows twice in the war-room list
+
+An old `mobile_dispatch` bug created a second "mirror" incident (same title, own task) when a real incident's id was dispatched through the bridge. This is fixed; migration `0019` merges the mirrors already in your DB — just run `python manage.py migrate`.
 
 ### OSRM routing timeouts
 

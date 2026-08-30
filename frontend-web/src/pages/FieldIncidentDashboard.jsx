@@ -51,11 +51,26 @@ const NOTE_KIND_META = {
   FORCE_ASSIGNED: { event_type: 'RESOURCE_ARRIVAL', title: 'Force Attached' },
   MISSION: { event_type: 'MISSION', title: 'Mission' },
   STATUS: { event_type: 'STATUS_CHANGE', title: 'Status Update' },
+  REPORT: { event_type: 'COMMUNICATION', title: 'Field Report' },
 };
 
 const buildFieldCommandNoteEvents = (operationalNotes) => (
-  (operationalNotes || []).map((note) => {
+  (operationalNotes || []).map((note, idx) => {
     const meta = NOTE_KIND_META[note.kind] || NOTE_KIND_META.NOTE;
+    // A mobile field report carries the reporter, the incident it's about and
+    // any photo/video attachments — surface all of it, not just the message.
+    if (note.kind === 'REPORT') {
+      return {
+        id: `report-${note.timestamp}-${idx}`,
+        event_type: meta.event_type,
+        severity: 'INFO',
+        title: note.incident_title ? `Field Report — ${note.incident_title}` : meta.title,
+        description: note.message,
+        created_by: note.created_by || null,
+        media: Array.isArray(note.media) ? note.media : [],
+        created_at: note.timestamp,
+      };
+    }
     return {
       event_type: meta.event_type,
       severity: 'INFO',
@@ -420,7 +435,11 @@ const FieldIncidentDashboard = () => {
               data.action === 'field_command_unit_assigned' ||
               data.action === 'field_command_closed' ||
               data.action === 'field_command_mission_created' ||
-              data.action === 'field_command_mission_updated'
+              data.action === 'field_command_mission_updated' ||
+              // A mobile unit filed a field report against a linked incident —
+              // its Operational Timeline entry (with reporter + attachments)
+              // rides along in the refreshed operational_notes.
+              data.action === 'field_command_note_added'
             )) {
               // The central room linked an incident, attached a force, gave a
               // mission, or closed this post. These are relayed onto this

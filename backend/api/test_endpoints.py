@@ -142,6 +142,27 @@ class MobileDispatchBridgeTests(APITestCase):
         self.assertEqual(
             Task.objects.filter(incident=incident, mock_unit_id=101).count(), 1)
 
+    def test_dispatch_onto_a_real_incident_pk_reuses_it_no_mirror(self):
+        """When incident_id is a real Incident's pk, the bridge dispatches onto
+        that row instead of creating a duplicate mock_incident_id mirror."""
+        real = Incident.objects.create(
+            title="Theft", location_lat=32.08, location_lng=34.78,
+            priority="HIGH", channel="POLICE")
+        before = Incident.objects.count()
+
+        response = self.client.post("/api/mobile/dispatch/", {
+            "incident_id": real.id,
+            "incident_title": "Theft",
+            "location_lat": 32.08, "location_lng": 34.78,
+            "units": [{"mock_unit_num": 55, "name": "Car 55", "type": "Police"}],
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Incident.objects.count(), before)  # no mirror row
+        real.refresh_from_db()
+        self.assertEqual(real.channel, "POLICE")  # real row left untouched
+        self.assertTrue(Task.objects.filter(incident=real, mock_unit_id=55).exists())
+
     def test_dispatch_requires_location(self):
         response = self.client.post(
             "/api/mobile/dispatch/", {"incident_id": "live-1"}, format="json")
@@ -571,7 +592,7 @@ class AssignUnitAndEnRouteTests(APITestCase):
             FieldCommandNote.objects.filter(
                 field_command=fc, kind=FieldCommandNote.Kind.STATUS).exists())
 
-    def test_add_event_with_incident_id_links_event_and_logs_note(self):
+    def test_add_event_surfaces_on_field_command_operational_timeline(self):
         fc = FieldCommand.objects.create(
             name="West Post", location_lat=32.08, location_lng=34.78)
         self.incident.field_command = fc
@@ -593,9 +614,16 @@ class AssignUnitAndEnRouteTests(APITestCase):
 
         event = IncidentEvent.objects.get(title="Task Update: Respond")
         self.assertEqual(event.incident_id, self.incident.id)
-        self.assertTrue(
-            FieldCommandNote.objects.filter(
-                field_command=fc, kind=FieldCommandNote.Kind.STATUS).exists())
+
+        # The report shows on the field command's Operational Timeline as a
+        # REPORT entry carrying the reporter and the incident name (media too,
+        # when attached) — not a flat FieldCommandNote string.
+        fc_body = self.client.get(f"/api/field-commands/{fc.field_key}/").json()
+        reports = [n for n in fc_body["operational_notes"] if n.get("kind") == "REPORT"]
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["created_by"], self.field_unit.username)
+        self.assertIn(self.incident.title, reports[0]["message"])
+        self.assertIn("heavy smoke on arrival", reports[0]["message"])
 
     def test_assigned_unit_ids_excludes_terminal_tasks_and_closed_incident(self):
         self.client.force_authenticate(self.dispatcher)
@@ -627,6 +655,59 @@ class AssignUnitAndEnRouteTests(APITestCase):
         self.assertEqual(
             self.client.get(f"/api/incidents/{self.incident.id}/").json()["assigned_unit_ids"],
             [])
+
+    def test_assigned_units_keeps_a_disconnected_vehicle(self):
+        """Unlike assigned_unit_ids, the assigned_units list KEEPS a crew whose
+        device dropped — the dispatch survives the disconnect, flagged offline."""
+        self.client.force_authenticate(self.dispatcher)
+        Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+
+        self.unit.is_online = False
+        self.unit.save(update_fields=["is_online"])
+        body = self.client.get(f"/api/incidents/{self.incident.id}/").json()
+        self.assertEqual(body["assigned_unit_ids"], [])
+        self.assertEqual(
+            body["assigned_units"],
+            [{"id": self.unit.id, "name": self.unit.name, "type": self.unit.type,
+              "is_online": False, "task_status": Task.Status.PENDING}])
+
+    def test_task_reports_action_returns_field_report_history(self):
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+        self.client.force_authenticate(self.field_unit)
+        self.client.post(
+            "/api/field/add-event/?fieldId=default",
+            {"event_type": "STATUS_CHANGE", "title": "Task Update: Respond",
+             "description": "Notes: on scene", "task_id": task.id},
+            format="multipart", HTTP_X_ACTOR_ROLE="UNIT")
+
+        event = IncidentEvent.objects.get(title="Task Update: Respond")
+        self.assertEqual(event.task_id, task.id)
+        self.assertEqual(event.incident_id, self.incident.id)  # inferred from task
+
+        res = self.client.get(f"/api/tasks/{task.id}/reports/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        rows = res.json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Task Update: Respond")
+        self.assertIn("media", rows[0])
+
+    def test_unit_active_assignment_is_opt_in(self):
+        Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+        self.client.force_authenticate(self.dispatcher)
+
+        plain = self.client.get(f"/api/units/{self.unit.id}/").json()
+        self.assertIsNone(plain["active_assignment"])
+
+        detailed = self.client.get(
+            f"/api/units/{self.unit.id}/?with_assignment=true").json()
+        self.assertEqual(detailed["active_assignment"]["incident_id"], self.incident.id)
+        self.assertEqual(detailed["active_assignment"]["task_status"], Task.Status.PENDING)
 
     def test_closing_incident_cancels_open_tasks(self):
         task = Task.objects.create(

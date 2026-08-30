@@ -25,7 +25,15 @@ export async function markOnMyWay(task, token, user) {
     ok = false;
   }
 
-  if (task.incident != null) {
+  // Advance the incident to EN_ROUTE only from a state that allows it — if
+  // another unit already drove it to EN_ROUTE / ON_SCENE, this crew's own
+  // journey is still tracked by its task + trip, and the incident PATCH would
+  // just 400. (The backend also advances the incident as a side effect of the
+  // task update above when it's still OPEN/PENDING.)
+  const incidentAdvanceable =
+    task.incident_status == null
+    || ["OPEN", "PENDING"].includes(task.incident_status);
+  if (task.incident != null && incidentAdvanceable) {
     try {
       await fetch(`${API_BASE_URL}/api/incidents/${task.incident}/`, {
         method: "PATCH",

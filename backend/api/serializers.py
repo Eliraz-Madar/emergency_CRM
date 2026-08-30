@@ -61,6 +61,15 @@ class IncidentSerializer(serializers.ModelSerializer):
     # client-side store to carry that state. None if it hasn't gone live.
     major_incident = serializers.SerializerMethodField()
 
+    # Every unit currently committed to this incident via a non-terminal Task,
+    # WHETHER OR NOT its device is connected right now — each entry carries an
+    # `is_online` flag so the war-room can keep a disconnected crew visibly
+    # attached to the incident (greyed "connection lost") instead of dropping
+    # it off the panel. `assigned_unit_ids` above stays online-only for the
+    # map-marker logic that must not draw a vehicle that isn't reporting a
+    # position.
+    assigned_units = serializers.SerializerMethodField()
+
     class Meta:
         model = Incident
         fields = [
@@ -78,6 +87,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             "created_at",
             "tasks",
             "assigned_unit_ids",
+            "assigned_units",
             "closed_reason",
             "closed_by_role",
             "closed_by_name",
@@ -102,6 +112,23 @@ class IncidentSerializer(serializers.ModelSerializer):
             and t.assigned_unit is not None
             and t.assigned_unit.is_actively_online
         })
+
+    def get_assigned_units(self, obj):
+        if obj.status == Incident.Status.CLOSED:
+            return []
+        seen = {}
+        for t in obj.tasks.select_related("assigned_unit").all():
+            unit = t.assigned_unit
+            if unit is None or t.status in Task.TERMINAL_STATUSES:
+                continue
+            seen[unit.id] = {
+                "id": unit.id,
+                "name": unit.name,
+                "type": unit.type,
+                "is_online": unit.is_actively_online,
+                "task_status": t.status,
+            }
+        return [seen[k] for k in sorted(seen)]
 
     def get_major_incident(self, obj):
         if not hasattr(obj, "major_incident"):
@@ -173,6 +200,12 @@ class UnitSerializer(serializers.ModelSerializer):
     assigned_username = serializers.SerializerMethodField()
     field_id = serializers.CharField(
         source="field_command.field_key", read_only=True, default=None)
+    # The incident this unit is currently dispatched to (its latest non-terminal
+    # Task), or None. Lets the mobile unit-selection screen split the list into
+    # "units with a live dispatch" vs "available units" so a reconnecting crew
+    # re-claims the same vehicle their event is already attached to. Survives
+    # the device going offline — the Task FK doesn't care about connectivity.
+    active_assignment = serializers.SerializerMethodField()
 
     class Meta:
         model = Unit
@@ -187,6 +220,7 @@ class UnitSerializer(serializers.ModelSerializer):
             "last_seen",
             "assigned_username",
             "field_id",
+            "active_assignment",
         ]
 
     def get_is_online(self, obj):
@@ -195,6 +229,33 @@ class UnitSerializer(serializers.ModelSerializer):
     def get_assigned_username(self, obj):
         user = getattr(obj, "app_user", None)
         return user.username if user else None
+
+    def get_active_assignment(self, obj):
+        # Opt-in (adds a query per unit): only the mobile unit-selection screen
+        # needs it, and it passes ?with_assignment=true. Every other UnitSerializer
+        # consumer (the regional dashboard polls the whole fleet) gets null and
+        # pays nothing.
+        request = self.context.get("request")
+        params = getattr(request, "query_params", None) or getattr(request, "GET", None)
+        if params is None or params.get("with_assignment") != "true":
+            return None
+        task = (
+            obj.tasks.select_related("incident")
+            .exclude(status__in=Task.TERMINAL_STATUSES)
+            .exclude(incident__status=Incident.Status.CLOSED)
+            .order_by("-timestamp")
+            .first()
+        )
+        if task is None or task.incident is None:
+            return None
+        return {
+            "task_id": task.id,
+            "task_status": task.status,
+            "incident_id": task.incident_id,
+            "incident_title": task.incident.title,
+            "incident_status": task.incident.status,
+            "incident_priority": task.incident.priority,
+        }
 
 
 class ReportMediaSerializer(serializers.ModelSerializer):
@@ -220,6 +281,7 @@ class IncidentEventSerializer(serializers.ModelSerializer):
             "id",
             "incident",
             "major_incident",
+            "task",
             "event_type",
             "severity",
             "title",
@@ -339,7 +401,12 @@ class FieldCommandSerializer(serializers.ModelSerializer):
         read_only_fields = ["closed_at"]
 
     def get_operational_notes(self, obj):
-        return [
+        """The post's Operational Timeline: its own typed notes (incident
+        linked / force attached / mission / status) PLUS every field report a
+        mobile unit filed against one of its linked incidents — the latter
+        carrying the reporter, the incident name and any photo/video
+        attachments, so a report shows up in full and not as a flat string."""
+        entries = [
             {
                 "timestamp": note.created_at.isoformat(),
                 "message": note.message,
@@ -347,6 +414,38 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             }
             for note in obj.notes.all()
         ]
+
+        request = self.context.get("request")
+        reports = (
+            IncidentEvent.objects
+            .filter(incident__field_command=obj, source=IncidentEvent.Source.UNIT)
+            .select_related("incident")
+            .prefetch_related("media")
+            .order_by("-created_at")
+        )
+        for ev in reports:
+            incident_title = ev.incident.title if ev.incident_id else ""
+            reporter = ev.created_by or "Field unit"
+            body = ev.description or ev.title
+            entries.append({
+                "timestamp": ev.created_at.isoformat(),
+                "message": f"{reporter} · {incident_title}: {body}" if incident_title
+                           else f"{reporter}: {body}",
+                "kind": "REPORT",
+                "created_by": reporter,
+                "incident_title": incident_title,
+                "media": [
+                    {
+                        "id": m.id,
+                        "media_type": m.media_type,
+                        "file_url": request.build_absolute_uri(m.file.url) if request else m.file.url,
+                    }
+                    for m in ev.media.all()
+                ],
+            })
+
+        entries.sort(key=lambda e: e["timestamp"], reverse=True)
+        return entries
 
     def get_major_incident(self, obj):
         # Forward FK (unlike Incident.major_incident, which is the reverse

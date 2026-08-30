@@ -403,11 +403,23 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   };
 
   const handleCancelDispatch = (unit) => {
-    // Real unassign — cancels this unit's open Task on the incident.
-    unassignUnitFromIncident(incident.id, unit.id).catch((error) => {
-      console.error(`Failed to unassign unit ${unit.id} from incident ${incident.id}:`, error);
+    // Optimistic local prune so the row disappears immediately — the list is
+    // driven by incident.assigned_units, which a bare API call wouldn't
+    // refresh until the next poll (the "have to refresh to clear it" bug).
+    updateIncident(incident.id, {
+      assigned_unit_ids: (incident.assigned_unit_ids || []).filter((id) => id !== unit.id),
+      assigned_units: (incident.assigned_units || []).filter((u) => u.id !== unit.id),
     });
     upsertOnlineUnit({ id: unit.id, assignedTo: null, status: null, route: null });
+    // Real unassign — cancels this unit's open Task on the incident. Re-apply
+    // the authoritative incident shape from the response.
+    unassignUnitFromIncident(incident.id, unit.id)
+      .then((updated) => {
+        if (updated && typeof updated === 'object') updateIncident(incident.id, updated);
+      })
+      .catch((error) => {
+        console.error(`Failed to unassign unit ${unit.id} from incident ${incident.id}:`, error);
+      });
   };
 
   const renderUnitCard = (unit) => {
@@ -444,29 +456,29 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   };
 
   // Dispatched units for this incident. Authoritative source is the incident's
-  // own assigned_unit_ids (server-computed from active Task rows) so this list
-  // always agrees with the vehicle card and the backend — never drifts because
-  // of client-only state. Any unit optimistically tagged by handleDispatch that
-  // the server hasn't confirmed yet is unioned in so the list updates instantly.
+  // own `assigned_units` (server-computed from active Task rows) so this list
+  // always agrees with the backend — never drifts because of client-only
+  // state. Unlike `assigned_unit_ids` (online-only, for map markers), this
+  // KEEPS a unit whose device disconnected: the assignment survives the crew
+  // dropping offline, it just renders greyed as "Connection lost". Any unit
+  // optimistically tagged by handleDispatch that the server hasn't confirmed
+  // yet is unioned in so the list updates instantly.
   const dispatchedUnits = useMemo(() => {
     if (!incident?.id) return [];
     const unitById = new Map(
       (Array.isArray(onlineUnits) ? onlineUnits : []).map((u) => [u.id, u]),
     );
-    const serverIds = Array.isArray(incident.assigned_unit_ids) ? incident.assigned_unit_ids : [];
-    const optimisticIds = (Array.isArray(onlineUnits) ? onlineUnits : [])
-      .filter((u) => String(u.assignedTo) === String(incident.id))
-      .map((u) => u.id);
-    // Only vehicles that are actually here and connected — a unit that isn't
-    // on the map is never shown as dispatched to this event.
-    const ids = [...new Set([...serverIds, ...optimisticIds])]
-      .filter((id) => unitById.get(id)?.is_online === true);
-    return ids.map((id) => {
-      const u = unitById.get(id) || {};
+    const serverUnits = Array.isArray(incident.assigned_units) ? incident.assigned_units : [];
+    const serverIds = new Set(serverUnits.map((u) => u.id));
+    const optimistic = (Array.isArray(onlineUnits) ? onlineUnits : [])
+      .filter((u) => String(u.assignedTo) === String(incident.id) && !serverIds.has(u.id))
+      .map((u) => ({ id: u.id, name: u.name, type: u.type, is_online: true }));
+    return [...serverUnits, ...optimistic].map((su) => {
+      const u = unitById.get(su.id) || {};
       return {
-        id,
-        name: u.name || `Unit ${id}`,
-        type: normalizeUnitType(u.type),
+        id: su.id,
+        name: su.name || u.name || `Unit ${su.id}`,
+        type: normalizeUnitType(su.type || u.type),
         // Server confirms the assignment but the phase (ASSIGNED / EN_ROUTE /
         // ON_SCENE) is client-side — default to ASSIGNED, not EN_ROUTE, so a
         // freshly dispatched unit doesn't read as "on the way" before the crew
@@ -474,10 +486,11 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
         status: u.status || 'ASSIGNED',
         etaMin: u.etaMin,
         distanceKm: u.distanceKm,
+        isOnline: su.is_online !== false,
         isReal: true,
       };
     });
-  }, [incident?.id, incident?.assigned_unit_ids, onlineUnits]);
+  }, [incident?.id, incident?.assigned_units, onlineUnits]);
 
   const headerIcon = (() => {
     const type = (incident?.incident_type || '').toUpperCase();
@@ -965,13 +978,17 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
                 const meta = TYPE_META[unit.type] || TYPE_META.POLICE;
                 // ASSIGNED = dispatched, crew hasn't accepted in the app yet;
                 // EN_ROUTE = accepted and driving; ON_SCENE = arrived.
-                const phase = unit.status === 'ON_SCENE'
-                  ? { label: 'On scene', color: '#10b981', bg: 'rgba(16,185,129,0.12)' }
-                  : unit.status === 'EN_ROUTE'
-                    ? { label: 'On the way', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' }
-                    : { label: 'Awaiting acceptance', color: '#38bdf8', bg: 'rgba(56,189,248,0.12)' };
+                // A disconnected crew stays assigned — shown greyed with a
+                // "Connection lost" badge instead of a live phase.
+                const phase = !unit.isOnline
+                  ? { label: 'Connection lost', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' }
+                  : unit.status === 'ON_SCENE'
+                    ? { label: 'On scene', color: '#10b981', bg: 'rgba(16,185,129,0.12)' }
+                    : unit.status === 'EN_ROUTE'
+                      ? { label: 'On the way', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' }
+                      : { label: 'Awaiting acceptance', color: '#38bdf8', bg: 'rgba(56,189,248,0.12)' };
                 const statusLabel = phase.label
-                  + (unit.status === 'EN_ROUTE' && Number.isFinite(unit.etaMin) && unit.etaMin > 0
+                  + (unit.isOnline && unit.status === 'EN_ROUTE' && Number.isFinite(unit.etaMin) && unit.etaMin > 0
                     ? ` · ${Math.max(1, Math.round(unit.etaMin))} min`
                     : '');
                 const statusColor = phase.color;
@@ -985,6 +1002,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
                     border: '1px solid #1f2937',
                     borderRadius: '6px',
                     padding: '8px 10px',
+                    opacity: unit.isOnline ? 1 : 0.6,
                   }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <meta.Icon size={14} color={meta.color} />

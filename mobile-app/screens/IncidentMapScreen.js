@@ -28,15 +28,10 @@ const STATUS_LABEL = {
 
 const VEHICLE_ICON = { Police: "🚓", EMS: "🚑", Fire: "🚒", HomeFront: "🚙" };
 
-// The route is only drawn once the unit has *accepted* the dispatch — i.e. the
-// task is IN_PROGRESS or the incident has been advanced to EN_ROUTE / ON_SCENE.
-// A merely PENDING task shows an "On My Way" prompt instead of a route.
+// Used only for the "opened the map with no task selected" fallback — pick an
+// incident some unit is already driving to. This crew's own route is driven by
+// its task status, not this.
 const EN_ROUTE_INCIDENT_STATUSES = new Set(["EN_ROUTE", "ON_SCENE"]);
-
-function hasAcceptedDispatch(task) {
-  if (!task) return false;
-  return task.status === "IN_PROGRESS" || EN_ROUTE_INCIDENT_STATUSES.has(task.incident_status);
-}
 
 // Keeps both the unit and the incident comfortably inside the visible map
 // area (not hard against the screen edge, and clear of the bottom route card).
@@ -86,8 +81,8 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
 
   useEffect(() => {
     if (!token) return;
-    load();
-    const iv = setInterval(load, 8000); // keep the live task status fresh
+    load(true /* isFirst — show the full-screen loader only once */);
+    const iv = setInterval(() => load(false), 8000); // silent background refresh
     return () => clearInterval(iv);
   }, [token]);
 
@@ -96,14 +91,21 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
   const task =
     taskList.find((t) => t.id === selectedTask?.id) || selectedTask || null;
 
-  // A route is only shown once the crew has accepted ("On My Way"); before that
-  // the card shows the accept prompt. Falls back to the first already-en-route
-  // incident so opening the screen directly still shows an active route.
-  const taskAccepted = hasAcceptedDispatch(task);
+  const myTaskAccepted = task?.status === "IN_PROGRESS";
+  const hasCoords = task?.incident_lat != null && task?.incident_lng != null;
+  const incidentFinished =
+    task?.incident_status === "RESOLVED" || task?.incident_status === "CLOSED";
+
+  // A selected task that still needs accepting — drives the "On My Way" prompt.
+  const pendingTask =
+    task && task.status === "PENDING" && !incidentFinished && hasCoords ? task : null;
+
+  // The incident this crew is engaged with: whenever THIS task is accepted
+  // (IN_PROGRESS) — regardless of the incident's shared status, which another
+  // unit may already have pushed to ON_SCENE. Falls back to the first
+  // already-en-route incident only when this crew has nothing of its own.
   const activeIncident =
-    task?.incident_lat != null &&
-    task?.incident_lng != null &&
-    taskAccepted
+    myTaskAccepted && hasCoords && !incidentFinished
       ? {
           id:       task.incident,
           title:    task.incident_title ?? `Incident #${task.incident}`,
@@ -111,20 +113,23 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
           lng:      task.incident_lng,
           status:   task.incident_status,
         }
-      : incidents.find((inc) => EN_ROUTE_INCIDENT_STATUSES.has(inc.status)) ?? null;
+      : pendingTask
+        ? null
+        : incidents.find((inc) => EN_ROUTE_INCIDENT_STATUSES.has(inc.status)) ?? null;
 
-  // A selected task that still needs accepting — drives the "On My Way" prompt.
-  // Excludes finished/cancelled tasks and closed incidents (stale selections).
-  const pendingTask =
-    task &&
-    !taskAccepted &&
-    task.status !== "DONE" &&
-    task.status !== "CANCELLED" &&
-    task.incident_status !== "CLOSED" &&
-    task.incident_lat != null &&
-    task.incident_lng != null
-      ? task
-      : null;
+  // What the map frames on / shows the device dot for — the active drive if
+  // there is one, otherwise the incident this crew is being dispatched to.
+  const focusIncident =
+    activeIncident
+    || (pendingTask
+      ? {
+          id:     pendingTask.incident,
+          title:  pendingTask.incident_title ?? `Incident #${pendingTask.incident}`,
+          lat:    pendingTask.incident_lat,
+          lng:    pendingTask.incident_lng,
+          status: pendingTask.incident_status,
+        }
+      : null);
 
   const handleOnMyWay = async () => {
     if (!pendingTask) return;
@@ -143,25 +148,30 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
   // first camera framing before the crew accepts. Once a trip is running the
   // shared trip owns the position.
   useEffect(() => {
-    if (!activeIncident) return undefined;
+    if (!focusIncident) return undefined;
     let stopWatch;
     let cancelled = false;
     getDeviceLocation().then((loc) => { if (!cancelled) setDeviceLocation(loc); });
     watchDeviceLocation((loc) => { if (!cancelled) setDeviceLocation(loc); })
       .then((stop) => { if (cancelled) stop(); else stopWatch = stop; });
     return () => { cancelled = true; stopWatch?.(); };
-  }, [activeIncident?.id]);
+  }, [focusIncident?.id]);
 
-  // Fetch the shared trip once the crew is en route; refresh it if the target
-  // changes. Cleared when no longer en route.
-  const enRoute =
-    activeIncident?.status === "EN_ROUTE" && task?.status === "IN_PROGRESS" && task?.id != null;
+  // Fetch the shared trip as soon as THIS crew has accepted (task IN_PROGRESS)
+  // — not gated on the incident's shared status, which another unit may have
+  // pushed past EN_ROUTE. Re-fetched on a slow interval so a server-side
+  // rebuild (after a restart) or a corrected path is picked up.
+  const driving =
+    myTaskAccepted && hasCoords && !incidentFinished && task?.id != null;
   useEffect(() => {
-    if (!enRoute) { setTrip(null); return undefined; }
+    if (!driving) { setTrip(null); return undefined; }
     let cancelled = false;
-    fetchTrip(task.id, token, user).then((t) => { if (!cancelled) setTrip(t); });
-    return () => { cancelled = true; };
-  }, [enRoute, task?.id, token, user]);
+    const pull = () => fetchTrip(task.id, token, user)
+      .then((t) => { if (!cancelled && t) setTrip(t); });
+    pull();
+    const iv = setInterval(pull, 10000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [driving, task?.id, token, user]);
 
   // 1 s clock — only while a trip is live — to advance the interpolated marker.
   useEffect(() => {
@@ -172,24 +182,33 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
 
   const ts = trip ? tripState(trip, nowMs) : null;
 
-  // Frame the vehicle + incident exactly once per target, then hands the
-  // camera fully to the user (no auto zoom-out on pinch).
+  // Frame the vehicle + incident once when the trip first appears, then FOLLOW
+  // the vehicle — re-centre the camera on it every tick while it's moving so
+  // "the screen moves according to the mobile's progress". Stops following
+  // once arrived so the crew can look around the scene.
   useEffect(() => {
-    if (!mapRef.current || !activeIncident) return;
-    if (fittedForRef.current === activeIncident.id) return;
-    const start = ts?.position
-      || (deviceLocation && { latitude: deviceLocation.latitude, longitude: deviceLocation.longitude });
-    if (!start) return;
-    fittedForRef.current = activeIncident.id;
-    mapRef.current.fitToCoordinates(
-      [start, { latitude: activeIncident.lat, longitude: activeIncident.lng }],
-      { edgePadding: FIT_EDGE_PADDING, animated: true },
-    );
-  }, [activeIncident?.id, ts?.position, deviceLocation]);
+    if (!mapRef.current || !focusIncident) return;
+    if (fittedForRef.current !== focusIncident.id) {
+      const start = ts?.position
+        || (deviceLocation && { latitude: deviceLocation.latitude, longitude: deviceLocation.longitude });
+      if (!start) return;
+      fittedForRef.current = focusIncident.id;
+      mapRef.current.fitToCoordinates(
+        [start, { latitude: focusIncident.lat, longitude: focusIncident.lng }],
+        { edgePadding: FIT_EDGE_PADDING, animated: true },
+      );
+      return;
+    }
+    if (ts?.position && !ts.arrived) {
+      mapRef.current.animateCamera(
+        { center: { latitude: ts.position.latitude, longitude: ts.position.longitude } },
+        { duration: 900 },
+      );
+    }
+  }, [focusIncident?.id, ts?.position?.latitude, ts?.position?.longitude, ts?.arrived, deviceLocation]);
 
-  const load = async () => {
-    setLoading(true);
-    setError("");
+  const load = async (isFirst = false) => {
+    if (isFirst) { setLoading(true); setError(""); }
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 7000);
@@ -207,9 +226,11 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
       setIncidents(deduplicateIncidents(tasks));
       setError("");
     } catch (err) {
-      setError("Could not load incident map. Check your connection.");
+      // Only block the whole screen on the very first load — a dropped
+      // background poll must not replace the live route with an error card.
+      if (isFirst) setError("Could not load incident map. Check your connection.");
     } finally {
-      setLoading(false);
+      if (isFirst) setLoading(false);
     }
   };
 
@@ -226,7 +247,7 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
     return (
       <View style={styles.center}>
         <Text style={styles.errorText}>⚠  {error}</Text>
-        <TouchableOpacity style={styles.retryBtn} onPress={load}>
+        <TouchableOpacity style={styles.retryBtn} onPress={() => load(true)}>
           <Text style={styles.retryBtnText}>RETRY</Text>
         </TouchableOpacity>
       </View>
@@ -309,32 +330,41 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
         </View>
       )}
 
-      {activeIncident && (
-        <View style={styles.routeCard}>
-          <Text style={styles.routeCardTitle} numberOfLines={2}>{activeIncident.title}</Text>
-          <Text style={styles.routeCardStatus}>
-            {STATUS_LABEL[activeIncident.status] ?? activeIncident.status}
-          </Text>
-          {activeIncident.status === "ON_SCENE" ? (
-            <Text style={styles.routeCardHint}>On scene — begin operations.</Text>
-          ) : ts ? (
-            <View style={styles.routeMetrics}>
-              <View style={styles.routeMetric}>
-                <Text style={styles.routeMetricValue}>{ts.remainingKm.toFixed(1)} km</Text>
-                <Text style={styles.routeMetricLabel}>DISTANCE</Text>
+      {activeIncident && (() => {
+        // "En route" vs "On scene" is THIS crew's own progress. Trust the live
+        // trip when we have one (the crew may be driving to an incident another
+        // unit already took ON_SCENE); only fall back to the incident's shared
+        // status when there's no trip to read.
+        const arrived = ts
+          ? ts.arrived
+          : (activeIncident.status === "ON_SCENE" || activeIncident.status === "RESOLVED");
+        return (
+          <View style={styles.routeCard}>
+            <Text style={styles.routeCardTitle} numberOfLines={2}>{activeIncident.title}</Text>
+            <Text style={styles.routeCardStatus}>
+              {arrived ? "On Scene" : "En Route"}
+            </Text>
+            {arrived ? (
+              <Text style={styles.routeCardHint}>Arrived on scene — begin operations.</Text>
+            ) : ts ? (
+              <View style={styles.routeMetrics}>
+                <View style={styles.routeMetric}>
+                  <Text style={styles.routeMetricValue}>{ts.remainingKm.toFixed(1)} km</Text>
+                  <Text style={styles.routeMetricLabel}>DISTANCE</Text>
+                </View>
+                <View style={styles.routeMetric}>
+                  <Text style={styles.routeMetricValue}>
+                    {`${Math.max(1, Math.round(ts.remainingMin))} min`}
+                  </Text>
+                  <Text style={styles.routeMetricLabel}>ETA</Text>
+                </View>
               </View>
-              <View style={styles.routeMetric}>
-                <Text style={styles.routeMetricValue}>
-                  {ts.arrived ? "Arrived" : `${Math.max(1, Math.round(ts.remainingMin))} min`}
-                </Text>
-                <Text style={styles.routeMetricLabel}>ETA</Text>
-              </View>
-            </View>
-          ) : (
-            <Text style={styles.routeCardHint}>Calculating route…</Text>
-          )}
-        </View>
-      )}
+            ) : (
+              <Text style={styles.routeCardHint}>Calculating route…</Text>
+            )}
+          </View>
+        );
+      })()}
 
       {/* Legend */}
       <View style={styles.legend}>

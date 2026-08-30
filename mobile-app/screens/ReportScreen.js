@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, Image, Alert, ActivityIndicator,
@@ -30,6 +30,19 @@ function defaultStatusFor(task) {
 
 const MAX_ATTACHMENTS = 5;
 
+// Short "how long ago" label for the report history list.
+function timeAgo(iso) {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "";
+  const s = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+}
+
 export default function ReportScreen({ selectedTask, token, online, onDone }) {
   const originalStatus = defaultStatusFor(selectedTask);
   const [status, setStatus] = useState(originalStatus);
@@ -40,6 +53,33 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
   const { user } = useUser();
   const taskTitle = selectedTask?.title || "task";
   const activeCfg = STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[0];
+
+  // ── Previously-sent reports for this task ──────────────────────────────────
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+
+  const loadHistory = useCallback(async () => {
+    if (selectedTask?.id == null) { setHistoryLoading(false); return; }
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(
+        `${API_BASE_URL}/api/tasks/${selectedTask.id}/reports/`,
+        { headers: getAuthHeaders(token, user), signal: controller.signal },
+      );
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(Array.isArray(data) ? data : []);
+      }
+    } catch (_) {
+      // History is non-critical — the form still works without it.
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [selectedTask?.id, token, user]);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
 
   // ── Media helpers ──────────────────────────────────────────────────────────
 
@@ -188,6 +228,7 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
       if (online) {
         await sendTaskUpdate();
         await sendEventWithMedia();
+        loadHistory(); // refresh the "previously sent" list before leaving
       } else {
         await saveReport(taskTitle, notes, offlineStatus, null);
       }
@@ -334,6 +375,52 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
           📶  Offline — report will sync when connection is restored
         </Text>
       )}
+
+      {/* ── Previously sent ─────────────────────────────────────────────── */}
+      <View style={styles.historyHeader}>
+        <Text style={styles.sectionLabel}>
+          PREVIOUSLY SENT{history.length > 0 ? `  ${history.length}` : ""}
+        </Text>
+        <TouchableOpacity onPress={loadHistory} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Text style={styles.historyRefresh}>↻</Text>
+        </TouchableOpacity>
+      </View>
+
+      {historyLoading ? (
+        <ActivityIndicator color="#90A4AE" style={{ marginVertical: 12 }} />
+      ) : history.length === 0 ? (
+        <Text style={styles.historyEmpty}>No reports sent for this task yet.</Text>
+      ) : (
+        history.map((ev) => (
+          <View key={ev.id} style={styles.historyCard}>
+            <View style={styles.historyCardTop}>
+              <Text style={styles.historyTitle} numberOfLines={1}>{ev.title}</Text>
+              <Text style={styles.historyTime}>{timeAgo(ev.created_at)}</Text>
+            </View>
+            {ev.description ? (
+              <Text style={styles.historyDesc}>{ev.description}</Text>
+            ) : null}
+            {Array.isArray(ev.media) && ev.media.length > 0 && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.historyThumbRow}
+                contentContainerStyle={styles.thumbRowContent}
+              >
+                {ev.media.map((m) => (
+                  m.media_type === "image" ? (
+                    <Image key={m.id} source={{ uri: m.file_url }} style={styles.historyThumb} />
+                  ) : (
+                    <View key={m.id} style={styles.historyVideoThumb}>
+                      <Text style={styles.videoThumbIcon}>▶</Text>
+                    </View>
+                  )
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        ))
+      )}
     </ScrollView>
   );
 }
@@ -474,5 +561,40 @@ const styles = StyleSheet.create({
     color: "#90A4AE",
     fontSize: 12,
     lineHeight: 18,
+  },
+
+  // Previously-sent history
+  historyHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 20,
+    marginBottom: 4,
+  },
+  historyRefresh: { fontSize: 18, color: "#546E7A", paddingHorizontal: 4 },
+  historyEmpty: { color: "#90A4AE", fontSize: 13, fontStyle: "italic", marginBottom: 8 },
+  historyCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E0E6EB",
+    padding: 12,
+    marginBottom: 10,
+  },
+  historyCardTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  historyTitle: { flex: 1, fontSize: 13, fontWeight: "700", color: "#1E2A3A" },
+  historyTime:  { fontSize: 11, color: "#90A4AE" },
+  historyDesc:  { fontSize: 13, color: "#546E7A", marginTop: 4, lineHeight: 18 },
+  historyThumbRow: { marginTop: 8 },
+  historyThumb: { width: 60, height: 60, borderRadius: 8, backgroundColor: "#E0E0E0" },
+  historyVideoThumb: {
+    width: 60, height: 60, borderRadius: 8,
+    backgroundColor: "#1E2A3A",
+    alignItems: "center", justifyContent: "center",
   },
 });

@@ -690,6 +690,13 @@ class IncidentEvent(models.Model):
         Incident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
     major_incident = models.ForeignKey(
         MajorIncident, null=True, blank=True, related_name="events", on_delete=models.CASCADE)
+    # The specific dispatched Task this event reports on, when it came from a
+    # field unit's report (see field_incident_add_event, which reads task_id
+    # off the mobile app's multipart body). Nullable/blank: command-center and
+    # training-sim events aren't task-scoped. SET_NULL keeps the report in the
+    # timeline as an audit record even if the task row is later removed.
+    task = models.ForeignKey(
+        "Task", null=True, blank=True, related_name="events", on_delete=models.SET_NULL)
 
     # Event info
     event_type = models.CharField(max_length=50, choices=EventType.choices)
