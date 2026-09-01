@@ -4,6 +4,7 @@ import { Shield, Flame, Ambulance } from 'lucide-react';
 import { formatTime } from '../utils/time.js';
 import { useDashboardStore } from '../store/dashboard.js';
 import { getSortedAvailableUnits } from '../utils/units.js';
+import { announceOnce, forgetAnnouncement } from '../utils/announce.js';
 import { RealtimeService } from '../services/realtime.js';
 import { calculateDistanceKm } from '../utils/units.js';
 import { KPICards } from '../components/KPICards.jsx';
@@ -99,27 +100,71 @@ export function reconcileUnitAssignments(incidents, units, prevUnits = []) {
       // Status reflects where the CREW is in ITS OWN leg, not the shared
       // incident status (another unit may already have driven the incident to
       // ON_SCENE):
-      //  - task PENDING     -> ASSIGNED  (dispatched, awaiting "On My Way")
-      //  - task IN_PROGRESS -> EN_ROUTE  (accepted, driving — stepEnRouteUnits
-      //                                   flips it to ON_SCENE once the trip
-      //                                   interpolation reaches the incident)
-      const status = task.status === 'IN_PROGRESS' ? 'EN_ROUTE' : 'ASSIGNED';
+      //  - task PENDING        -> ASSIGNED  (dispatched, awaiting "On My Way")
+      //  - task IN_PROGRESS    -> EN_ROUTE  (accepted, driving)
+      //  - task.arrived_at set -> ON_SCENE  (crew CONFIRMED arrival from the
+      //                                      app — durable, survives reloads
+      //                                      and dashboard switches so the
+      //                                      war-room never reverts to "still
+      //                                      on the way" and re-announces)
+      const status = task.arrived_at
+        ? 'ON_SCENE'
+        : (task.status === 'IN_PROGRESS' ? 'EN_ROUTE' : 'ASSIGNED');
       overlay.set(task.assigned_unit, { assignedTo: inc.id, status });
     });
   });
   const prevById = new Map((prevUnits || []).map((u) => [u.id, u]));
+  const incById = new Map((incidents || []).map((i) => [i.id, i]));
   return (units || []).map((u) => {
     const ov = overlay.get(u.id);
-    // Only a unit that's actually here and connected can be shown as
-    // associated with an event — a vehicle that isn't on the map must not
-    // carry a phantom assignment left over from a previous run. The backing
-    // Task still exists, so it re-associates if the crew reconnects.
-    if (!ov || u.is_online !== true) return u;
+    if (!ov) return u;
+    // A dispatched unit reports its assignment + base status EVEN WHILE
+    // OFFLINE (device mid-reconnect, brief signal loss) — otherwise it drops
+    // out of `assignedTo` here and, until the next full reconcile, shows up
+    // as "available" for a fresh dispatch (KPICards / IncidentDetailsPanel
+    // both filter purely on assignedTo) even though the underlying Task is
+    // still very much active. Only the MOVEMENT synthesis below — position/
+    // route continuity for the animated marker — stays gated on is_online:
+    // there's no live GPS to trust for that while the crew is disconnected.
+    if (u.is_online !== true) return { ...u, assignedTo: ov.assignedTo, status: ov.status };
     const prev = prevById.get(u.id);
-    const keepRoute = prev && Array.isArray(prev.route) && prev.assignedTo === ov.assignedTo
-      ? { route: prev.route }
-      : {};
-    return { ...u, ...ov, ...keepRoute };
+    const sameIncident = prev && String(prev.assignedTo) === String(ov.assignedTo);
+
+    // Carry the client-only movement state across a remount (navigating to the
+    // field dashboard and back) so the vehicle doesn't snap back to its claim
+    // position. GET /api/units/ only has the last heartbeat GPS, which for a
+    // stationary test phone is where the crew started.
+    let movement;
+    if (ov.status === 'ON_SCENE') {
+      // On scene = physically at the incident. Park it there; no trip to
+      // re-animate (startUnitTrip skips arrived crews).
+      const inc = incById.get(ov.assignedTo);
+      const at = inc && Number.isFinite(inc.location_lat) && Number.isFinite(inc.location_lng)
+        ? { position: [inc.location_lat, inc.location_lng], location_lat: inc.location_lat, location_lng: inc.location_lng }
+        : (sameIncident && Array.isArray(prev.position) ? { position: prev.position } : {});
+      movement = {
+        route: [], routeIndex: undefined, etaMin: 0, distanceKm: 0, atDestination: true,
+        fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+        ...at,
+      };
+    } else if (ov.status === 'EN_ROUTE' && sameIncident) {
+      // Resume the drive from where it was — startUnitTrip + stepEnRouteUnits
+      // take over from this state.
+      movement = {
+        ...(Array.isArray(prev.position) ? { position: prev.position } : {}),
+        ...(Array.isArray(prev.route) ? { route: prev.route } : {}),
+        ...(Array.isArray(prev.fullRoute) ? { fullRoute: prev.fullRoute } : {}),
+        ...(prev.tripAcceptedAt ? { tripAcceptedAt: prev.tripAcceptedAt } : {}),
+        ...(prev.tripDurationS ? { tripDurationS: prev.tripDurationS } : {}),
+        ...(prev.tripDistanceKm ? { tripDistanceKm: prev.tripDistanceKm } : {}),
+        ...(prev.tripSpeedup ? { tripSpeedup: prev.tripSpeedup } : {}),
+        ...(prev.routeIndex != null ? { routeIndex: prev.routeIndex } : {}),
+        ...(prev.location_lat != null ? { location_lat: prev.location_lat, location_lng: prev.location_lng } : {}),
+      };
+    } else {
+      movement = { route: undefined };
+    }
+    return { ...u, ...ov, ...movement };
   });
 }
 
@@ -213,8 +258,8 @@ function stepEnRouteUnits() {
     const progress = Math.max(0, Math.min(1, (elapsedS * speedup) / u.tripDurationS));
     const { point, segIndex } = pointAtFraction(coords, progress);
     if (!point) return;
-    const arrived = progress >= 1;
-    const remaining = arrived ? [] : [point, ...coords.slice(segIndex + 1)];
+    const atDestination = progress >= 1;
+    const remaining = atDestination ? [] : [point, ...coords.slice(segIndex + 1)];
     const totalKm = u.tripDistanceKm || polylineLengthKm(coords);
     upsertOnlineUnit({
       id: u.id,
@@ -222,24 +267,17 @@ function stepEnRouteUnits() {
       location_lat: point[0],
       location_lng: point[1],
       route: remaining,
-      routeIndex: arrived ? coords.length - 1 : segIndex,
-      distanceKm: arrived ? 0 : totalKm * (1 - progress),
-      etaMin: arrived ? 0 : (u.tripDurationS / 60 / speedup) * (1 - progress),
-      // Once the vehicle reaches the incident, its leg is done — flip to
-      // ON_SCENE so the panel stops saying "on the way" and this tick stops
-      // re-animating it. Announce the arrival aloud, once.
-      ...(arrived ? { status: 'ON_SCENE', arrivalAnnounced: true } : {}),
+      routeIndex: atDestination ? coords.length - 1 : segIndex,
+      distanceKm: atDestination ? 0 : totalKm * (1 - progress),
+      etaMin: atDestination ? 0 : (u.tripDurationS / 60 / speedup) * (1 - progress),
+      // The trip animation only DRIVES the marker. It must NOT decide the
+      // crew is on scene — that flip (and the arrival announcement) happens
+      // only when the crew confirms arrival from the mobile app, delivered
+      // as the `task_arrived` SSE action. Until then the vehicle sits at the
+      // incident still flagged EN_ROUTE ("arriving — awaiting crew
+      // confirmation"). Stop re-animating once parked so this stays cheap.
+      ...(atDestination ? { atDestination: true, tripAcceptedAt: undefined, tripDurationS: undefined } : {}),
     });
-    if (arrived && !u.arrivalAnnounced
-        && typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      const inc = u.assignedTo != null
-        ? (incidents || []).find((i) => i.id === u.assignedTo) : null;
-      const utterance = new SpeechSynthesisUtterance(
-        `${u.name || `Unit ${u.id}`} has arrived at ${inc?.title || 'the incident'}.`,
-      );
-      utterance.lang = 'en-US';
-      window.speechSynthesis.speak(utterance);
-    }
   });
 }
 
@@ -282,11 +320,17 @@ export default function Dashboard() {
     setActiveFilter: storeSetActiveFilter,
     zoomToIncidentId,
     clearZoomToIncident,
+    zoomToFieldCommandPost,
     setFlashingIncident,
     clearFlashingIncident,
   } = useDashboardStore();
 
   const [isLoading, setIsLoading] = useState(true);
+  // Bumped to force the init+SSE effect to tear down and re-run — used by the
+  // offline-recovery poller instead of hand-rolling a second SSE connection
+  // (which used to orphan the first one, so events arrived — and were spoken
+  // — twice).
+  const [reconnectNonce, setReconnectNonce] = useState(0);
   // A ref, not state: the effect's cleanup below needs to read whichever
   // connection was most recently assigned at the moment cleanup actually
   // runs, not whatever `realtimeService` happened to be at the time the
@@ -312,10 +356,11 @@ export default function Dashboard() {
   const [isCreateFieldOpen, setIsCreateFieldOpen] = useState(false);
   const [createFieldLocation, setCreateFieldLocation] = useState(null);
   // Set only when this modal was opened via handleGoLiveCreateFieldCommand
-  // (escalation path) — null for the direct map right-click path. Cleared
-  // by resetCreateFieldForm so a previous Go Live can never leak into an
-  // unrelated direct creation.
-  const [createFieldMajorIncidentId, setCreateFieldMajorIncidentId] = useState(null);
+  // (the "Go Live" escalation path) — null for the direct map right-click
+  // path. Holds { incidentId, goLiveType }: the MajorIncident is NOT created
+  // until handleCreateFieldSubmit actually runs, so cancelling the modal
+  // leaves the source incident untouched. Cleared by resetCreateFieldForm.
+  const [createFieldGoLive, setCreateFieldGoLive] = useState(null);
   // 'ALL' (default, matches current unfiltered behavior) or one of
   // CREATE_FIELD_TYPE_ORDER — narrows the checklist by unit type without
   // forcing a choice before anything is shown, same "All + specific types"
@@ -421,29 +466,6 @@ export default function Dashboard() {
     [activeUnits, createFieldLocation, createFieldUnitType],
   );
 
-  // Field Command Overview's "Assign Global Forces" list: previously just
-  // `units.filter(u => !u.field_id)` with no is_online/EN_ROUTE/ON_SCENE
-  // check at all — unlike every other "available units" surface in the
-  // app. FieldCommandSerializer (backend/api/serializers.py) exposes
-  // location_lat/location_lng directly (no source= remapping), and
-  // selectedFieldCommand carries the same shape as the list endpoint, so
-  // it's available immediately with no loading-race gap. Sorted
-  // nearest-first as a consequence of using the shared helper.
-  const sortedAssignableUnits = useMemo(
-    () => getSortedAvailableUnits(
-      // Was reading from `units` (the legacy/demo array, only populated once
-      // on initial load) instead of `onlineUnits` (the real, SSE-kept-fresh
-      // array) — a newly-claimed unit never appeared here until a full page
-      // refresh even though it was already online per every other surface.
-      onlineUnits,
-      selectedFieldCommand
-        ? { lat: selectedFieldCommand.location_lat, lng: selectedFieldCommand.location_lng }
-        : null,
-      null,
-    ),
-    [onlineUnits, selectedFieldCommand],
-  );
-
   const selectedUnit = Array.isArray(activeUnits) && selectedUnitId
     ? activeUnits.find((u) => String(u.id) === String(selectedUnitId))
     : null;
@@ -489,6 +511,7 @@ export default function Dashboard() {
   // fall back to a direct fetch if it's not there yet.
   const handleJumpToFieldCommand = async (fieldKey) => {
     if (!fieldKey) return;
+    zoomToFieldCommandPost?.(fieldKey); // fly the map to the post's marker
     const cached = fieldCommands.find((f) => f.id === fieldKey);
     if (cached) {
       await handleFieldCommandSelect(cached);
@@ -499,39 +522,6 @@ export default function Dashboard() {
       await handleFieldCommandSelect(fetched);
     } catch (error) {
       console.error('Failed to jump to linked field command:', error);
-    }
-  };
-
-  const handleAssignUnitToField = async (unitId) => {
-    if (!selectedFieldCommand?.id || !unitId) return;
-    setFieldCommandLoading(true);
-    setFieldCommandError('');
-    try {
-      await api.assignUnitToField(selectedFieldCommand.id, unitId);
-      const [updatedUnits, updatedSummary] = await Promise.all([
-        api.getUnits(),
-        api.getFieldCommand(selectedFieldCommand.id),
-      ]);
-      setUnits(updatedUnits || []);
-      // Also refresh onlineUnits — sortedAvailableFieldUnits (FieldCommand
-      // creation checklist) and MapView's Dispatch modal both read from it,
-      // not units, so without this a unit assigned here kept appearing as
-      // available on those two surfaces. Merged per-unit via
-      // upsertOnlineUnit, NOT a full setOnlineUnits(updatedUnits) replace:
-      // GET /api/units/ (UnitSerializer) has no assignedTo/status fields —
-      // those exist only client-side, set by handleDispatch/
-      // handleCancelDispatch below — so a full-array replace here would
-      // silently wipe "currently dispatched" state for every OTHER unit
-      // dispatched to any incident at the moment this runs. upsertOnlineUnit
-      // merges {...existing, ...partial}, so those two keys are left alone.
-      (updatedUnits || []).forEach((unit) => upsertOnlineUnit(unit));
-      setFieldCommandSummary(updatedSummary);
-      await refreshFieldCommands();
-    } catch (error) {
-      console.error('Failed to assign unit to field:', error);
-      setFieldCommandError('Failed to assign unit.');
-    } finally {
-      setFieldCommandLoading(false);
     }
   };
 
@@ -546,9 +536,9 @@ export default function Dashboard() {
   // MajorIncident and stashes its id so handleCreateFieldSubmit can link
   // the new post back to it. Every value here is still a plain, editable
   // form field — this is a starting point, not a lock.
-  const handleGoLiveCreateFieldCommand = ({ lat, lng, majorIncidentId, incidentType, title }) => {
+  const handleGoLiveCreateFieldCommand = ({ lat, lng, incidentId, goLiveType, incidentType, title }) => {
     setCreateFieldLocation({ lat, lng });
-    setCreateFieldMajorIncidentId(majorIncidentId ?? null);
+    setCreateFieldGoLive(incidentId ? { incidentId, goLiveType: goLiveType || incidentType } : null);
     const { incidentType: mappedType, incidentTypeOther } = mapGoLiveIncidentType(incidentType);
     setCreateFieldForm((prev) => ({
       ...prev,
@@ -573,15 +563,39 @@ export default function Dashboard() {
         priority: payload.priority,
         channel: payload.type,
       });
-      addIncident(created);
-      addEvent({
-        id: Math.random(),
-        timestamp: new Date().toISOString(),
-        entity_type: 'incident',
-        entity_id: created.id,
-        message: `New incident reported: ${created.title}`,
-        level: 'warn',
-      });
+      let incidentForStore = created;
+      // Optional link to an existing field control room, chosen right in the
+      // report form.
+      if (payload.fieldCommandId) {
+        try {
+          const fc = (fieldCommands || []).find((f) => f.id === payload.fieldCommandId);
+          await api.assignIncidentToField(payload.fieldCommandId, created.id);
+          incidentForStore = {
+            ...created,
+            field_command: payload.fieldCommandId,
+            field_command_key: payload.fieldCommandId,
+            field_command_name: fc?.name || created.field_command_name,
+          };
+        } catch (linkError) {
+          console.error('Failed to link new incident to field command:', linkError);
+        }
+      }
+      addIncident(incidentForStore);
+      // The SSE `incident_created` echo may have already logged this line
+      // (race between the await above and the broadcast) — don't double it.
+      const loggedAlready = useDashboardStore.getState().events
+        .some((e) => String(e.entity_id) === String(created.id)
+          && typeof e.message === 'string' && e.message.startsWith('New incident'));
+      if (!loggedAlready) {
+        addEvent({
+          id: Math.random(),
+          timestamp: new Date().toISOString(),
+          entity_type: 'incident',
+          entity_id: created.id,
+          message: `New incident reported: ${created.title}`,
+          level: 'warn',
+        });
+      }
     } catch (error) {
       console.error('Failed to report incident:', error);
     }
@@ -654,7 +668,7 @@ export default function Dashboard() {
     });
     setShowCreateFieldAdvanced(false);
     setCreateFieldLocation(null);
-    setCreateFieldMajorIncidentId(null);
+    setCreateFieldGoLive(null);
     setCreateFieldUnitType('ALL');
     setShowCreateFieldTasks(false);
     setCreateFieldTasks([]);
@@ -693,6 +707,26 @@ export default function Dashboard() {
         : `${unitNames.slice(0, 3).join(', ')} +${unitNames.length - 3} more`;
 
     try {
+      // Go Live path: NOW is when the MajorIncident is actually declared —
+      // deferred to this point so cancelling the modal never leaves an
+      // orphaned major incident / field HQ behind (the "phantom field HQ"
+      // bug). The direct map right-click path has no createFieldGoLive and
+      // skips this entirely.
+      let majorIncidentId = null;
+      if (createFieldGoLive?.incidentId) {
+        const declared = await api.goLiveIncident(
+          createFieldGoLive.incidentId, createFieldGoLive.goLiveType,
+        );
+        majorIncidentId = declared?.id ?? null;
+        // Reflect liveness on the source incident so its details panel
+        // switches to the "Major Incident" view without a reload.
+        updateIncident(createFieldGoLive.incidentId, {
+          major_incident: majorIncidentId
+            ? { id: majorIncidentId, status: declared.status }
+            : undefined,
+        });
+      }
+
       const payload = {
         name: trimmedName,
         unit_name: unitNameSummary,
@@ -701,12 +735,7 @@ export default function Dashboard() {
         incident_phase: createFieldForm.incidentPhase,
         location_lat: createFieldLocation.lat,
         location_lng: createFieldLocation.lng,
-        // Present only when this modal was opened via Go Live
-        // (handleGoLiveCreateFieldCommand) — the direct map right-click
-        // path (handleMapCreateFieldCommand) never sets this state, and
-        // resetCreateFieldForm clears it after every submit/cancel, so a
-        // previous Go Live can't leak into an unrelated direct creation.
-        ...(createFieldMajorIncidentId ? { major_incident_id: createFieldMajorIncidentId } : {}),
+        ...(majorIncidentId ? { major_incident_id: majorIncidentId } : {}),
       };
       // FieldCommandSerializer's "id" is the field_key (see
       // FieldCommandViewSet.perform_create) — the create response already
@@ -732,15 +761,17 @@ export default function Dashboard() {
       // Same partial-failure shape as units above: collect failed titles,
       // don't roll back the field command or any task that did succeed.
       const failedTaskTitles = [];
-      for (const task of createFieldTasks) {
-        try {
-          await api.createMajorIncidentTaskGroup(createFieldMajorIncidentId, {
-            title: task.title,
-            category: task.category,
-          });
-        } catch (taskError) {
-          console.error(`Failed to create task group "${task.title}" for major incident ${createFieldMajorIncidentId}:`, taskError);
-          failedTaskTitles.push(task.title);
+      if (majorIncidentId) {
+        for (const task of createFieldTasks) {
+          try {
+            await api.createMajorIncidentTaskGroup(majorIncidentId, {
+              title: task.title,
+              category: task.category,
+            });
+          } catch (taskError) {
+            console.error(`Failed to create task group "${task.title}" for major incident ${majorIncidentId}:`, taskError);
+            failedTaskTitles.push(task.title);
+          }
         }
       }
 
@@ -796,47 +827,19 @@ export default function Dashboard() {
     setFieldCommandError('');
     try {
       await api.assignIncidentToField(selectedFieldCommand.id, incidentId);
+      // Reflect the link (with the real control-room name) on the incident
+      // locally so its details panel shows the right name immediately.
+      updateIncident(incidentId, {
+        field_command: selectedFieldCommand.id,
+        field_command_key: selectedFieldCommand.id,
+        field_command_name: selectedFieldCommand.name,
+      });
       const updatedSummary = await api.getFieldCommand(selectedFieldCommand.id);
       setFieldCommandSummary(updatedSummary);
       await refreshFieldCommands();
     } catch (error) {
       console.error('Failed to link incident to field command:', error);
       setFieldCommandError('Failed to link incident.');
-    } finally {
-      setFieldCommandLoading(false);
-    }
-  };
-
-  // Missions — both API calls return the full FieldCommandSerializer shape,
-  // so we set it straight back with no extra GET (same pattern the field
-  // dashboard uses for its live refresh).
-  const handleCreateFieldMission = async (payload) => {
-    if (!selectedFieldCommand?.id || !payload?.title) return;
-    setFieldCommandLoading(true);
-    setFieldCommandError('');
-    try {
-      const updatedSummary = await api.createFieldMission(selectedFieldCommand.id, payload);
-      setFieldCommandSummary(updatedSummary);
-      await refreshFieldCommands();
-    } catch (error) {
-      console.error('Failed to create mission:', error);
-      setFieldCommandError(error?.response?.data?.detail || 'Failed to create mission.');
-    } finally {
-      setFieldCommandLoading(false);
-    }
-  };
-
-  const handleUpdateFieldMission = async (missionId, payload) => {
-    if (!selectedFieldCommand?.id || !missionId) return;
-    setFieldCommandLoading(true);
-    setFieldCommandError('');
-    try {
-      const updatedSummary = await api.updateFieldMission(selectedFieldCommand.id, missionId, payload);
-      setFieldCommandSummary(updatedSummary);
-      await refreshFieldCommands();
-    } catch (error) {
-      console.error('Failed to update mission:', error);
-      setFieldCommandError(error?.response?.data?.detail || 'Failed to update mission.');
     } finally {
       setFieldCommandLoading(false);
     }
@@ -895,7 +898,10 @@ export default function Dashboard() {
         incidents.forEach((inc) => {
           if (inc.status === 'CLOSED' || inc.status === 'RESOLVED') return;
           (inc.tasks || []).forEach((task) => {
-            if (task.assigned_unit && task.status === 'IN_PROGRESS') {
+            // Skip crews that have already confirmed arrival — they're parked
+            // on scene, not driving; re-attaching a trip would re-animate the
+            // drive and (pre-fix) replay the arrival announcement.
+            if (task.assigned_unit && task.status === 'IN_PROGRESS' && !task.arrived_at) {
               startUnitTrip(task.assigned_unit, task.id);
             }
           });
@@ -935,6 +941,22 @@ export default function Dashboard() {
         // The branches below were previously dead for exactly that reason
         // and have been removed rather than fixed to match a shape nothing
         // sends.
+        // The regional Event Log is DB-backed (GET /api/events/). SSE
+        // broadcasts carry only enough to patch the map/panels, not the full
+        // IncidentEvent rows the backend writes for assignments, en-route,
+        // arrivals and field reports — so re-pull the feed (debounced) on any
+        // action that produced one, and the log stays live without a reload.
+        let eventFeedRefreshTimer = null;
+        const scheduleEventFeedRefresh = () => {
+          if (eventFeedRefreshTimer) return;
+          eventFeedRefreshTimer = setTimeout(() => {
+            eventFeedRefreshTimer = null;
+            api.getEvents(200).then((rows) => {
+              if (!cancelled) setEvents(rows);
+            }).catch(() => {});
+          }, 800);
+        };
+
         const realtime = new RealtimeService(
           (update) => {
             if (update.type === 'connected') {
@@ -970,48 +992,49 @@ export default function Dashboard() {
               }
             } else if (update.type === 'user_action' && update.action === 'incident_status_update') {
               updateIncident(update.incident_id, { status: update.new_status });
-              // Move the incident's units through the flow with it.
-              if (['ON_SCENE', 'RESOLVED', 'CLOSED'].includes(update.new_status)) {
+              scheduleEventFeedRefresh();
+              // ON_SCENE at the INCIDENT level no longer flips vehicles —
+              // that's per-crew now and only the crew's own `task_arrived`
+              // does it (bug: the war-room must not claim a unit is "starting
+              // operations" before the crew confirms). RESOLVED/CLOSED still
+              // release every assigned unit.
+              if (['RESOLVED', 'CLOSED'].includes(update.new_status)) {
                 useDashboardStore.getState().onlineUnits
                   .filter((u) => String(u.assignedTo) === String(update.incident_id))
                   .forEach((u) => {
-                    if (update.new_status === 'ON_SCENE') {
-                      // Another unit may have driven the incident to ON_SCENE
-                      // while THIS crew is still en route — don't yank a moving
-                      // vehicle to the scene. stepEnRouteUnits flips it once its
-                      // own trip interpolation actually reaches the incident.
-                      if (u.status === 'EN_ROUTE' && Array.isArray(u.fullRoute) && u.tripAcceptedAt) return;
-                      upsertOnlineUnit({
-                        id: u.id, status: 'ON_SCENE', route: [],
-                        routeIndex: undefined, etaMin: 0, distanceKm: 0,
-                        fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
-                      });
-                    } else {
-                      upsertOnlineUnit({
-                        id: u.id, assignedTo: null, status: null, route: null,
-                        routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
-                        fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
-                      });
-                    }
+                    upsertOnlineUnit({
+                      id: u.id, assignedTo: null, status: null, route: null,
+                      routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
+                      fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                    });
                   });
               }
             } else if (update.type === 'user_action' && update.action === 'incident_created') {
               // update itself is the full IncidentSerializer shape (see
               // IncidentViewSet.perform_create) — safe to insert as-is.
+              // Only log the "New incident" line if this incident is genuinely
+              // new to us: the operator who filed it already added an
+              // optimistic event in handleMapReportIncident, and the SSE echo
+              // must not duplicate it.
+              const alreadyKnown = useDashboardStore.getState().incidents
+                .some((inc) => inc.id === update.id);
               addIncident(update);
-              addEvent({
-                id: Math.random(),
-                timestamp: new Date().toISOString(),
-                entity_type: 'incident',
-                entity_id: update.id,
-                message: `New incident: ${update.title}`,
-                level: 'warn',
-              });
+              if (!alreadyKnown) {
+                addEvent({
+                  id: Math.random(),
+                  timestamp: new Date().toISOString(),
+                  entity_type: 'incident',
+                  entity_id: update.id,
+                  message: `New incident reported: ${update.title}`,
+                  level: 'warn',
+                });
+              }
             } else if (update.type === 'user_action' && (
               update.action === 'field_command_created' ||
               update.action === 'field_command_closed' ||
               update.action === 'field_command_unit_assigned' ||
               update.action === 'field_command_incident_assigned' ||
+              update.action === 'field_command_incident_unassigned' ||
               update.action === 'field_command_note_added'
             )) {
               // update itself is the full FieldCommandSerializer shape (see
@@ -1030,7 +1053,20 @@ export default function Dashboard() {
               // until a full refresh. Patch the other side of the link here
               // too so it disappears from those lists immediately.
               if (update.action === 'field_command_incident_assigned' && update.incident_id != null) {
-                updateIncident(update.incident_id, { field_command: update.field_command_id });
+                // `update` is the full FieldCommandSerializer shape — carry the
+                // post's real name/key onto the incident so its details panel
+                // shows the control room it was linked to, not a stale name or
+                // a "Post #field-3" fallback.
+                updateIncident(update.incident_id, {
+                  field_command: update.field_command_id,
+                  field_command_key: update.field_command_id,
+                  field_command_name: update.name,
+                });
+              }
+              if (update.action === 'field_command_incident_unassigned' && update.incident_id != null) {
+                updateIncident(update.incident_id, {
+                  field_command: null, field_command_key: null, field_command_name: null,
+                });
               }
               if (update.action === 'field_command_unit_assigned' && update.unit_id != null) {
                 upsertOnlineUnit({ id: update.unit_id, field_id: update.field_command_id });
@@ -1053,6 +1089,34 @@ export default function Dashboard() {
                   id: update.unit_id, assignedTo: update.incident_id ?? null, status: 'ASSIGNED',
                 });
               }
+              scheduleEventFeedRefresh();
+            } else if (update.type === 'user_action' && update.action === 'incident_event_added') {
+              // A field report (or other DB IncidentEvent) landed — pull the
+              // feed so it shows live, not just after a reload.
+              scheduleEventFeedRefresh();
+            } else if (update.type === 'user_action' && update.action === 'task_arrived') {
+              // The field crew CONFIRMED arrival from the app. This — not the
+              // trip animation — is what puts the vehicle "on scene" on the
+              // war-room. The spoken line fires here, once per live broadcast
+              // (deduped in localStorage across tabs/reloads) — never from a
+              // React effect, so a remount can't replay it.
+              if (update.unit_id != null) {
+                upsertOnlineUnit({
+                  id: update.unit_id,
+                  assignedTo: update.incident_id ?? undefined,
+                  status: 'ON_SCENE',
+                  route: [], routeIndex: undefined, etaMin: 0, distanceKm: 0,
+                  atDestination: true,
+                  fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                });
+                const label = update.unit_name || `Unit ${update.unit_id}`;
+                announceOnce(
+                  `arrived:${update.unit_id}:${update.incident_id ?? '?'}`,
+                  `${label} has arrived at the event and is starting its operations.`,
+                  { unitId: update.unit_id, incidentId: update.incident_id ?? null, kind: 'arrived' },
+                );
+              }
+              scheduleEventFeedRefresh();
             } else if (update.type === 'user_action' && update.action === 'incident_unit_unassigned') {
               if (update.unit_id != null) {
                 upsertOnlineUnit({
@@ -1071,6 +1135,7 @@ export default function Dashboard() {
                   });
                 }
               }
+              scheduleEventFeedRefresh();
             } else if (update.type === 'user_action' && update.action === 'task_status_update') {
               const unitId = update.unit_id;
               if (unitId != null) {
@@ -1082,6 +1147,16 @@ export default function Dashboard() {
                     routeIndex: 0,
                   });
                   startUnitTrip(unitId, update.task_id);
+                  if (update.old_status !== 'IN_PROGRESS') {
+                    const label = update.unit_name || `Unit ${unitId}`;
+                    const dest = (useDashboardStore.getState().incidents
+                      .find((i) => i.id === update.incident_id)?.title) || 'the event';
+                    announceOnce(
+                      `enroute:${unitId}:${update.incident_id ?? '?'}`,
+                      `${label} is on its way to ${dest}.`,
+                      { unitId, incidentId: update.incident_id ?? null, kind: 'enroute' },
+                    );
+                  }
                 } else if (update.new_status === 'DONE' || update.new_status === 'CANCELLED') {
                   upsertOnlineUnit({
                     id: unitId,
@@ -1089,8 +1164,21 @@ export default function Dashboard() {
                     route: null, routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
                     fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
                   });
+                } else if (update.new_status === 'PENDING') {
+                  // A mid-drive crew disconnected — the backend rolled its task
+                  // back so it re-accepts on reconnect. Drop the route/trip,
+                  // keep the unit attached to the incident as "awaiting
+                  // acceptance", and let the "on its way" line play again.
+                  upsertOnlineUnit({
+                    id: unitId, assignedTo: update.incident_id ?? null, status: 'ASSIGNED',
+                    route: null, routeIndex: undefined, etaMin: undefined, distanceKm: undefined,
+                    fullRoute: undefined, tripAcceptedAt: undefined, tripDurationS: undefined,
+                    atDestination: false,
+                  });
+                  forgetAnnouncement(`enroute:${unitId}:${update.incident_id ?? '?'}`);
                 }
               }
+              scheduleEventFeedRefresh();
             }
           },
           (error) => {
@@ -1122,7 +1210,7 @@ export default function Dashboard() {
       realtimeServiceRef.current?.disconnect();
       realtimeServiceRef.current = null;
     };
-  }, []);
+  }, [reconnectNonce]);
 
   // Drive the en-route vehicle movement simulation.
   useEffect(() => {
@@ -1170,23 +1258,13 @@ export default function Dashboard() {
         setEvents(events);
         setIsLoading(false);
 
-        // If we were fully offline, attempt to reconnect SSE now
+        // The backend answered — re-run the init+SSE effect so it reconnects
+        // with the REAL event handler (announcements, map updates, feed
+        // refresh). Bumping the nonce makes that effect's cleanup disconnect
+        // the current stream first, so there's never more than one live.
         if (connectionStatus === 'OFFLINE') {
           setConnectionStatus('CONNECTING');
-          const realtime = new RealtimeService(
-            (update) => {
-              if (update.type === 'connected') setConnectionStatus('CONNECTED');
-            },
-            (error) => {
-              if (error?.type === 'connection_dropped') {
-                setConnectionStatus('CONNECTING');
-              } else {
-                setConnectionStatus('DEGRADED');
-              }
-            }
-          );
-          realtime.connect();
-          realtimeServiceRef.current = realtime;
+          setReconnectNonce((n) => n + 1);
         }
       } catch (error) {
         console.error('Polling error:', error);
@@ -1298,7 +1376,10 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div className="dashboard-section">
-        <KPICards />  {/*This information is coming from: the backend API endpoints for incidents, units, and events. located in the backend folder file name: views.py under the function: kpi_cards */}
+        <KPICards
+          fieldCommands={fieldCommands}
+          onSelectFieldCommand={handleJumpToFieldCommand}
+        />
       </div>
 
       {/* Filter Bar */}
@@ -1343,14 +1424,10 @@ export default function Dashboard() {
             closeFieldRole={closeFieldRole}
             setCloseFieldRole={setCloseFieldRole}
             incidents={incidents}
-            sortedAssignableUnits={sortedAssignableUnits}
             onRefresh={refreshFieldCommands}
             onClose={() => setSelectedFieldCommand(null)}
             onCloseFieldCommand={handleCloseFieldCommand}
             onLinkIncident={handleAssignIncidentToField}
-            onAssignUnit={handleAssignUnitToField}
-            onCreateMission={handleCreateFieldMission}
-            onUpdateMission={handleUpdateFieldMission}
           />
           {showEventFeed ? (
             <EventFeed />
@@ -1490,10 +1567,11 @@ export default function Dashboard() {
               </div>
 
               {/* Only when escalated via Go Live — TaskGroup requires a
-                  real majorIncidentId, which the direct-creation path
-                  never has, so this section is entirely absent there, not
-                  just hidden/disabled. */}
-              {createFieldMajorIncidentId && (
+                  real majorIncidentId (created on submit from
+                  createFieldGoLive), which the direct-creation path never
+                  has, so this section is entirely absent there, not just
+                  hidden/disabled. */}
+              {createFieldGoLive && (
                 <>
                   <button
                     type="button"

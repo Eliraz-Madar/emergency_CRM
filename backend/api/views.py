@@ -28,13 +28,14 @@ def _push_field_sse(event: dict):
 from .models import (
     Incident, Task, Unit, IncidentEvent, ReportMedia, PushToken,
     FieldCommand, FieldCommandNote, FieldCommandMission,
-    MajorIncident,
+    MajorIncident, IncidentFigureReport,
 )
 from .serializers import (
     IncidentSerializer, TaskSerializer, UnitSerializer, IncidentEventSerializer,
     FieldCommandSerializer, FieldCommandMissionSerializer,
     MajorIncidentSerializer, MajorIncidentGoLiveSerializer,
     PerimeterSerializer, SectorSerializer, TaskGroupSerializer,
+    IncidentFigureReportSerializer, FIGURE_FIELDS,
 )
 from .permissions import ReadOnlyOrAdminDispatcher, TaskPermission, ACTOR_ROLE_HEADER
 # Kept solely because field_incident_detail() below (part of the training
@@ -45,6 +46,18 @@ from simulated.mock_data import get_mock_service
 from simulated.realtime import get_realtime_service
 from simulated.field_incident_data import get_field_incident_service
 import time as _time
+
+
+def _has_real_position(unit):
+    """True if `unit` already carries a genuine GPS fix worth protecting from
+    being overwritten by a device's no-GPS fallback (mobile-app/utils/
+    location.js MOCK_LOCATION, sent with is_mock_location=true). (0, 0) is the
+    seed default for a brand-new routine-dispatch unit — not a real position
+    either."""
+    return (
+        unit.location_lat is not None and unit.location_lng is not None
+        and (unit.location_lat, unit.location_lng) != (0.0, 0.0)
+    )
 
 
 def normalize_unit_type(unit_type):
@@ -69,11 +82,12 @@ def normalize_unit_type(unit_type):
     return "POLICE"
 
 
-def _log_status_change(*, incident=None, actor, title, description, severity=None):
+def _log_status_change(*, incident=None, actor, title, description, severity=None,
+                       event_type=None):
     """Record a manual status transition into IncidentEvent, attributed to the acting user."""
     IncidentEvent.objects.create(
         incident=incident,
-        event_type=IncidentEvent.EventType.STATUS_CHANGE,
+        event_type=event_type or IncidentEvent.EventType.STATUS_CHANGE,
         severity=severity or IncidentEvent.Severity.INFO,
         title=title,
         description=description,
@@ -94,6 +108,7 @@ def _log_status_change(*, incident=None, actor, title, description, severity=Non
 # can ignore events for other posts.
 _FIELD_DASHBOARD_RELAYED_ACTIONS = frozenset({
     "field_command_incident_assigned",
+    "field_command_incident_unassigned",
     "field_command_unit_assigned",
     "field_command_closed",
     "field_command_mission_created",
@@ -102,6 +117,10 @@ _FIELD_DASHBOARD_RELAYED_ACTIONS = frozenset({
     # post's Operational Timeline should reflect it live (see
     # TaskViewSet.perform_update / field_incident_add_event).
     "field_command_note_added",
+    # A crew on a linked incident dropped offline / came back — the post's
+    # assigned-forces status must flip live, not wait for a manual refresh.
+    "unit_claimed",
+    "unit_disconnected",
 })
 
 
@@ -135,6 +154,41 @@ def _log_field_command_note(field_command, kind, message):
     FieldCommandNote.objects.create(
         field_command=field_command, kind=kind, message=message,
     )
+
+
+def _mission_actor_label(actor, mission):
+    """"<Force> · <Unit name>" identifying who moved a mission — the force the
+    task belongs to and the specific mobile unit that reported it. Falls back
+    to the login name, then a generic label, when a piece is missing."""
+    force = mission.get_force_type_display() if mission.force_type else ""
+    unit = getattr(getattr(actor, "unit", None), "name", "") or ""
+    if force and unit:
+        return f"{force} · {unit}"
+    if unit:
+        return unit
+    if force:
+        return f"{force} · {getattr(actor, 'username', '') or 'field unit'}"
+    return getattr(actor, "username", "") or "the field"
+
+
+def _log_task_to_incident_feed(mission, actor, title, description):
+    """Mirror a force-typed task (FieldCommandMission scoped to an Incident)
+    into that incident's own Event Log — created and status-advanced tasks
+    both show up in the war-room's incident Events tab, not just the field
+    command's Operational Timeline."""
+    if not mission.incident_id:
+        return
+    _log_status_change(
+        incident=mission.incident, actor=actor,
+        title=title, description=description,
+        event_type=IncidentEvent.EventType.ASSIGNMENT,
+    )
+    _broadcast_realtime({
+        "type": "user_action",
+        "action": "incident_event_added",
+        "incident_id": mission.incident_id,
+        "title": title,
+    })
 
 
 # ── En-route trip (shared movement simulation) ─────────────────────────────
@@ -242,6 +296,73 @@ def _end_trips_for_incident(incident_id):
             _active_trips.pop(tid, None)
 
 
+def _trip_position(task_id, now_dt=None):
+    """Where the vehicle for `task_id` is RIGHT NOW along its active trip, as
+    (lat, lng) — or None if there's no resolved trip. Mirrors the client-side
+    interpolation (mobile-app/utils/trip.js tripState) so a server snapshot
+    lands exactly where the moving marker was."""
+    import math
+    from django.utils.dateparse import parse_datetime
+
+    trip = _resolved_trip(task_id)
+    coords = trip.get("coords") if trip else None
+    if not coords or len(coords) < 2:
+        return None
+    duration_s = trip.get("duration_s") or 0
+    if duration_s <= 0:
+        return tuple(coords[-1])
+    accepted = parse_datetime(trip.get("accepted_at") or "")
+    if accepted is None:
+        return tuple(coords[0])
+    elapsed_s = ((now_dt or timezone.now()) - accepted).total_seconds()
+    speedup = trip.get("speedup") or TRIP_SPEEDUP
+    progress = max(0.0, min(1.0, (elapsed_s * speedup) / duration_s))
+
+    def _hav(a, b):
+        dlat = math.radians(b[0] - a[0])
+        dlng = math.radians(b[1] - a[1])
+        s = (math.sin(dlat / 2) ** 2
+             + math.cos(math.radians(a[0])) * math.cos(math.radians(b[0]))
+             * math.sin(dlng / 2) ** 2)
+        return 6371.0 * 2 * math.atan2(math.sqrt(s), math.sqrt(1 - s))
+
+    seg = [_hav(coords[i - 1], coords[i]) for i in range(1, len(coords))]
+    total = sum(seg)
+    if total == 0:
+        return tuple(coords[-1])
+    target = progress * total
+    for i, d in enumerate(seg):
+        if target <= d or i == len(seg) - 1:
+            t = max(0.0, min(1.0, target / d)) if d > 0 else 0.0
+            return (coords[i][0] + (coords[i + 1][0] - coords[i][0]) * t,
+                    coords[i][1] + (coords[i + 1][1] - coords[i][1]) * t)
+        target -= d
+    return tuple(coords[-1])
+
+
+def _active_task_for_unit(unit):
+    """The unit's current non-terminal Task on a live incident, or None."""
+    if unit is None:
+        return None
+    return (
+        unit.tasks.select_related("incident")
+        .exclude(status__in=Task.TERMINAL_STATUSES)
+        .exclude(incident__status__in=(Incident.Status.RESOLVED, Incident.Status.CLOSED))
+        .order_by("-timestamp")
+        .first()
+    )
+
+
+def _unit_field_key(unit):
+    """The public field_key of the Field Command coordinating this unit's
+    current incident, or None. Lets a unit connect/disconnect broadcast tell
+    the field war-room which post to refresh."""
+    task = _active_task_for_unit(unit)
+    incident = getattr(task, "incident", None)
+    fc = getattr(incident, "field_command", None)
+    return getattr(fc, "field_key", None)
+
+
 class IncidentViewSet(viewsets.ModelViewSet):
     queryset = Incident.objects.all().order_by("-created_at")
     serializer_class = IncidentSerializer
@@ -326,6 +447,45 @@ class IncidentViewSet(viewsets.ModelViewSet):
                             "unit_id": t.assigned_unit_id,
                         })
 
+            # Mirror the transition onto a linked Field Command Post's
+            # Operational Timeline. TaskViewSet.perform_update already does this
+            # for task-status changes, but an incident advanced directly — most
+            # importantly the mobile app driving it to ON_SCENE when a crew taps
+            # "Arrived" (see mobile-app/utils/taskActions.markArrived, which
+            # PATCHes /api/incidents/<id>/ and never the task) — reached the
+            # field commander's timeline nowhere until now.
+            if instance.field_command_id:
+                fc = instance.field_command
+                active_task = (
+                    instance.tasks
+                    .exclude(status__in=Task.TERMINAL_STATUSES)
+                    .select_related("assigned_unit")
+                    .order_by("-timestamp")
+                    .first()
+                )
+                unit = active_task.assigned_unit if active_task else None
+                unit_name = (
+                    unit.name if unit
+                    else (f"Unit {active_task.mock_unit_id}"
+                          if active_task and active_task.mock_unit_id else "A unit")
+                )
+                if instance.status == Incident.Status.ON_SCENE:
+                    note_msg = f"{unit_name} arrived on scene at '{instance.title}' and is starting operations."
+                else:
+                    note_msg = (
+                        f"Incident '{instance.title}' status changed: "
+                        f"{old_status} → {instance.status}."
+                    )
+                _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, note_msg)
+                _broadcast_realtime({
+                    "type": "user_action",
+                    "action": "field_command_note_added",
+                    **_actor_fields(actor),
+                    "field_command_id": fc.field_key,
+                    "incident_id": instance.id,
+                    **FieldCommandSerializer(fc).data,
+                })
+
     @action(detail=True, methods=["post"], url_path="assign-unit")
     def assign_unit(self, request, pk=None):
         """Assign a real Unit to this incident by creating a Task — the
@@ -339,15 +499,28 @@ class IncidentViewSet(viewsets.ModelViewSet):
         except (Unit.DoesNotExist, ValueError, TypeError):
             return Response({"detail": "Unit not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        task, created = Task.objects.get_or_create(
-            incident=incident, assigned_unit=unit,
-            defaults={"title": f"Respond: {incident.title}", "status": Task.Status.PENDING},
+        # Reuse only a LIVE task for this (incident, unit) pair. A previous
+        # dispatch that was cancelled / completed leaves a terminal Task behind;
+        # get_or_create would hand that back and the crew would be re-dispatched
+        # to an incident that never reappears in their app. Start a fresh
+        # PENDING task in that case.
+        task = (
+            Task.objects.filter(incident=incident, assigned_unit=unit)
+            .exclude(status__in=Task.TERMINAL_STATUSES)
+            .order_by("-timestamp")
+            .first()
         )
+        created = task is None
+        if created:
+            task = Task.objects.create(
+                incident=incident, assigned_unit=unit,
+                title=f"Respond: {incident.title}", status=Task.Status.PENDING,
+            )
         actor = self.request.user
         if created:
             _log_status_change(
                 incident=incident, actor=actor,
-                title=f"Unit '{unit.name}' assigned",
+                title=f"{unit.name} assigned to {incident.title}",
                 description=f"Assigned by {getattr(actor, 'username', '') or 'command center'}.",
             )
             _broadcast_realtime({
@@ -447,6 +620,74 @@ class IncidentViewSet(viewsets.ModelViewSet):
                 pass
         return Response(self.get_serializer(incident).data)
 
+    @action(detail=True, methods=["get", "post"], url_path="figures",
+            permission_classes=[IsAuthenticated])
+    def figures(self, request, pk=None):
+        """Field crews' casualty headcounts for this incident.
+
+        GET  -> every crew's latest {injured,dead,trapped,treated,evacuated}.
+        POST -> upsert the calling crew's row (keyed on the user's unit) with a
+                fresh full set of numbers. The linked Field Command Post's
+                totals refresh live off the `field_command_note_added` /
+                `incident_event_added` broadcasts below.
+        """
+        incident = self.get_object()
+
+        if request.method == "GET":
+            qs = incident.figure_reports.select_related("unit").all()
+            return Response(IncidentFigureReportSerializer(qs, many=True).data)
+
+        actor = request.user
+        unit = getattr(actor, "unit", None)
+        counts = {}
+        for f in FIGURE_FIELDS:
+            try:
+                counts[f] = max(0, int(request.data.get(f, 0) or 0))
+            except (TypeError, ValueError):
+                counts[f] = 0
+
+        report, _created = IncidentFigureReport.objects.update_or_create(
+            incident=incident, unit=unit,
+            defaults={**counts, "reported_by": getattr(actor, "username", "") or "Field unit"},
+        )
+
+        unit_name = unit.name if unit is not None else (getattr(actor, "username", "") or "Field unit")
+        summary_line = " · ".join(
+            f"{f.capitalize()} {counts[f]}" for f in FIGURE_FIELDS
+        )
+        _log_status_change(
+            incident=incident, actor=actor,
+            title=f"Casualty figures — {unit_name}",
+            description=summary_line,
+            event_type=IncidentEvent.EventType.CASUALTY_UPDATE,
+        )
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "incident_event_added",
+            "incident_id": incident.id,
+            "title": f"Casualty figures — {unit_name}",
+        })
+        if incident.field_command_id:
+            fc = incident.field_command
+            _log_field_command_note(
+                fc, FieldCommandNote.Kind.STATUS,
+                f"{unit_name} reported figures on '{incident.title}': {summary_line}.",
+            )
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "field_command_note_added",
+                **_actor_fields(actor),
+                "field_command_id": fc.field_key,
+                "incident_id": incident.id,
+                **FieldCommandSerializer(fc).data,
+            })
+
+        qs = incident.figure_reports.select_related("unit").all()
+        return Response(
+            IncidentFigureReportSerializer(qs, many=True).data,
+            status=status.HTTP_200_OK,
+        )
+
 
 class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.select_related(
@@ -478,8 +719,25 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         old_status = serializer.instance.status
+        new_status = serializer.validated_data.get("status", old_status)
+
+        # Atomic claim of the transition — same rationale as TaskViewSet.arrive.
+        # `UPDATE ... WHERE status = <old>` is a single serialised statement, so
+        # of two near-simultaneous PATCHes that both read the task as PENDING
+        # only ONE flips it (`transitioned` True) and runs the side effects
+        # below — the event-log line, trip start/stop and dashboard broadcasts.
+        # The loser writes 0 rows here, still returns a clean response, but
+        # never logs a second "en route" / "arrived" record for the same change.
+        transitioned = False
+        if new_status != old_status:
+            transitioned = bool(
+                Task.objects
+                .filter(pk=serializer.instance.pk, status=old_status)
+                .update(status=new_status)
+            )
+
         instance = serializer.save()
-        if instance.status != old_status:
+        if transitioned:
             actor = self.request.user
             incident = instance.incident
             unit = instance.assigned_unit
@@ -487,10 +745,21 @@ class TaskViewSet(viewsets.ModelViewSet):
                 unit.name if unit
                 else (f"Unit {instance.mock_unit_id}" if instance.mock_unit_id else "Unit")
             )
+            # Human-readable headline for the regional dashboard's event log —
+            # "Engine 3 en route to Structure Fire" reads better there than
+            # "Task 'Respond' status changed".
+            if instance.status == Task.Status.IN_PROGRESS and old_status != Task.Status.IN_PROGRESS:
+                event_title = f"{unit_name} en route to {incident.title}"
+            elif instance.status == Task.Status.DONE:
+                event_title = f"{unit_name} completed its task on {incident.title}"
+            elif instance.status == Task.Status.CANCELLED:
+                event_title = f"{unit_name} stood down from {incident.title}"
+            else:
+                event_title = f"Task '{instance.title}' status changed"
             _log_status_change(
                 incident=incident,
                 actor=actor,
-                title=f"Task '{instance.title}' status changed",
+                title=event_title,
                 description=(
                     f"{old_status} → {instance.status} by "
                     f"{getattr(actor, 'username', 'unknown')} "
@@ -515,11 +784,11 @@ class TaskViewSet(viewsets.ModelViewSet):
                 inc_old = incident.status
                 incident.status = Incident.Status.EN_ROUTE
                 incident.save(update_fields=["status"])
-                _log_status_change(
-                    incident=incident, actor=actor,
-                    title=f"Incident status changed: {inc_old} → {incident.status}",
-                    description=f"{unit_name} en route.",
-                )
+                # No second IncidentEvent here — the task event above already
+                # reads "<unit> en route to <incident>". Logging "Incident
+                # status changed: PENDING → EN_ROUTE" too just doubles the
+                # "en route" line in the regional event log. The broadcast is
+                # still needed so other dashboards move the incident status.
                 _broadcast_realtime({
                     "type": "user_action",
                     "action": "incident_status_update",
@@ -554,10 +823,15 @@ class TaskViewSet(viewsets.ModelViewSet):
             # Operational Timeline reflects everything its assigned units report.
             if incident.field_command_id:
                 fc = incident.field_command
-                _log_field_command_note(
-                    fc, FieldCommandNote.Kind.STATUS,
-                    f"{unit_name}: {old_status} → {instance.status} on '{incident.title}'",
-                )
+                if instance.status == Task.Status.IN_PROGRESS and old_status != Task.Status.IN_PROGRESS:
+                    fc_msg = f"{unit_name} en route to '{incident.title}'."
+                elif instance.status == Task.Status.DONE:
+                    fc_msg = f"{unit_name} completed its task on '{incident.title}'."
+                elif instance.status == Task.Status.CANCELLED:
+                    fc_msg = f"{unit_name} stood down from '{incident.title}'."
+                else:
+                    fc_msg = f"{unit_name}: {old_status} → {instance.status} on '{incident.title}'"
+                _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, fc_msg)
                 _broadcast_realtime({
                     "type": "user_action",
                     "action": "field_command_note_added",
@@ -582,6 +856,115 @@ class TaskViewSet(viewsets.ModelViewSet):
             self.perform_update(serializer)
             return Response(serializer.data)
         return super().partial_update(request, *args, **kwargs)
+
+    @action(detail=True, methods=["post"], url_path="arrive",
+            permission_classes=[IsAuthenticated])
+    def arrive(self, request, pk=None):
+        """The field crew confirms it has physically reached the scene.
+
+        This — never the war-room's trip animation — is what flips the
+        vehicle to "on scene / starting operations" on every dashboard and
+        fires the arrival announcement. Idempotent: tapping twice is a no-op
+        past the first call.
+        """
+        task = self.get_object()
+        actor = request.user
+        incident = task.incident
+        unit = task.assigned_unit
+        unit_name = (
+            unit.name if unit
+            else (f"Unit {task.mock_unit_id}" if task.mock_unit_id else "Unit")
+        )
+
+        # Atomic claim of the arrival. `UPDATE ... WHERE arrived_at IS NULL` is
+        # a single statement the database serialises, so exactly ONE concurrent
+        # caller updates a row — the others update 0 and fall straight through
+        # to the no-op return. Without this, two near-simultaneous /arrive/
+        # calls (crew double-taps, or taps "Arrived" and immediately files an
+        # "on scene" report — both hit this endpoint) could each read
+        # arrived_at as NULL and both run every side effect, logging and
+        # announcing the same arrival two or three times. Every side effect —
+        # status change, timeline entries and ALL broadcasts — stays behind
+        # this guard.
+        stamped_at = timezone.now()
+        claimed = (
+            Task.objects
+            .filter(pk=task.pk, arrived_at__isnull=True)
+            .update(arrived_at=stamped_at)
+        )
+        if not claimed:
+            return Response(self.get_serializer(self.get_object()).data)
+
+        task.arrived_at = stamped_at
+        _end_trip(task.id)
+
+        # Park the vehicle ON the event — heartbeats stop moving a dispatched
+        # unit, so without this its stored position would drift to wherever
+        # the trip animation last left it, and a reconnect would show it just
+        # short of the scene instead of at it.
+        if unit is not None and incident is not None and incident.location_lat is not None:
+            unit.location_lat = incident.location_lat
+            unit.location_lng = incident.location_lng
+            unit.save(update_fields=["location_lat", "location_lng"])
+
+        inc_old = incident.status if incident else None
+        incident_advanced = False
+        if incident is not None:
+            allowed, _err = incident.can_transition_to(
+                Incident.Status.ON_SCENE, "fieldunit")
+            if allowed:
+                incident.status = Incident.Status.ON_SCENE
+                incident.save(update_fields=["status"])
+                incident_advanced = True
+                _end_trips_for_incident(incident.id)
+
+        if incident is not None:
+            _log_status_change(
+                incident=incident, actor=actor,
+                title=f"{unit_name} arrived on scene",
+                description=(
+                    f"{unit_name} confirmed arrival and is starting operations "
+                    f"on '{incident.title}'."
+                ),
+            )
+            if incident.field_command_id:
+                fc = incident.field_command
+                _log_field_command_note(
+                    fc, FieldCommandNote.Kind.STATUS,
+                    f"{unit_name} arrived on scene at '{incident.title}' and is starting operations.",
+                )
+                _broadcast_realtime({
+                    "type": "user_action",
+                    "action": "field_command_note_added",
+                    **_actor_fields(actor),
+                    "field_command_id": fc.field_key,
+                    "incident_id": incident.id,
+                    **FieldCommandSerializer(fc).data,
+                })
+
+        if incident_advanced:
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "incident_status_update",
+                **_actor_fields(actor),
+                "incident_id": incident.id,
+                "incident_title": incident.title,
+                "old_status": inc_old,
+                "new_status": incident.status,
+            })
+
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "task_arrived",
+            **_actor_fields(actor),
+            "task_id": task.id,
+            "task_title": task.title,
+            "unit_id": unit.id if unit else task.mock_unit_id,
+            "unit_name": unit_name,
+            "incident_id": incident.id if incident else None,
+        })
+
+        return Response(self.get_serializer(task).data)
 
     @action(detail=False, methods=["get"], url_path="by-incident/(?P<incident_id>[^/.]+)")
     def by_incident(self, request, incident_id=None):
@@ -746,20 +1129,36 @@ class UnitViewSet(viewsets.ModelViewSet):
         request.user.unit = unit
         request.user.save(update_fields=["unit"])
 
-        unit.location_lat = lat
-        unit.location_lng = lng
+        # A reconnecting crew's device often hasn't got a real GPS fix yet at
+        # the exact moment it claims — mobile-app/utils/location.js falls back
+        # to a fixed Tel-Aviv-center MOCK_LOCATION and flags is_mock_location.
+        # Trust that fallback only for a genuinely new unit with no position on
+        # file yet; otherwise keep the unit's last real fix so it doesn't
+        # visibly teleport there and back on every reconnect.
+        is_mock_location = str(data.get("is_mock_location", "")).strip().lower() in ("1", "true", "yes")
+        # Take the incoming GPS only when we have no position at all yet, or
+        # it's a real fix for a unit that's free to roam. A dispatched unit's
+        # position is server-managed (claim spot → trip → arrival → disconnect
+        # snapshot), so reconnecting keeps it exactly where it was.
+        accept_gps = (
+            not _has_real_position(unit)
+            or (not is_mock_location and _active_task_for_unit(unit) is None)
+        )
+        update_fields = ["is_online", "last_seen", "availability_status"]
+        if accept_gps:
+            unit.location_lat = lat
+            unit.location_lng = lng
+            update_fields += ["location_lat", "location_lng"]
         unit.is_online = True
         unit.last_seen = timezone.now()
         unit.availability_status = "AVAILABLE"
-        unit.save(update_fields=[
-            "location_lat", "location_lng", "is_online", "last_seen", "availability_status",
-        ])
+        unit.save(update_fields=update_fields)
 
         IncidentEvent.objects.create(
             event_type=IncidentEvent.EventType.ASSIGNMENT,
             severity=IncidentEvent.Severity.INFO,
             title=f"Unit '{unit.name}' claimed",
-            description=f"Claimed by {request.user.username} at [{lat}, {lng}].",
+            description=f"Claimed by {request.user.username} at [{unit.location_lat}, {unit.location_lng}].",
             created_by=request.user.username,
             actor_id=request.user.id,
         )
@@ -769,22 +1168,68 @@ class UnitViewSet(viewsets.ModelViewSet):
             **_actor_fields(request.user),
             "unit_id": unit.id,
             "unit_name": unit.name,
-            "location_lat": lat,
-            "location_lng": lng,
+            # The unit's ACTUAL (possibly-kept-from-before) position, never the
+            # raw device coords — otherwise a rejected mock fix would still
+            # snap the war-room's marker to it via this broadcast.
+            "location_lat": unit.location_lat,
+            "location_lng": unit.location_lng,
+            # So the field war-room showing this unit's post refreshes the
+            # assigned-forces status live on reconnect (not just on refresh).
+            "field_command_id": _unit_field_key(unit),
         })
 
         return Response(self.get_serializer(unit).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated])
     def disconnect(self, request):
-        """Mobile logout (or app-initiated release): mark the caller's claimed unit offline."""
+        """Mobile logout / app-initiated release. Marks the unit offline AND
+        freezes it where it is: the vehicle's last position before the
+        disconnect (its interpolated spot if it was mid-drive) is snapshotted
+        so reconnecting resumes from there, not from the phone's real GPS. A
+        drive that hadn't arrived yet is rolled back to PENDING so the crew
+        gets the "On My Way" button again on reconnect."""
         unit = getattr(request.user, "unit", None)
         if not unit:
             return Response({"detail": "No unit linked to user."}, status=status.HTTP_400_BAD_REQUEST)
 
+        task = _active_task_for_unit(unit)
+        reverted_task = None
+        if task is not None:
+            if task.arrived_at is not None:
+                # Parked on scene — freeze at the event.
+                if task.incident and task.incident.location_lat is not None:
+                    unit.location_lat = task.incident.location_lat
+                    unit.location_lng = task.incident.location_lng
+            elif task.status == Task.Status.IN_PROGRESS:
+                pos = _trip_position(task.id)
+                if pos is not None:
+                    unit.location_lat, unit.location_lng = pos[0], pos[1]
+                _end_trip(task.id)
+                # Roll back so the crew re-accepts on reconnect (and so the
+                # trip endpoint won't silently resurrect the drive).
+                task.status = Task.Status.PENDING
+                task.save(update_fields=["status"])
+                reverted_task = task
+
         unit.is_online = False
         unit.last_seen = timezone.now()
-        unit.save(update_fields=["is_online", "last_seen"])
+        unit.save(update_fields=["is_online", "last_seen", "location_lat", "location_lng"])
+
+        if reverted_task is not None:
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "task_status_update",
+                **_actor_fields(request.user),
+                "task_id": reverted_task.id,
+                "task_title": reverted_task.title,
+                "old_status": Task.Status.IN_PROGRESS,
+                "new_status": Task.Status.PENDING,
+                "unit_id": unit.id,
+                "unit_name": unit.name,
+                "incident_id": reverted_task.incident_id,
+                "incident_lat": getattr(reverted_task.incident, "location_lat", None),
+                "incident_lng": getattr(reverted_task.incident, "location_lng", None),
+            })
 
         _broadcast_realtime({
             "type": "user_action",
@@ -792,6 +1237,9 @@ class UnitViewSet(viewsets.ModelViewSet):
             **_actor_fields(request.user),
             "unit_id": unit.id,
             "unit_name": unit.name,
+            "location_lat": unit.location_lat,
+            "location_lng": unit.location_lng,
+            "field_command_id": _unit_field_key(unit),
         })
         return Response({"status": "disconnected"})
 
@@ -860,6 +1308,13 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
     def assign_incident(self, request, field_key=None):
         """Link a regular Incident to this Field Command Post (operator-initiated)."""
         field_command = self.get_object()
+        # A post opened by escalating a specific incident ("Go Live") belongs to
+        # that incident alone — it can never take on additional incidents.
+        if field_command.major_incident_id is not None:
+            return Response(
+                {"detail": "This field command was opened from a single incident and cannot take on others."},
+                status=status.HTTP_409_CONFLICT,
+            )
         incident_id = request.data.get("incident_id")
         if not incident_id:
             return Response({"detail": "incident_id is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -894,6 +1349,43 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
         })
         return Response(self.get_serializer(field_command).data)
 
+    @action(detail=True, methods=["post"], url_path="unassign-incident")
+    def unassign_incident(self, request, field_key=None):
+        """Remove an Incident's link to this Field Command Post so it can be
+        linked to a different one (operator-initiated re-assignment)."""
+        field_command = self.get_object()
+        incident_id = request.data.get("incident_id")
+        if not incident_id:
+            return Response({"detail": "incident_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            incident = Incident.objects.get(pk=incident_id)
+        except (Incident.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Incident not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if incident.field_command_id != field_command.id:
+            return Response(
+                {"detail": "This incident is not linked to this field command."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        incident.field_command = None
+        incident.save(update_fields=["field_command"])
+        actor = request.user
+        _log_field_command_note(
+            field_command, FieldCommandNote.Kind.STATUS,
+            f"Incident unlinked by command center: {incident.title}.",
+        )
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "field_command_incident_unassigned",
+            **_actor_fields(actor),
+            "field_command_id": field_command.field_key,
+            "incident_id": incident.id,
+            "status": field_command.status,
+            **FieldCommandSerializer(field_command).data,
+        })
+        return Response(self.get_serializer(field_command).data)
+
     def _broadcast_mission(self, action, field_command, mission, actor):
         _broadcast_realtime({
             "type": "user_action",
@@ -912,25 +1404,49 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
         attached forces — see FieldCommandMission."""
         field_command = self.get_object()
         if request.method == "GET":
-            return Response(FieldCommandMissionSerializer(
-                field_command.missions.all(), many=True).data)
+            qs = field_command.missions.select_related("incident", "assigned_unit").all()
+            incident_id = request.query_params.get("incident")
+            if incident_id:
+                qs = qs.filter(incident_id=incident_id)
+            force_type = request.query_params.get("force_type")
+            if force_type:
+                qs = qs.filter(force_type=force_type.upper())
+            return Response(FieldCommandMissionSerializer(qs, many=True).data)
 
         if field_command.status == FieldCommand.Status.CLOSED:
             return Response(
                 {"detail": "This field command is closed."},
                 status=status.HTTP_409_CONFLICT)
 
+        # Accept `incident_id` as an alias for `incident` (this codebase's
+        # convention elsewhere). A task created from an incident panel must
+        # name the incident it's for and the force responsible.
+        payload = {k: v for k, v in request.data.items()}
+        incident_id = payload.pop("incident_id", None) or payload.get("incident")
+        if incident_id:
+            if not Incident.objects.filter(pk=incident_id).exists():
+                return Response({"detail": "Incident not found."}, status=status.HTTP_404_NOT_FOUND)
+            payload["incident"] = incident_id
+
         serializer = FieldCommandMissionSerializer(
-            data=request.data, context={"field_command": field_command})
+            data=payload, context={"field_command": field_command})
         serializer.is_valid(raise_exception=True)
         mission = serializer.save(field_command=field_command)
         actor = request.user
         assignee = (
-            f" → {mission.assigned_unit.name}" if mission.assigned_unit_id else ""
+            f" → {mission.assigned_unit.name}" if mission.assigned_unit_id
+            else (f" ({mission.get_force_type_display()})" if mission.force_type else "")
         )
+        scope = f" for '{mission.incident.title}'" if mission.incident_id else ""
         _log_field_command_note(
             field_command, FieldCommandNote.Kind.MISSION,
-            f"Mission assigned by command center: {mission.title}{assignee}.",
+            f"Task assigned by command center: {mission.title}{scope}{assignee}.",
+        )
+        force = mission.get_force_type_display() if mission.force_type else "the field"
+        _log_task_to_incident_feed(
+            mission, actor,
+            title=f"Task assigned to {force}: {mission.title}",
+            description="Assigned from the war room.",
         )
         self._broadcast_mission("field_command_mission_created", field_command, mission, actor)
         return Response(
@@ -957,9 +1473,15 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
         mission = serializer.save()
         actor = request.user
         if mission.status != old_status:
+            who = _mission_actor_label(actor, mission)
             _log_field_command_note(
                 field_command, FieldCommandNote.Kind.MISSION,
-                f"Mission '{mission.title}' — {mission.get_status_display()}.",
+                f"{who} — {mission.title}: {mission.get_status_display()}.",
+            )
+            _log_task_to_incident_feed(
+                mission, actor,
+                title=f"Task {mission.get_status_display().lower()}: {mission.title} — {who}",
+                description=f"{who} marked it {mission.get_status_display().lower()}.",
             )
         self._broadcast_mission("field_command_mission_updated", field_command, mission, actor)
         return Response(self.get_serializer(field_command).data)
@@ -1011,22 +1533,40 @@ def incident_events(request):
     except (TypeError, ValueError):
         limit = 50
 
-    qs = IncidentEvent.objects.filter(
-        incident__isnull=False).order_by("-created_at")
+    qs = (
+        IncidentEvent.objects.filter(incident__isnull=False)
+        .prefetch_related("media")
+        .order_by("-created_at")
+    )
     if incident_id_param:
         qs = qs.filter(incident_id=incident_id_param)
 
-    events = [
-        {
+    events = []
+    for e in qs[:limit]:
+        media = [
+            {
+                "id": m.id,
+                "media_type": m.media_type,
+                "file_url": (
+                    request.build_absolute_uri(m.file.url) if m.file else None
+                ),
+            }
+            for m in e.media.all()
+        ]
+        events.append({
             "id": e.id,
             "timestamp": e.created_at.isoformat(),
             "entity_type": "incident",
             "entity_id": e.incident_id,
             "message": e.title,
+            # The regional Event Log renders these so a field report shows its
+            # actual content — the written note and/or "photo/video attached" —
+            # instead of just an opaque "Task Update: ..." headline.
+            "description": e.description or "",
+            "source": e.source or "",
+            "media": media,
             "level": _SEVERITY_TO_LEVEL.get(e.severity, "info"),
-        }
-        for e in qs[:limit]
-    ]
+        })
     return Response(events)
 
 
@@ -1118,14 +1658,25 @@ def unit_heartbeat(request):
 
     location_lat = request.data.get("location_lat")
     location_lng = request.data.get("location_lng")
+    is_mock_location = str(request.data.get("is_mock_location", "")).strip().lower() in ("1", "true", "yes")
     has_location = False
     if location_lat is not None and location_lng is not None:
         try:
             location_lat = float(location_lat)
             location_lng = float(location_lng)
-            unit.location_lat = location_lat
-            unit.location_lng = location_lng
-            update_fields += ["location_lat", "location_lng"]
+            # Same rule as claim(): only take the GPS for a unit that's free to
+            # roam. Once a unit is dispatched, its map position is entirely
+            # server-managed (claim spot → trip interpolation → arrival →
+            # disconnect snapshot) so a stationary demo phone's beats can't
+            # drag the marker off the route.
+            accept_gps = (
+                not _has_real_position(unit)
+                or (not is_mock_location and _active_task_for_unit(unit) is None)
+            )
+            if accept_gps:
+                unit.location_lat = location_lat
+                unit.location_lng = location_lng
+                update_fields += ["location_lat", "location_lng"]
             has_location = True
         except (TypeError, ValueError):
             pass  # heartbeat is still valid without a usable location
@@ -1167,7 +1718,12 @@ def updates_stream(request):
         # Subscribe to updates
         unsubscribe = realtime_service.subscribe(on_event)
 
-        # Keep connection alive and send events
+        # Keep connection alive and send events. The heartbeat is what makes a
+        # DEAD connection get noticed: a browser that navigated away / reloaded
+        # / dropped stays subscribed here until the next write fails, so a slow
+        # heartbeat means stale subscribers pile up and every broadcast is
+        # delivered to the (now reconnected) tab several times over. 2s keeps
+        # that window tight.
         try:
             last_heartbeat = time.time()
             while True:
@@ -1176,12 +1732,15 @@ def updates_stream(request):
                     event = events_queue.pop(0)
                     yield f"data: {json.dumps(event)}\n\n"
 
-                # Send heartbeat every 10 seconds
-                if time.time() - last_heartbeat > 10:
+                if time.time() - last_heartbeat > 2:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     last_heartbeat = time.time()
 
                 time.sleep(0.1)
+        except GeneratorExit:
+            # Client disconnected and the server closed the generator — fall
+            # through to `finally` so we unsubscribe immediately.
+            pass
         finally:
             unsubscribe()
 
@@ -1350,6 +1909,17 @@ def field_incident_add_event(request):
             **FieldCommandSerializer(fc, context={"request": request}).data,
         })
 
+    # Nudge the regional dashboard's event log to re-pull so a field report
+    # shows there live, not just after a page reload — for every linked
+    # incident, field command or not.
+    if incident_obj is not None:
+        _broadcast_realtime({
+            "type": "user_action",
+            "action": "incident_event_added",
+            "incident_id": incident_obj.id,
+            "title": event_obj.title,
+        })
+
     # Mirror into the in-memory event list so SSE streaming stays consistent
     in_memory_event = {
         "id": event_obj.id,
@@ -1439,12 +2009,15 @@ def field_incident_updates_stream(request):
                 #     if update.get("status") != "no_change":
                 #         yield f"data: {json.dumps({'type': 'incident_update', 'data': update})}\n\n"
 
-                # Heartbeat every 10 seconds
-                if time.time() - last_heartbeat > 10:
+                # Heartbeat every 3s — see updates_stream: a slow heartbeat
+                # lets a dead (navigated-away / reloaded) client stay
+                # subscribed, so its events pile up and reach the reconnected
+                # tab multiple times.
+                if time.time() - last_heartbeat > 3:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     last_heartbeat = time.time()
 
-                time.sleep(1)
+                time.sleep(0.5)
         except GeneratorExit:
             pass
         finally:

@@ -232,6 +232,13 @@ export const assignIncidentToField = async (fieldId, incidentId) => {
   return res.data;
 };
 
+// Removes an Incident's link to a Field Command Post. After this the incident
+// is free to be linked to a different post.
+export const unassignIncidentFromField = async (fieldId, incidentId) => {
+  const res = await api.post(`/field-commands/${fieldId}/unassign-incident/`, { incident_id: incidentId });
+  return res.data;
+};
+
 export const createFieldCommand = async (payload) => {
   const res = await api.post("/field-commands/", payload);
   return res.data;
@@ -246,9 +253,10 @@ export const closeFieldCommand = async (fieldId, reason, closedByRole) => {
   return res.data;
 };
 
-// Field command missions (central-room taskings). Both calls return the
-// full FieldCommandSerializer shape so callers can refresh the panel with
-// no extra GET. payload for create: { title, details?, assigned_unit?, status? }.
+// Field command missions / tasks (central-room taskings). Both calls return
+// the full FieldCommandSerializer shape so callers can refresh the panel with
+// no extra GET. payload for create:
+// { title, details?, assigned_unit?, status?, force_type?, incident_id? }.
 export const createFieldMission = async (fieldId, payload) => {
   const res = await api.post(
     `/field-commands/${fieldId}/missions/`, payload,

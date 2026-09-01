@@ -3,9 +3,60 @@ from rest_framework import serializers
 from .models import (
     Incident, Task, Unit, IncidentEvent, ReportMedia,
     FieldCommand, FieldCommandNote, FieldCommandMission,
-    MajorIncident, Sector, TaskGroup, Perimeter,
+    MajorIncident, Sector, TaskGroup, Perimeter, IncidentFigureReport,
 )
 from .permissions import effective_role
+
+
+# The five headcounts a field crew reports per incident.
+FIGURE_FIELDS = IncidentFigureReport.FIELDS
+
+
+def sum_figure_reports(reports):
+    """Fold a list/queryset of IncidentFigureReport into one {field: total}."""
+    totals = {f: 0 for f in FIGURE_FIELDS}
+    for r in reports:
+        for f in FIGURE_FIELDS:
+            totals[f] += getattr(r, f, 0) or 0
+    return totals
+
+
+def incident_assigned_units(incident):
+    """Every unit currently committed to `incident` via a non-terminal Task,
+    each with its live task status + crew-confirmed arrival. Shared by
+    IncidentSerializer (regional dashboard) and FieldCommandIncidentSerializer
+    (the field dashboard's Forces panel)."""
+    if incident.status == Incident.Status.CLOSED:
+        return []
+    seen = {}
+    for t in incident.tasks.select_related("assigned_unit").all():
+        unit = t.assigned_unit
+        if unit is None or t.status in Task.TERMINAL_STATUSES:
+            continue
+        seen[unit.id] = {
+            "id": unit.id,
+            "name": unit.name,
+            "type": unit.type,
+            "is_online": unit.is_actively_online,
+            "task_status": t.status,
+            "arrived": t.arrived_at is not None,
+        }
+    return [seen[k] for k in sorted(seen)]
+
+
+def _report_unit_label(event):
+    """Name of the vehicle that filed a field report, resolved from the
+    dispatched Task the report is scoped to. Empty string when the report
+    isn't task-scoped or the task carries no identifiable unit."""
+    task = getattr(event, "task", None)
+    if task is None:
+        return ""
+    if task.assigned_unit_id and task.assigned_unit:
+        return task.assigned_unit.name
+    if task.mock_unit_id:
+        unit = Unit.objects.filter(pk=task.mock_unit_id).first()
+        return unit.name if unit else f"Unit {task.mock_unit_id}"
+    return ""
 
 
 class TaskSerializer(serializers.ModelSerializer):
@@ -14,14 +65,21 @@ class TaskSerializer(serializers.ModelSerializer):
     incident_lng      = serializers.FloatField(source="incident.location_lng", read_only=True)
     incident_priority = serializers.CharField(source="incident.priority",      read_only=True)
     incident_status   = serializers.CharField(source="incident.status",        read_only=True)
+    # The field command post this incident belongs to — lets the mobile app
+    # fetch/advance the incident's force-typed tasks (FieldCommandMission).
+    field_command_key = serializers.CharField(
+        source="incident.field_command.field_key", read_only=True, default=None)
 
     class Meta:
         model = Task
         fields = [
             "id", "incident", "incident_title",
             "incident_lat", "incident_lng", "incident_priority", "incident_status",
+            "field_command_key",
             "assigned_unit", "mock_unit_id", "title", "status", "timestamp",
+            "arrived_at",
         ]
+        read_only_fields = ["arrived_at"]
 
     def validate_status(self, value):
         instance = self.instance
@@ -114,26 +172,21 @@ class IncidentSerializer(serializers.ModelSerializer):
         })
 
     def get_assigned_units(self, obj):
-        if obj.status == Incident.Status.CLOSED:
-            return []
-        seen = {}
-        for t in obj.tasks.select_related("assigned_unit").all():
-            unit = t.assigned_unit
-            if unit is None or t.status in Task.TERMINAL_STATUSES:
-                continue
-            seen[unit.id] = {
-                "id": unit.id,
-                "name": unit.name,
-                "type": unit.type,
-                "is_online": unit.is_actively_online,
-                "task_status": t.status,
-            }
-        return [seen[k] for k in sorted(seen)]
+        return incident_assigned_units(obj)
 
     def get_major_incident(self, obj):
         if not hasattr(obj, "major_incident"):
             return None
-        return {"id": obj.major_incident.id, "status": obj.major_incident.status}
+        mi = obj.major_incident
+        fc = mi.field_commands.first()
+        return {
+            "id": mi.id,
+            "status": mi.status,
+            # The field HQ this go-live spun up — so the incident panel can
+            # deep-link straight to it (the well-tested ?fieldId= path).
+            "field_key": fc.field_key if fc else None,
+            "field_command_name": fc.name if fc else None,
+        }
 
     def validate_status(self, value):
         instance = self.instance
@@ -307,11 +360,16 @@ class FieldCommandMissionSerializer(serializers.ModelSerializer):
         source="assigned_unit.name", read_only=True, default=None)
     assigned_unit_type = serializers.CharField(
         source="assigned_unit.type", read_only=True, default=None)
+    incident_title = serializers.CharField(
+        source="incident.title", read_only=True, default=None)
+    incident_status = serializers.CharField(
+        source="incident.status", read_only=True, default=None)
 
     class Meta:
         model = FieldCommandMission
         fields = [
-            "id", "title", "details", "status",
+            "id", "title", "details", "status", "force_type",
+            "incident", "incident_title", "incident_status",
             "assigned_unit", "assigned_unit_name", "assigned_unit_type",
             "created_at", "updated_at",
         ]
@@ -329,13 +387,47 @@ class FieldCommandMissionSerializer(serializers.ModelSerializer):
         return unit
 
 
+class IncidentFigureReportSerializer(serializers.ModelSerializer):
+    unit_name = serializers.CharField(source="unit.name", read_only=True, default=None)
+    unit_type = serializers.CharField(source="unit.type", read_only=True, default=None)
+
+    class Meta:
+        model = IncidentFigureReport
+        fields = [
+            "id", "incident", "unit", "unit_name", "unit_type", "reported_by",
+            "injured", "dead", "trapped", "treated", "evacuated",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "incident", "unit", "reported_by", "created_at", "updated_at"]
+
+
 class FieldCommandIncidentSerializer(serializers.ModelSerializer):
+    # Units committed to this incident + their live status — powers the field
+    # dashboard's Forces panel ("who is on the ground and what are they doing").
+    assigned_units = serializers.SerializerMethodField()
+    # Sum of every crew's latest headcount for this incident — the per-incident
+    # slice of the post-wide totals shown on the field dashboard's left panel.
+    figure_report = serializers.SerializerMethodField()
+
     class Meta:
         model = Incident
         # `channel` (Police/Fire/EMS/...) lets the Field Command panels show
         # the right agency icon for each linked incident, same as the
         # regional dashboard's incident list — see utils/agencyMeta.js.
-        fields = ["id", "title", "status", "priority", "channel"]
+        # description/created_at/location power the "Incident linked" card the
+        # field control room's Operational Timeline builds (full details of
+        # the event, not just a one-line note).
+        fields = [
+            "id", "title", "status", "priority", "channel",
+            "description", "created_at", "location_lat", "location_lng",
+            "assigned_units", "figure_report",
+        ]
+
+    def get_assigned_units(self, obj):
+        return incident_assigned_units(obj)
+
+    def get_figure_report(self, obj):
+        return sum_figure_reports(obj.figure_reports.all())
 
 
 class FieldCommandUnitSerializer(serializers.ModelSerializer):
@@ -370,6 +462,10 @@ class FieldCommandSerializer(serializers.ModelSerializer):
         write_only=True, required=False, allow_null=True,
     )
     major_incident = serializers.SerializerMethodField()
+    # Live casualty picture for this post: every crew's latest headcount,
+    # summed across ALL of the post's incidents. This is what makes the field
+    # dashboard's left panel move when a mobile submits figures.
+    figure_totals = serializers.SerializerMethodField()
 
     class Meta:
         model = FieldCommand
@@ -390,6 +486,7 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             "missions",
             "incidents_count",
             "units_count",
+            "figure_totals",
             "note",
             "major_incident_id",
             "major_incident",
@@ -419,13 +516,19 @@ class FieldCommandSerializer(serializers.ModelSerializer):
         reports = (
             IncidentEvent.objects
             .filter(incident__field_command=obj, source=IncidentEvent.Source.UNIT)
-            .select_related("incident")
+            .select_related("incident", "task", "task__assigned_unit")
             .prefetch_related("media")
             .order_by("-created_at")
         )
         for ev in reports:
             incident_title = ev.incident.title if ev.incident_id else ""
-            reporter = ev.created_by or "Field unit"
+            # Prefer the *vehicle* that filed the report (resolved from the
+            # dispatched Task) over the operator's login name — the timeline
+            # reader needs to know which unit is reporting, not who is holding
+            # the phone. Falls back to created_by when the event isn't
+            # task-scoped (e.g. a text-only training entry).
+            unit_label = _report_unit_label(ev)
+            reporter = unit_label or ev.created_by or "Field unit"
             body = ev.description or ev.title
             entries.append({
                 "timestamp": ev.created_at.isoformat(),
@@ -433,6 +536,7 @@ class FieldCommandSerializer(serializers.ModelSerializer):
                            else f"{reporter}: {body}",
                 "kind": "REPORT",
                 "created_by": reporter,
+                "unit_name": unit_label,
                 "incident_title": incident_title,
                 "media": [
                     {
@@ -472,6 +576,11 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             "displaced_persons": mi.displaced_persons,
             "radius_meters": mi.radius_meters,
         }
+
+    def get_figure_totals(self, obj):
+        return sum_figure_reports(
+            IncidentFigureReport.objects.filter(incident__field_command=obj)
+        )
 
     def get_incidents_count(self, obj):
         return obj.incidents.count()

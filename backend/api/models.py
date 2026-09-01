@@ -243,6 +243,12 @@ class Task(models.Model):
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING)
     timestamp = models.DateTimeField(auto_now=True)
+    # Set only when the field crew explicitly confirms arrival on scene from
+    # the mobile app (TaskViewSet.arrive). The dashboards must NOT show a
+    # vehicle as "arrived / starting operations" — and must NOT play the
+    # arrival announcement — until this is set: the war-room trip animation
+    # only moves the marker, it never decides the crew is on scene.
+    arrived_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.title} ({self.status})"
@@ -408,8 +414,24 @@ class FieldCommandMission(models.Model):
         IN_PROGRESS = "IN_PROGRESS", "In Progress"
         DONE = "DONE", "Done"
 
+    # The agency a task is assigned to — every mobile crew of this force
+    # dispatched to the linked incident sees it and can advance its status.
+    # Same POLICE/FIRE/MEDICAL scheme the regional dispatch panels use.
+    class ForceType(models.TextChoices):
+        POLICE = "POLICE", "Police"
+        FIRE = "FIRE", "Fire"
+        MEDICAL = "MEDICAL", "Medical"
+
     field_command = models.ForeignKey(
         FieldCommand, related_name="missions", on_delete=models.CASCADE)
+    # The event this task is for. Nullable/SET_NULL: a mission can be a plain
+    # post-level tasking with no specific incident, and it survives the
+    # incident being unlinked/removed as an audit record.
+    incident = models.ForeignKey(
+        Incident, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="field_tasks")
+    force_type = models.CharField(
+        max_length=20, choices=ForceType.choices, null=True, blank=True)
     title = models.CharField(max_length=200)
     details = models.TextField(blank=True, default="")
     # The force responsible for this mission. SET_NULL (not CASCADE) so a
@@ -737,6 +759,46 @@ class ReportMedia(models.Model):
 
     def __str__(self):
         return f"{self.media_type} attachment for event {self.event_id}"
+
+
+class IncidentFigureReport(models.Model):
+    """A field crew's current headcount for one incident — how many people it
+    sees injured / dead / trapped / treated / evacuated on the ground.
+
+    One row per (incident, reporting unit), updated in place: the mobile app
+    submits a fresh full set each time and it overwrites the previous one, so
+    the field war-room always shows each crew's LATEST figures. A post's total
+    is the sum of these rows across every incident it coordinates (see
+    FieldCommandSerializer.get_figure_totals) — which is why the field
+    dashboard's left panel finally moves when a crew reports.
+    """
+    FIELDS = ("injured", "dead", "trapped", "treated", "evacuated")
+
+    incident = models.ForeignKey(
+        Incident, on_delete=models.CASCADE, related_name="figure_reports")
+    # SET_NULL, not CASCADE: keep the last reported numbers even if the unit row
+    # is later removed — the post total shouldn't silently drop.
+    unit = models.ForeignKey(
+        "Unit", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="figure_reports")
+    reported_by = models.CharField(max_length=150, blank=True)
+
+    injured = models.PositiveIntegerField(default=0)
+    dead = models.PositiveIntegerField(default=0)
+    trapped = models.PositiveIntegerField(default=0)
+    treated = models.PositiveIntegerField(default=0)
+    evacuated = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [("incident", "unit")]
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        who = self.unit.name if self.unit_id else self.reported_by or "unknown"
+        return f"figures for incident {self.incident_id} by {who}"
 
 
 class PushToken(models.Model):

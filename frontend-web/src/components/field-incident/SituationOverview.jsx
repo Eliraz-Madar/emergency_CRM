@@ -1,193 +1,67 @@
 /**
- * Situation Overview Component
+ * Situation Overview — now just the identity header for the left rail:
+ * the field command's name + its incident type and status badges, pinned to
+ * the top of the column above the Central Command and Casualty Figures panels.
  *
- * Displays high-level incident status, casualty estimates, and operational metrics.
- * Command-level situational awareness for major incident response.
+ * The old casualty-estimate / displaced-persons / incident-status metric block
+ * was removed: those numbers were the static MajorIncident estimate and never
+ * moved. The LIVE casualty picture is now CasualtyFiguresPanel (fed by the
+ * mobile crews' figure reports).
  */
 
-import { useEffect, useState } from 'react';
 import { useFieldIncidentStore } from '../../store/fieldIncident';
-import { getMajorIncidentPerimeter } from '../../api/client';
+
+const STATUS_COLOR = {
+  DECLARED: '#f59e0b',
+  ACTIVE: '#ef4444',
+  STABILIZING: '#3b82f6',
+  RECOVERY: '#10b981',
+  ROUTINE: '#10b981',
+  'ACTIVE MONITORING': '#10b981',
+  INITIALIZING: '#f59e0b',
+  CLOSED: '#78350f',
+};
 
 const SituationOverview = () => {
   const majorIncident = useFieldIncidentStore((s) => s.majorIncident);
-  const taskGroups = useFieldIncidentStore((s) => s.taskGroups);
   const mode = useFieldIncidentStore((s) => s.mode);
   const getSituationSummary = useFieldIncidentStore((s) => s.getSituationSummary);
-  const getAverageTaskProgress = useFieldIncidentStore((s) => s.getAverageTaskProgress);
-  const getCriticalAlerts = useFieldIncidentStore((s) => s.getCriticalAlerts);
 
   const summary = getSituationSummary();
-  const avgProgress = getAverageTaskProgress();
-  const alerts = getCriticalAlerts();
-
-  // Real perimeter data only — never for the SIMULATION/ROUTINE fake
-  // majorIncident objects ('sim-1'/'routine-1'), which have no backing
-  // MajorIncident row to fetch a perimeter for. Self-fetched (not shared
-  // store, not a prop) — mirrors IncidentDetailsPanel.jsx's sectors/
-  // task-groups pattern. perimeterVersion is a pure signal counter (see
-  // store/fieldIncident.js) bumped after a same-session submission so this
-  // re-fetches instead of showing stale "Not set" — the only other new
-  // store dependency this component picks up, kept to a single integer.
-  const perimeterVersion = useFieldIncidentStore((s) => s.perimeterVersion);
-  const [perimeter, setPerimeter] = useState(null);
-  useEffect(() => {
-    if (mode !== 'LIVE' || !majorIncident?.id) {
-      setPerimeter(null);
-      return;
-    }
-    let cancelled = false;
-    getMajorIncidentPerimeter(majorIncident.id)
-      .then((data) => { if (!cancelled) setPerimeter(data); })
-      .catch(() => { if (!cancelled) setPerimeter(null); });
-    return () => { cancelled = true; };
-  }, [mode, majorIncident?.id, perimeterVersion]);
 
   if (!majorIncident || !summary) {
     return (
       <div className="situation-overview">
-        <p className="no-data">No active major incident</p>
+        <p className="no-data">No active field command</p>
       </div>
     );
   }
 
-  const statusColor = {
-    DECLARED: '#f59e0b',
-    ACTIVE: '#ef4444',
-    STABILIZING: '#3b82f6',
-    RECOVERY: '#10b981',
-    ROUTINE: '#10b981',
-    'ACTIVE MONITORING': '#10b981',
-    INITIALIZING: '#f59e0b',
-    // FieldCommand's own CLOSED status (FIELD_COMMAND mode's majorIncident
-    // stand-in uses it directly; see setFieldCommandData in
-    // store/fieldIncident.js) — was previously falling back to
-    // statusColor.ACTIVE's alarming red with no dedicated entry.
-    CLOSED: '#78350f',
-  };
-
-  // Force display based on mode to prevent stale data
   const isRoutine = mode === 'ROUTINE';
   const titleColor = isRoutine ? '#10b981' : '#dc2626';
-  const displayTitle = isRoutine ? 'ROUTINE SECURITY OPERATIONS' : (summary.title || 'Incident');
+  const displayTitle = isRoutine ? 'ROUTINE SECURITY OPERATIONS' : (summary.title || 'Field Command');
   const displayStatus = isRoutine ? 'ACTIVE MONITORING' : (summary.status || 'ACTIVE');
   const displayType = isRoutine ? 'ROUTINE' : (summary.type || 'INCIDENT');
 
   return (
     <div className="situation-overview">
-      {/* Incident Header */}
       <div className="incident-header">
         <div className="incident-title-section">
-          <h2 style={{ color: titleColor }}>
-            {displayTitle}
-          </h2>
+          <h2 style={{ color: titleColor }}>{displayTitle}</h2>
           <div className="incident-meta">
-            <span className="type-badge" style={{
-              backgroundColor: isRoutine ? '#065f46' : undefined,
-            }}>
+            <span
+              className="type-badge"
+              style={{ backgroundColor: isRoutine ? '#065f46' : undefined }}
+            >
               {String(displayType).replace(/_/g, ' ')}
             </span>
             <span
               className="status-badge"
-              style={{ backgroundColor: statusColor[displayStatus] || statusColor.ACTIVE }}
+              style={{ backgroundColor: STATUS_COLOR[displayStatus] || STATUS_COLOR.ACTIVE }}
             >
               {String(displayStatus).replace(/_/g, ' ')}
             </span>
           </div>
-        </div>
-      </div>
-
-      {/* Critical Alerts */}
-      {alerts.length > 0 && (
-        <div className="critical-alerts">
-          <h3>⚠️ Critical Alerts</h3>
-          <div className="alerts-list">
-            {alerts.slice(0, 3).map((alert, idx) => (
-              <div
-                key={idx}
-                className={`alert alert-${alert.severity.toLowerCase()}`}
-              >
-                <span className="alert-icon">🚨</span>
-                <span className="alert-text">{alert.message}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Key Metrics Grid */}
-      <div className="metrics-grid">
-        {/* Casualty Metrics */}
-        <div className="metric-card">
-          <div className="metric-label">Estimated Casualties</div>
-          <div className="metric-value">{summary.estimatedCasualties}</div>
-          <div className="metric-sub">
-            <span>Deaths: {summary.confirmedDeaths}</span>
-          </div>
-        </div>
-
-        <div className="metric-card">
-          <div className="metric-label">Displaced Persons</div>
-          <div className="metric-value">{summary.displacedPersons}</div>
-          <div className="metric-sub">Primary concern</div>
-        </div>
-
-        {/* Sector Metrics */}
-        <div className="metric-card">
-          <div className="metric-label">Affected Sectors</div>
-          <div className="metric-value">{summary.activeSectorCount}/{summary.sectors}</div>
-          <div className="metric-sub">
-            Critical: {summary.criticalHazards}
-          </div>
-        </div>
-
-        {/* Task Metrics */}
-        <div className="metric-card">
-          <div className="metric-label">Task Group Progress</div>
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{ width: `${avgProgress}%` }}
-            ></div>
-          </div>
-          <div className="metric-sub">
-            {summary.tasksInProgress} in progress, {summary.tasksCompleted} completed
-          </div>
-        </div>
-
-        <div className="metric-card">
-          <div className="metric-label">Operational Scope</div>
-          <div className="metric-value">{summary.taskGroups}</div>
-          <div className="metric-sub">
-            {(summary.affectedRadius / 1000).toFixed(1)} km radius
-          </div>
-        </div>
-      </div>
-
-      {/* Quick Stats */}
-      <div className="quick-stats">
-        <div className="stat-row">
-          <span className="stat-label">Resources Deployed:</span>
-          <span className="stat-value">
-            {Math.round(
-              taskGroups.length > 0
-                ? (taskGroups.reduce((sum, tg) => sum + (tg.assigned_units_count || 0), 0) || 0) / taskGroups.length
-                : 0
-            )}{' '}
-            units/group avg
-          </span>
-        </div>
-        <div className="stat-row">
-          <span className="stat-label">Incident Status:</span>
-          <span className="stat-value" style={{ color: statusColor[summary.status] || statusColor.ACTIVE }}>
-            {String(summary.status || 'ACTIVE').replace(/_/g, ' ')}
-          </span>
-        </div>
-        <div className="stat-row">
-          <span className="stat-label">Perimeter:</span>
-          <span className="stat-value">
-            {perimeter?.points?.length ? `${perimeter.points.length} points` : 'Not set'}
-          </span>
         </div>
       </div>
     </div>

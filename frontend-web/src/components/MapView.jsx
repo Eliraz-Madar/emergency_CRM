@@ -4,6 +4,15 @@ import 'leaflet/dist/leaflet.css';
 import { useDashboardStore } from '../store/dashboard.js';
 import { getSortedAvailableUnits } from '../utils/units.js';
 import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
+import { ANNOUNCE_EVENT } from '../utils/announce.js';
+
+// The "on its way" / "arrived" map bubble and the spoken line are BOTH driven
+// from Dashboard.jsx's SSE handlers via announceOnce() — one dedup gate
+// (localStorage), one fire per real backend broadcast. This component no
+// longer infers an announcement from a unit's client-side status (which could
+// flip to ON_SCENE for reasons other than a real crew arrival, and whose
+// per-mount guards evaporated on every route navigation). It just listens for
+// the `ecm-announce` event and drops the bubble on the right marker.
 
 /**
  * Map View Component - displays incidents and units on map (regional
@@ -24,19 +33,9 @@ export function MapView({
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef({});
-  const prevStatusRef = useRef(new Map());
-  const arrivalAnnouncedRef = useRef(new Set());
+  // unitId set that was EN_ROUTE on the previous render — used only to pan the
+  // camera towards a unit that just went en route (no announcement here).
   const prevEnRouteRef = useRef(new Set());
-  // unitId -> boolean: whether the unit was EN_ROUTE-with-a-route on the
-  // previous render. The "on its way" announcement fires only on the
-  // false -> true transition, and enRouteAnnouncedRef guarantees it happens
-  // at most once per en-route stint even if the effect re-runs many times.
-  const prevRouteRef = useRef(new Map());
-  const enRouteAnnouncedRef = useRef(new Set());
-  // Suppress the "on its way" announcement for units that were already en route
-  // when the page loaded (routes are rebuilt from the backend on mount) — only
-  // arm it a few seconds in, so it fires for genuine live acceptances only.
-  const announceArmedRef = useRef(false);
   const onMapCreateFieldCommandRef = useRef(onMapCreateFieldCommand);
   const onMapReportIncidentRef = useRef(onMapReportIncident);
   const onMapDispatchForceRef = useRef(onMapDispatchForce);
@@ -64,6 +63,7 @@ export function MapView({
     title: '',
     priority: 'HIGH',
     description: '',
+    fieldCommandId: '',
   });
   // UI-only helper for the Title field's dropdown — feeds incidentForm.title
   // directly, never reconnected to `type` (which is the Responding Agency /
@@ -78,7 +78,7 @@ export function MapView({
   const handleCloseModal = useCallback(() => {
     setActiveModal(null);
     setSelectedPoint(null);
-    setIncidentForm({ type: 'POLICE', title: '', priority: 'HIGH', description: '' });
+    setIncidentForm({ type: 'POLICE', title: '', priority: 'HIGH', description: '', fieldCommandId: '' });
     setTitleType('Fire');
     setDispatchAgency('POLICE');
     setDispatchUnitId('');
@@ -111,6 +111,7 @@ export function MapView({
       title: incidentForm.title || incidentForm.type,
       priority: incidentForm.priority,
       description: incidentForm.description,
+      fieldCommandId: incidentForm.fieldCommandId || null,
     });
     handleCloseModal();
   }, [selectedPoint, incidentForm, handleCloseModal]);
@@ -250,7 +251,12 @@ export function MapView({
     setSelectedUnit,
     zoomToIncidentId,
     clearZoomToIncident,
+    zoomToFieldCommand,
+    clearZoomToFieldCommand,
     flashingIncidentId,
+    spotlightIncidentIds,
+    spotlightNonce,
+    clearSpotlightIncidents,
     getFilteredIncidents,
     filters,
   } = useDashboardStore();
@@ -272,11 +278,26 @@ export function MapView({
   // Real, DB-backed incidents only.
   const incidents = Array.isArray(dashboardIncidents) ? dashboardIncidents : [];
 
-  // Arm the "on its way" voice announcement a few seconds after mount so a
-  // reload (which rebuilds en-route routes from the backend) stays silent.
+  // The "on its way" / "arrived" map bubble. Fired by Dashboard.jsx's SSE
+  // handlers via announceOnce() -> `ecm-announce` window event, so it rides
+  // the SAME once-per-broadcast localStorage dedup gate as the spoken line and
+  // can never double up on a remount or a client-inferred status change.
   useEffect(() => {
-    const t = setTimeout(() => { announceArmedRef.current = true; }, 4000);
-    return () => clearTimeout(t);
+    const onAnnounce = (e) => {
+      const map = mapInstanceRef.current;
+      const detail = e?.detail || {};
+      if (!map || detail.unitId == null || !detail.message) return;
+      const marker = markersRef.current[`unit-${detail.unitId}`];
+      const at = marker && map.hasLayer(marker) ? marker.getLatLng() : null;
+      if (!at) return;
+      const popup = L.popup({ autoPan: false, closeButton: false, className: 'unit-arrival-popup' })
+        .setLatLng(at)
+        .setContent(`<div style="font-weight:600; padding:4px 6px;">${detail.message}</div>`);
+      popup.openOn(map);
+      setTimeout(() => { if (map && map.closePopup) map.closePopup(popup); }, 3000);
+    };
+    window.addEventListener(ANNOUNCE_EVENT, onAnnounce);
+    return () => window.removeEventListener(ANNOUNCE_EVENT, onAnnounce);
   }, []);
 
   // Initialize map
@@ -377,6 +398,45 @@ export function MapView({
     clearZoomToIncident();
   }, [zoomToIncidentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Jump the map to a field command post's marker (clicked in the KPI card).
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!zoomToFieldCommand?.id || !map) return;
+    const fc = (Array.isArray(fieldCommands) ? fieldCommands : [])
+      .find((f) => String(f.id) === String(zoomToFieldCommand.id));
+    const lat = fc?.location_lat ?? fc?.lat;
+    const lng = fc?.location_lng ?? fc?.lng;
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      map.flyTo([lat, lng], Math.max(map.getZoom(), 14), { animate: true, duration: 1.0 });
+    }
+    clearZoomToFieldCommand();
+  }, [zoomToFieldCommand?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // "Spotlight" a group of incidents (KPI header buttons): zoom the map OUT so
+  // every one of them is visible, then let their markers flash for a moment
+  // (~3 pulses of the 0.75s dispatch ring) before clearing.
+  useEffect(() => {
+    if (!spotlightNonce || !mapInstanceRef.current) return;
+    const map = mapInstanceRef.current;
+    const ids = new Set((spotlightIncidentIds || []).map(String));
+    const points = incidents
+      .filter((i) => ids.has(String(i.id)))
+      .map((i) => [i.location_lat ?? i.lat, i.location_lng ?? i.lng])
+      .filter(([la, ln]) => Number.isFinite(la) && Number.isFinite(ln));
+    if (points.length > 0) {
+      try {
+        if (points.length === 1) {
+          map.flyTo(points[0], Math.min(map.getZoom(), 13), { duration: 0.8 });
+        } else {
+          map.flyToBounds(L.latLngBounds(points), { padding: [70, 70], duration: 0.8, maxZoom: 13 });
+        }
+      } catch { /* ignore Leaflet animation errors */ }
+    }
+    // ~3 pulses of the 0.75s dispatch ring.
+    const t = setTimeout(() => clearSpotlightIncidents(), 2400);
+    return () => clearTimeout(t);
+  }, [spotlightNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Keep Leaflet map stable when container resizes
   useEffect(() => {
     const map = mapInstanceRef.current;
@@ -461,7 +521,9 @@ export function MapView({
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
       const pinColor = getPinColor(incident.priority || incident.severity);
-      const isFlashing = flashingIncidentId != null && flashingIncidentId === incident.id;
+      const isFlashing = (flashingIncidentId != null && flashingIncidentId === incident.id)
+        || (Array.isArray(spotlightIncidentIds)
+          && spotlightIncidentIds.some((sid) => String(sid) === String(incident.id)));
       // "Dispatch Force to Point" (MapView's right-click menu, via
       // Dashboard.jsx's handleMapDispatchForce) auto-creates a minimal
       // Incident just to carry a direct point-dispatch — it isn't a real
@@ -726,7 +788,7 @@ export function MapView({
         marker.openPopup();
       }
     });
-  }, [incidents, filters, selectedIncidentId, selectedUnitId, activeFilter, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, activeUnits]);
+  }, [incidents, filters, selectedIncidentId, selectedUnitId, activeFilter, setSelectedUnit, fieldCommands, onFieldCommandSelect, selectedFieldCommandId, flashingIncidentId, spotlightIncidentIds, activeUnits]);
 
   // Separate effect ONLY for frequent unit position updates
   useEffect(() => {
@@ -761,91 +823,9 @@ export function MapView({
         marker.setIcon(unitIcon);
       }
 
-      // "On its way" announcement — fires exactly once, on the transition to
-      // EN_ROUTE-with-a-route (i.e. the unit tapped "On My Way"). Never on the
-      // initial mount of an already-routed unit (hadRoute === undefined), and
-      // enRouteAnnouncedRef stops any repeat from effect re-runs.
-      if (unit.id) {
-        const hadRoute = prevRouteRef.current.get(unit.id);
-        const hasRoute = unit.status === 'EN_ROUTE'
-          && Array.isArray(unit.route) && unit.route.length > 0;
-        if (
-          hasRoute && hadRoute === false
-          && announceArmedRef.current
-          && !unit.isScenarioUnit
-          && !enRouteAnnouncedRef.current.has(unit.id)
-        ) {
-          enRouteAnnouncedRef.current.add(unit.id);
-          const unitLabel = unit.name || `Unit ${unit.id}`;
-          const targetIncident = unit.assignedTo
-            ? (incidents || []).find((i) => i.id === unit.assignedTo)
-            : null;
-          const dest = targetIncident?.title || targetIncident?.location_name || 'the incident';
-          const message = `${unitLabel} is on its way to ${dest}.`;
-          if (Number.isFinite(unitLat) && Number.isFinite(unitLng)) {
-            const popup = L.popup({ autoPan: false, closeButton: false, className: 'unit-arrival-popup' })
-              .setLatLng([unitLat, unitLng])
-              .setContent(`<div style="font-weight:600; padding:4px 6px;">${message}</div>`);
-            popup.openOn(map);
-            setTimeout(() => { if (map && map.closePopup) map.closePopup(popup); }, 3000);
-          }
-          if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-            const utterance = new SpeechSynthesisUtterance(message);
-            utterance.lang = 'en-US';
-            window.speechSynthesis.speak(utterance);
-          }
-        }
-        // Reset once the unit is no longer en route, so a fresh dispatch later
-        // announces again.
-        if (unit.status !== 'EN_ROUTE') {
-          enRouteAnnouncedRef.current.delete(unit.id);
-        }
-        prevRouteRef.current.set(unit.id, hasRoute);
-      }
-
-      // Arrival notification when unit reaches ON_SCENE
-      if (unit.id) {
-        const prevStatus = prevStatusRef.current.get(unit.id);
-        // Only announce for units the operator personally dispatched.
-        // Scenario-script units (isScenarioUnit: true) transition EN_ROUTE → ON_SCENE
-        // automatically — we must NOT voice-announce those.
-        if (unit.status === 'ON_SCENE' && prevStatus === 'EN_ROUTE' && !unit.isScenarioUnit) {
-          if (!arrivalAnnouncedRef.current.has(unit.id)) {
-            arrivalAnnouncedRef.current.add(unit.id);
-
-            const unitLabel = unit.name || `Unit ${unit.id}`;
-            const message = `${unitLabel} has arrived at the incident and is beginning operations.`;
-
-            // Popup near the unit
-            if (Number.isFinite(unitLat) && Number.isFinite(unitLng)) {
-              const popup = L.popup({
-                autoPan: false,
-                closeButton: false,
-                className: 'unit-arrival-popup',
-              })
-                .setLatLng([unitLat, unitLng])
-                .setContent(`<div style="font-weight:600; padding:4px 6px;">${message}</div>`);
-              popup.openOn(map);
-              setTimeout(() => {
-                if (map && map.closePopup) {
-                  map.closePopup(popup);
-                }
-              }, 3000);
-            }
-
-            // Voice notification
-            if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-              const utterance = new SpeechSynthesisUtterance(message);
-              utterance.lang = 'en-US';
-              window.speechSynthesis.speak(utterance);
-            }
-          }
-        } else if (unit.status !== 'ON_SCENE') {
-          arrivalAnnouncedRef.current.delete(unit.id);
-        }
-        prevStatusRef.current.set(unit.id, unit.status);
-      }
+      // The "on its way" / "arrived" bubbles are NOT decided here anymore —
+      // see the `ecm-announce` listener effect above. This effect only keeps
+      // the marker positions and icons in sync.
     });
   }, [activeUnits, selectedUnitIds]);
 
@@ -936,26 +916,42 @@ export function MapView({
       {/* Leaflet map — rendered imperatively into this div via the effects
           above (L.map / L.marker / L.divIcon), not react-leaflet. */}
       <div ref={mapRef} className="map-view" />
+      {/* Every swatch/icon below is pulled from the SAME functions that paint
+          the actual markers (getPinColor / getUnitTypeMeta) — never a second,
+          hand-copied set of colors that can silently drift from what's really
+          on the map. */}
       <div className="map-legend">
+        <div className="map-legend-title">Incidents</div>
         <div className="legend-item">
-          <span className="legend-icon" style={{ backgroundColor: '#ef4444' }}>●</span>
-          <span>Critical</span>
+          <span className="legend-icon" style={{ backgroundColor: getPinColor('CRITICAL') }}>●</span>
+          <span>Critical / High</span>
         </div>
         <div className="legend-item">
-          <span className="legend-icon" style={{ backgroundColor: '#f59e0b' }}>●</span>
-          <span>High / Dispatched</span>
-        </div>
-        <div className="legend-item">
-          <span className="legend-icon" style={{ backgroundColor: '#eab308' }}>●</span>
+          <span className="legend-icon" style={{ backgroundColor: getPinColor('MED') }}>●</span>
           <span>Medium</span>
         </div>
         <div className="legend-item">
-          <span className="legend-icon" style={{ backgroundColor: '#3b82f6' }}>●</span>
-          <span>Low / Available</span>
+          <span className="legend-icon" style={{ backgroundColor: getPinColor('LOW') }}>●</span>
+          <span>Low</span>
         </div>
-        <div className="legend-item">
-          <span className="legend-icon" style={{ backgroundColor: '#6b7280' }}>●</span>
-          <span>Offline</span>
+
+        <div className="map-legend-title map-legend-title-spaced">Units</div>
+        <div className="legend-unit-row">
+          {/* Only the 3 agencies this app actually dispatches — the same set
+              IncidentDetailsPanel's Dispatch Forces tabs offer. Unit.type also
+              defines "HomeFront", but nothing in this app ever creates or
+              dispatches one, so it never appears on the map — showing it here
+              would just be a confusing icon nobody can match to anything. */}
+          {['POLICE', 'FIRE', 'EMS'].map((t) => {
+            const meta = getUnitTypeMeta({ type: t });
+            const label = t === 'EMS' ? 'EMS' : t.charAt(0) + t.slice(1).toLowerCase();
+            return (
+              <span key={t} className="legend-unit-chip" title={label}>
+                <span>{meta.emoji}</span>
+                <span>{label}</span>
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -1084,7 +1080,6 @@ export function MapView({
                   <option value="LOW">Low</option>
                   <option value="MED">Medium</option>
                   <option value="HIGH">High</option>
-                  <option value="CRITICAL">Critical</option>
                 </select>
 
                 <label style={labelStyle}>Details</label>
@@ -1094,6 +1089,20 @@ export function MapView({
                   onChange={(e) => setIncidentForm({ ...incidentForm, description: e.target.value })}
                   style={{ ...inputStyle, minHeight: '60px' }}
                 />
+
+                <label style={labelStyle}>Field Control Room (optional)</label>
+                <select
+                  value={incidentForm.fieldCommandId}
+                  onChange={(e) => setIncidentForm({ ...incidentForm, fieldCommandId: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="">— None —</option>
+                  {(fieldCommands || [])
+                    .filter((fc) => fc.status !== 'CLOSED')
+                    .map((fc) => (
+                      <option key={fc.id} value={fc.id}>{fc.name}</option>
+                    ))}
+                </select>
 
                 <div style={actionsRowStyle}>
                   <button type="button" onClick={handleCloseModal} style={cancelButtonStyle}>Cancel</button>

@@ -10,6 +10,7 @@ import { SCENARIOS } from '../simulations/simulationScenarios';
 import { getFieldIncident } from '../api/client';
 import { calculateRoute, getNextPositionOnRoute, getNearestRoadPoint } from '../services/routingService';
 import { useDashboardStore } from './dashboard';
+import { announceOnce } from '../utils/announce.js';
 import { ISRAEL_CITIES } from '../utils/israelGeo';
 
 const _BACKEND_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
@@ -499,16 +500,16 @@ export const useFieldIncidentStore = create((set, get) => ({
       return;
     }
 
-    // Voice notification on dispatch
-    if (!silent && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    // Voice notification on dispatch — routed through the shared announcer so
+    // it obeys the same per-event dedup + single-speaker election as every
+    // other spoken line (never a second raw speechSynthesis path).
+    if (!silent) {
       const isPlural = unitIds.length > 1;
       const friendlyUnitId = (id) => (typeof id === 'string' ? id.replace(/^routine-/, '') : id);
       const unitLabel = isPlural
         ? 'Units are en route to the incident.'
         : `Unit ${friendlyUnitId(unitIds[0])} is en route to the incident.`;
-      const utterance = new SpeechSynthesisUtterance(unitLabel);
-      utterance.lang = 'en-US';
-      window.speechSynthesis.speak(utterance);
+      announceOnce(`field-dispatch:${incidentId}:${[...unitIds].sort().join(',')}`, unitLabel);
     }
 
     // Find target incident — also check majorIncident as fallback (simulation uses 'sim-1')

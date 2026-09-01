@@ -8,7 +8,9 @@ export function FilterBar() {
   const { filters, updateFilters, setSortBy, sortBy } = useDashboardStore();
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const severityOptions = ['LOW', 'MED', 'HIGH', 'CRITICAL'];
+  // CRITICAL is not a severity this deployment uses — incidents only ever run
+  // LOW/MED/HIGH, so it's not offered as a filter.
+  const severityOptions = ['LOW', 'MED', 'HIGH'];
   // Full real Incident.Status set (backend/api/models.py). IN_PROGRESS is a
   // legacy value predating the OPEN→PENDING→EN_ROUTE→ON_SCENE→RESOLVED→CLOSED
   // pipeline — kept for old rows and the mobile-dispatch bridge, labeled to

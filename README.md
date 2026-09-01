@@ -82,15 +82,17 @@ Coordinates multiple incidents across a region, backed by real DB data (not simu
 - Severity/priority levels: LOW, MED, HIGH, CRITICAL with color coding
 - Unit dispatch with road routing (OSRM) — a dispatched unit shows as "Awaiting acceptance" until the crew taps **On My Way** in the app, then drives to the incident on the map in real time
 - The vehicle's road route, position, ETA and remaining distance come from **one shared trip object** that the mobile app reads too, so the war-room map and the phone are always in lock-step
-- A spoken announcement ("Unit … has arrived at …") fires once when a vehicle reaches its incident
+- A spoken announcement ("Unit … is on its way / has arrived at …") fires **exactly once** per event, even with several dashboard tabs open, the dev server restarting, or the SSE reconnecting: one browser tab is elected the "speaker" via a Web Lock, a per-sentence guard blocks any repeat within 12 s, and the SSE client keeps a single connection and owns its own reconnect
 - A crew whose phone disconnects mid-dispatch stays attached to the incident, greyed "Connection lost" — one click on **Cancel** removes it (no page refresh needed); it reappears live if the crew reconnects
 - Map auto-zooms to incident + dispatched units after every dispatch
 - Incident marker pulses with an amber ring after dispatch for visual confirmation
 - Details panel stays open after dispatch for continued monitoring
 - Dispatch state survives page refresh — units resume their routes automatically on reload
+- **Force-typed tasks per incident**: open an incident → **🗂 Tasks** tab → pick a force (🚓 Police / 🚒 Fire / 🚑 Medical, required) and a title. The task is logged to the incident's Event Log and pushed to the field crews. Its status (Open / On it / Done) is **read-only in the war-room** — only the field crew that owns it changes it (mobile app or the field dashboard). Every status change names which force and which mobile unit made it.
 - **Field Command Post**: right-click the map (or use the creation panel) to open a real command post, assign units/incidents to it, track casualty/evacuated counts, and close it — closing cascades to release its units and force-close its linked incidents
-  - **Missions**: from the post's panel (Missions tab) give it titled taskings, optionally assigned to one of its forces, with Open/In progress/Done status
-  - Everything the post receives (incident linked, force attached, mission given) is pushed live to that post's own Field Incident Command dashboard and logged to its Operational Timeline
+  - A post opened by escalating a single incident ("Go Live") is bound to that incident and cannot take on others — its **Assign** tab is hidden
+  - Everything the post receives (incident linked, force attached, task given) is pushed live to that post's own Field Incident Command dashboard and logged to its Operational Timeline
+  - Clicking a post in the KPI "Field Command Posts" card flies the map to its 🎖️ marker
 - Interactive Leaflet map with incident, unit, and field-command-post markers — selecting a vehicle, an incident, or a field command clears the others (one detail panel at a time)
 - Real-time updates via SSE (new incidents/units/posts appear automatically — one live connection, no duplicates)
 - KPI cards: total incidents, active, critical, available units
@@ -100,13 +102,12 @@ Coordinates multiple incidents across a region, backed by real DB data (not simu
 
 Command-level management of a single large-scale incident (earthquake, missile strike, building collapse). This view is a **training simulation** by default (seeded mock sector/task-group data) — a dispatcher can instead **declare a real Major Incident** from an actual regional Incident ("Go Live"), which switches this dashboard into live mode showing real data.
 
-- Situation overview with casualty tracking
-- Sector-based operational map with hazard levels
-- Task group hierarchy with progress tracking
-- **Central Command panel** (left column) — the incidents, forces, and missions the war-room has assigned to this post, tabbed and readable without scrolling; kept in sync live
-- Operational timeline (decision trail) — central-room assignments/missions show as distinct typed entries, and every **field report a mobile unit sends** (status + notes + photos/videos) appears here in full, listed with the incident name and who reported it — updated live, no reload
-- Critical alerts and resource tracking
-- Real-time SSE: the training-simulation stream (training mode) and live central-room updates for a real post
+- **Left column**: the field command's name + type/status badges pinned at the top, then the **Central Command** panel (the incidents / forces / tasks the war-room assigned to this post, tabbed, with its own scroll — the dominant panel), then **Casualty Figures** (see below)
+- **Casualty Figures panel** — live totals of injured / trapped / dead / treated / evacuated, summed across every incident this post coordinates, from the mobile crews' figure reports; a per-incident breakdown below. Updates live via SSE, no reload
+- **Task board** (center) — every force-typed task for the post's incidents, grouped Police / Fire / Medical, each with its live status; editable here (the field war-room) and from the crew's mobile app
+- **Forces on the ground** (right) — every unit committed to the post's incidents, grouped by agency, with live phase (Dispatched → En route → On scene → Task done → Connection lost)
+- Operational timeline (decision trail) — central-room assignments/tasks show as distinct typed entries (naming the force + mobile unit on a status change), and every **field report a mobile unit sends** (status + notes + photos/videos) appears here in full, listed with the incident name and who reported it — updated live, no reload
+- Real-time SSE: the training-simulation stream (training mode) and live central-room updates for a real post (incident links, force attachments, tasks, unit connect/disconnect, casualty figures)
 - **Go Live**: declare a Major Incident from a real Incident, draw a danger-zone perimeter on the map, and create real sectors/task groups tied to it
 
 ---
@@ -121,18 +122,24 @@ The mobile app runs via Expo — scan the QR code with Expo Go on your phone, or
 |---|---|---|
 | Login | App start | Authenticates with the backend; JWT includes unit_type |
 | Unit Select | After login | Two sections — **units with an active dispatch** (shows the incident, "RESUME") and **available units** ("CLAIM"); pick one to claim it and start GPS heartbeats |
-| Tasks | After unit select | Lists tasks for the selected unit; auto-refreshes every 8 s. Each task: **🚗 ON MY WAY** (accept), then **✓ ARRIVED ON SCENE**, above the **ROUTE** and **FILE REPORT** buttons |
-| Report | Tap **FILE REPORT** on a task | Status (En Route / In Progress / Done) + notes + photos/videos; a **Previously sent** list below the form shows this task's past reports. Saves offline if no connection |
-| Incident Map | **ROUTE** on a task, or Menu (⋮) → Incident Map | After accepting a dispatch: the OSRM road route to the incident, a moving vehicle marker, live distance + ETA, and the camera follows the vehicle |
+| Incidents | After unit select | Lists the incidents this unit is dispatched to (was "My Tasks"); auto-refreshes every 5 s. Each card: **🚗 ON MY WAY** (accept), then **✓ ARRIVED ON SCENE**, plus **🗺 ROUTE**, **🗂 MISSIONS**, **🔢 FIGURES**, and **FILE REPORT** |
+| Missions | **🗂 MISSIONS** on an incident (shown when it has a field command) | The force-typed tasks the war-room assigned to your force for that incident, each with **ON IT** / **FINISHED**; polls every 10 s while open |
+| Figures | **🔢 FIGURES** on an incident | Casualty headcount: stepper (±) inputs for injured / trapped / dead / treated / evacuated, prefilled from your last report. **SEND FIGURES** replaces your previous numbers and rolls them into the field war-room's totals |
+| Report | Tap **FILE REPORT** on an incident | Status (En Route / In Progress / Done) + notes + photos/videos; a **Previously sent** list below the form shows this task's past reports. Saves offline if no connection |
+| Incident Map | **ROUTE** on an incident, or Menu (⋮) → Incident Map | After accepting a dispatch: the OSRM road route to the incident, a moving vehicle marker, live distance + ETA, and the camera re-zooms to the route + vehicle every time you open the map |
 | Sync | Menu (⋮) → Sync | Shows offline reports and syncs when back online |
 
 ### Navigation
 
 - **ON MY WAY** → accepts the dispatch (war-room starts drawing the route)
-- **ROUTE** button → opens the Incident Map with the live moving route for that task
-- **FILE REPORT** button → opens the Report screen for that task
+- **ROUTE** → opens the Incident Map with the live moving route for that task
+- **MISSIONS** → your force's assigned tasks for that incident (mark ON IT / FINISHED)
+- **FIGURES** → submit the casualty headcount for that incident
+- **FILE REPORT** → opens the Report screen for that task
 - Menu (⋮) → Sync / Incident Map / Change Unit / Disconnect
 - Back arrow (native stack) → returns to the previous screen
+
+If a mobile disconnects mid-dispatch and reconnects, it resumes from its **last position before the disconnect** (not the phone's real GPS): if it was still driving, the "On My Way" button reappears; if it had already arrived, it stays parked at the incident.
 
 ### Offline Support
 
@@ -164,8 +171,9 @@ curl -X POST http://localhost:8000/api/token/ \
 | GET | `/api/tasks/<id>/trip/` | No | Shared en-route trip (OSRM path + accepted_at + speedup) — war-room + mobile |
 | GET | `/api/tasks/<id>/reports/` | No | This task's field-report history (with media) |
 | GET/POST | `/api/incidents/` | Partial* | List/create real incidents |
-| POST | `/api/incidents/<id>/assign-unit/` | Partial* | Assign a unit (creates a Task on the real incident) |
+| POST | `/api/incidents/<id>/assign-unit/` | Partial* | Assign a unit (reuses a live Task or creates a fresh PENDING one — a stale CANCELLED/DONE task is never handed back) |
 | POST | `/api/incidents/<id>/unassign-unit/` | Partial* | Cancel a unit's non-terminal Task (war-room "Cancel") |
+| GET/POST | `/api/incidents/<id>/figures/` | Yes | GET every crew's casualty headcount; POST upserts the caller's `{injured,dead,trapped,treated,evacuated}` |
 | GET/POST | `/api/units/` | Partial* | List/create real units (`?claimable=true`, `?type=`, `?with_assignment=true`) |
 | POST | `/api/units/claim/` | Yes | Claim a unit, mark it online, set GPS |
 | POST | `/api/units/disconnect/` | Yes | Release the caller's claimed unit |
@@ -174,8 +182,8 @@ curl -X POST http://localhost:8000/api/token/ \
 | GET | `/api/updates/stream/` | No | Live SSE stream (real writes only) |
 | GET/POST | `/api/field-commands/` | Partial* | List/create Field Command Posts |
 | POST | `/api/field-commands/<id>/assign-unit/` \| `/assign-incident/` | Partial* | Attach a force / link an incident (logged to the post's timeline) |
-| GET/POST | `/api/field-commands/<id>/missions/` | Partial* | List / create missions for a post |
-| PATCH | `/api/field-commands/<id>/missions/<mid>/` | Partial* | Update a mission's status / assignee / text |
+| GET/POST | `/api/field-commands/<id>/missions/` | Partial* | List (`?incident=`, `?force_type=`) / create force-typed tasks (`incident_id` + `force_type` required from the war-room) |
+| PATCH | `/api/field-commands/<id>/missions/<mid>/` | Partial* | Update a task's status / assignee / text (status change logs the force + mobile unit) |
 | POST | `/api/field-commands/<id>/close/` | Partial* | Close a post (cascades to units/incidents) |
 | GET | `/api/field/updates/stream/` | No | Field dashboard SSE stream (sim events + relayed central-room field-command updates) |
 | POST | `/api/major-incidents/go-live/` | Partial* | Declare a real MajorIncident from an Incident |
@@ -203,7 +211,8 @@ curl -X POST http://localhost:8000/api/token/ \
 backend/
     api/
         models.py           # User, Incident, Unit, Task, FieldCommand, FieldCommandNote,
-                             # MajorIncident, Sector, TaskGroup, Perimeter, IncidentEvent, ReportMedia
+                             # FieldCommandMission (force_type + incident), MajorIncident, Sector,
+                             # TaskGroup, Perimeter, IncidentEvent, ReportMedia, IncidentFigureReport
         views.py            # Real ModelViewSets + Field Command/Go-Live endpoints + SSE + training-sim endpoints
         serializers.py
         permissions.py      # Role-based: admin, dispatcher, fieldunit (see known gap in ARCHITECTURE.md)
@@ -230,19 +239,19 @@ frontend-web/
         components/
             KPICards.jsx
             IncidentList.jsx
-            IncidentDetailsPanel.jsx    # Built on SidePanel
-            FieldCommandDetailsPanel.jsx  # Built on SidePanel; tabs Overview/Assign/Missions/Close
+            IncidentDetailsPanel.jsx    # Built on SidePanel; tabs Dispatch / Tasks / Events / Major Incident / Settings
+            FieldCommandDetailsPanel.jsx  # Built on SidePanel; tabs Overview / Assign / Close (Assign hidden for event-scoped posts)
             FieldCommandSummaryView.jsx   # Shared read-only post summary (war-room + field dash)
-            FieldCommandMissionsTab.jsx   # War-room "Missions" tab (create / status / assignee)
             SidePanel.jsx               # Shared right-side panel shell
             MapView.jsx
             EventFeed.jsx
             FilterBar.jsx
             field-incident/
-                SituationOverview.jsx
-                FieldCommandAssignmentsPanel.jsx  # "Central Command" tabbed panel (left column)
-                SectorMap.jsx
-                TaskGroupPanel.jsx
+                SituationOverview.jsx           # Just the field name + type/status badges (top of the left column)
+                CasualtyFiguresPanel.jsx        # Live injured/trapped/dead/treated/evacuated totals + per-incident breakdown
+                FieldCommandAssignmentsPanel.jsx  # "Central Command" tabbed panel (grows to fill the left column)
+                IncidentTaskBoard.jsx           # Force-grouped task board (replaced SectorMap)
+                FieldForcesPanel.jsx            # Units on the ground grouped by agency + live phase (replaced TaskGroupPanel)
                 OperationalTimeline.jsx
                 PerimeterMapPicker.jsx  # Leaflet click-to-draw perimeter tool
         store/
@@ -251,27 +260,30 @@ frontend-web/
         api/
             client.js           # Axios client (all endpoints)
         services/
-            realtime.js         # SSE client
+            realtime.js         # SSE client — one live EventSource per instance, owns its own reconnect
         utils/
             time.js             # 24-hour timestamp formatters (en-GB locale, hour12: false)
             units.js            # Distance/nearest-available-unit helpers
             agencyMeta.js       # Shared POLICE/FIRE/EMS icon + colour palette
+            announce.js         # One-shot war-room announcements: window-hub dedup + per-sentence guard + Web-Lock speaker election
     package.json
     vite.config.js
 
 mobile-app/
-    App.js                  # Navigation container, auth state, JWT token
+    App.js                  # Navigation container, auth state, JWT token; Stack: Tasks/Missions/Figures/Report/Sync/Map
     context/
         UserContext.js       # { user: {id, username, role, unit_type} }
     screens/
         LoginScreen.js       # JWT login form
-        UnitSelectScreen.js  # Unit selection — "with a dispatch" / "available" split + claim
-        TasksScreen.js       # Task list (8 s polling); On My Way / Arrived buttons
+        UnitSelectScreen.js  # Unit selection — "with a dispatch" / "available" split + claim (sends is_mock_location)
+        TasksScreen.js       # "INCIDENTS" list (5 s polling); On My Way / Arrived; ROUTE / MISSIONS / FIGURES / FILE REPORT
+        MissionsScreen.js    # Force-matched tasks for an incident — ON IT / FINISHED (10 s polling)
+        FiguresScreen.js     # Casualty headcount stepper form per incident (injured/trapped/dead/treated/evacuated)
         ReportScreen.js      # Status + notes + media; "Previously sent" report history
         SyncScreen.js        # Offline report sync
-        IncidentMapScreen.js # Live moving route to the assigned incident (shared trip + OSRM)
+        IncidentMapScreen.js # Live moving route to the assigned incident (shared trip + OSRM); re-zooms on every focus; 3 severity levels
     utils/
-        heartbeat.js         # 25s live-location heartbeat loop
+        heartbeat.js         # 25s live-location heartbeat loop (sends is_mock_location)
         location.js          # GPS permission handling + mock fallback
         routing.js           # OSRM route fetch + straight-line fallback
         trip.js              # Reads /api/tasks/<id>/trip/ + interpolates the vehicle (matches web)
@@ -362,6 +374,10 @@ Make sure you selected the exact unit that was dispatched. Example: select "Unit
 ### No route / vehicle not moving on the app's Incident Map
 
 The moving route only appears **after** the crew taps **ON MY WAY** for that task (the button is on the task card, above ROUTE / FILE REPORT). Before that the map just shows the incident pin. If it still doesn't move after accepting, check that the backend is reachable — the vehicle position comes from `GET /api/tasks/<id>/trip/`.
+
+### Re-dispatched a unit but the mobile shows nothing
+
+Fixed. `assign-unit` used to hand back any existing Task for that unit+incident pair, including a `CANCELLED` one left by a previous dispatch/unassign — the mobile app filters cancelled tasks out, so the crew saw nothing. It now only reuses a live task and otherwise creates a fresh `PENDING` one. Old cancelled tasks in your DB are harmless.
 
 ### Same incident shows twice in the war-room list
 

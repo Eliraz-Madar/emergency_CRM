@@ -14,6 +14,8 @@ import { startHeartbeatLoop, disconnectUnit } from "./utils/heartbeat";
 import LoginScreen        from "./screens/LoginScreen";
 import UnitSelectScreen   from "./screens/UnitSelectScreen";
 import TasksScreen        from "./screens/TasksScreen";
+import MissionsScreen     from "./screens/MissionsScreen";
+import FiguresScreen      from "./screens/FiguresScreen";
 import ReportScreen       from "./screens/ReportScreen";
 import SyncScreen         from "./screens/SyncScreen";
 import IncidentMapScreen  from "./screens/IncidentMapScreen";
@@ -150,6 +152,36 @@ function AppContent() {
                   setSelectedTask(task);
                   props.navigation.navigate("Map");
                 }}
+                onViewMissions={(task) => {
+                  setSelectedTask(task);
+                  props.navigation.navigate("Missions");
+                }}
+                onViewFigures={(task) => {
+                  setSelectedTask(task);
+                  props.navigation.navigate("Figures");
+                }}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="Missions" options={{ title: "Missions" }}>
+            {(props) => (
+              <MissionsScreen
+                {...props}
+                token={token}
+                selectedUnit={selectedUnit}
+                selectedTask={selectedTask}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="Figures" options={{ title: "Casualty Figures" }}>
+            {(props) => (
+              <FiguresScreen
+                {...props}
+                token={token}
+                selectedUnit={selectedUnit}
+                selectedTask={selectedTask}
               />
             )}
           </Stack.Screen>
@@ -161,7 +193,6 @@ function AppContent() {
                 selectedTask={selectedTask}
                 token={token}
                 online={online}
-                onDone={() => props.navigation.navigate("Tasks")}
               />
             )}
           </Stack.Screen>

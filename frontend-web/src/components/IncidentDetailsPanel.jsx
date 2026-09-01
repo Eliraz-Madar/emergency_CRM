@@ -6,17 +6,28 @@ import { Shield, Flame, Ambulance, MapPin, AlertTriangle, ChevronRight } from 'l
 import { useDashboardStore } from '../store/dashboard.js';
 import { nearestCityName } from '../utils/israelGeo.js';
 import { calculateDistanceKm } from '../utils/units.js';
+import { getUnitTypeMeta } from '../utils/agencyMeta.js';
 import {
   updateIncidentStatus,
-  goLiveIncident,
-  getMajorIncidentSectors,
-  createMajorIncidentSector,
-  getMajorIncidentTaskGroups,
-  createMajorIncidentTaskGroup,
-  dispatchUnitsToIncident,
   assignUnitToIncident,
   unassignUnitFromIncident,
+  assignIncidentToField,
+  unassignIncidentFromField,
+  createFieldMission,
 } from '../api/client.js';
+
+// The three agencies a task can be assigned to. force_type is POLICE/FIRE/
+// MEDICAL; agencyMeta keys on the raw Unit.type where "medical" is "EMS", so
+// map it through for the icon/color lookup.
+const FORCE_OPTIONS = ['POLICE', 'FIRE', 'MEDICAL'];
+const forceLabel = (f) => (f === 'MEDICAL' ? 'Medical' : f.charAt(0) + f.slice(1).toLowerCase());
+const forceMeta = (f) => getUnitTypeMeta({ type: f === 'MEDICAL' ? 'EMS' : f });
+
+const TASK_STATUS_META = {
+  OPEN: { label: 'Open', color: '#f59e0b' },
+  IN_PROGRESS: { label: 'On it', color: '#3b82f6' },
+  DONE: { label: 'Done', color: '#10b981' },
+};
 
 // Same inline-form look as MapView.jsx's operator action menu (labelStyle/
 // inputStyle/actionsRowStyle/*ButtonStyle) — duplicated here rather than
@@ -80,7 +91,12 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
     setZoomToIncident,
     setFlashingIncident,
     clearFlashingIncident,
+    fieldCommands,
+    upsertFieldCommand,
   } = useDashboardStore();
+
+  const [fcActionBusy, setFcActionBusy] = useState(false);
+  const [relinkFieldId, setRelinkFieldId] = useState('');
 
   // Regional dashboard: the selected incident always comes from the real,
   // DB-backed incidents list — no field-incident/simulation store involved.
@@ -97,11 +113,18 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState('');
 
+  // ── Tasks tab (force-typed taskings on this incident) ──
+  const [taskForm, setTaskForm] = useState({ title: '', force_type: '' });
+  const [addingTask, setAddingTask] = useState(false);
+  const [taskError, setTaskError] = useState('');
+
   // Reset to dispatch tab whenever a different incident is opened
   useEffect(() => {
     setActiveTab('dispatch');
     setCloseReason('');
     setCloseError('');
+    setTaskForm({ title: '', force_type: '' });
+    setTaskError('');
   }, [incident?.id]);
 
   // Escape closes the panel — same dismiss path as the X button
@@ -157,49 +180,13 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   const [goLiveType, setGoLiveType] = useState('EARTHQUAKE');
   const [goingLive, setGoingLive] = useState(false);
   const [goLiveError, setGoLiveError] = useState('');
-  const [sectors, setSectors] = useState([]);
-  const [sectorForm, setSectorForm] = useState({ name: '', hazardLevel: 'MEDIUM' });
-  const [addingSector, setAddingSector] = useState(false);
-  const [sectorError, setSectorError] = useState('');
-  const [taskGroups, setTaskGroups] = useState([]);
-  const [taskGroupForm, setTaskGroupForm] = useState({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
-  const [addingTaskGroup, setAddingTaskGroup] = useState(false);
-  const [taskGroupError, setTaskGroupError] = useState('');
-  const [majorDispatchType, setMajorDispatchType] = useState('POLICE');
-  const [majorDispatchUnitId, setMajorDispatchUnitId] = useState('');
-  const [majorDispatching, setMajorDispatching] = useState(false);
-  const [majorDispatchError, setMajorDispatchError] = useState('');
 
   // Reset major-incident form state whenever a different incident is opened
   useEffect(() => {
     setLiveMajorIncident(null);
     setGoLiveType('EARTHQUAKE');
     setGoLiveError('');
-    setSectorForm({ name: '', hazardLevel: 'MEDIUM' });
-    setSectorError('');
-    setTaskGroupForm({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
-    setTaskGroupError('');
-    setMajorDispatchType('POLICE');
-    setMajorDispatchUnitId('');
-    setMajorDispatchError('');
   }, [incident?.id]);
-
-  // Load existing sectors/task groups once this incident is live.
-  useEffect(() => {
-    if (!liveMajorIncidentId) {
-      setSectors([]);
-      setTaskGroups([]);
-      return;
-    }
-    let cancelled = false;
-    getMajorIncidentSectors(liveMajorIncidentId)
-      .then((data) => { if (!cancelled) setSectors(Array.isArray(data) ? data : []); })
-      .catch(() => {});
-    getMajorIncidentTaskGroups(liveMajorIncidentId)
-      .then((data) => { if (!cancelled) setTaskGroups(Array.isArray(data) ? data : []); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [liveMajorIncidentId]);
 
   // Pulls the first validation message out of a DRF error response,
   // regardless of which field it landed on (detail / incident_id /
@@ -214,88 +201,64 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
     return fallback;
   };
 
-  const handleGoLive = async () => {
+  const handleGoLive = () => {
     if (!incident?.id) return;
-    setGoingLive(true);
     setGoLiveError('');
-    try {
-      const created = await goLiveIncident(incident.id, goLiveType);
-      setLiveMajorIncident(created);
-      // Bridge straight into the Create Field Command modal — mirrors
-      // MapView.jsx's onMapCreateFieldCommand pattern (a plain callback
-      // prop) rather than a new store mechanism, since Dashboard.jsx's
-      // create-field modal state is local component state, not the store.
-      onGoLiveCreateFieldCommand?.({
-        lat: created.location_lat,
-        lng: created.location_lng,
-        majorIncidentId: created.id,
-        incidentType: created.incident_type,
-        title: created.title,
-      });
-    } catch (error) {
-      console.error('Failed to go live:', error);
-      // Covers the double-go-live case: the backend rejects a second call
-      // on the same Incident with a 400 (incident_id: "... already gone
-      // live as MajorIncident <id>."), surfaced here instead of retried.
-      setGoLiveError(extractApiError(error, 'Failed to declare major incident.'));
-    } finally {
-      setGoingLive(false);
-    }
-  };
-
-  const handleAddSector = async (e) => {
-    e.preventDefault();
-    if (!liveMajorIncidentId || !sectorForm.name.trim()) return;
-    setAddingSector(true);
-    setSectorError('');
-    try {
-      const created = await createMajorIncidentSector(liveMajorIncidentId, {
-        name: sectorForm.name.trim(),
-        hazardLevel: sectorForm.hazardLevel,
-      });
-      setSectors((prev) => [...prev, created]);
-      setSectorForm({ name: '', hazardLevel: 'MEDIUM' });
-    } catch (error) {
-      console.error('Failed to create sector:', error);
-      setSectorError(extractApiError(error, 'Failed to create sector.'));
-    } finally {
-      setAddingSector(false);
-    }
-  };
-
-  const toggleTaskGroupSector = (sectorId) => {
-    setTaskGroupForm((prev) => ({
-      ...prev,
-      sectorIds: prev.sectorIds.includes(sectorId)
-        ? prev.sectorIds.filter((id) => id !== sectorId)
-        : [...prev.sectorIds, sectorId],
-    }));
-  };
-
-  const handleAddTaskGroup = async (e) => {
-    e.preventDefault();
-    if (!liveMajorIncidentId || !taskGroupForm.title.trim()) return;
-    setAddingTaskGroup(true);
-    setTaskGroupError('');
-    try {
-      const created = await createMajorIncidentTaskGroup(liveMajorIncidentId, {
-        title: taskGroupForm.title.trim(),
-        category: taskGroupForm.category,
-        sectorIds: taskGroupForm.sectorIds,
-      });
-      setTaskGroups((prev) => [...prev, created]);
-      setTaskGroupForm({ title: '', category: 'SEARCH_RESCUE', sectorIds: [] });
-    } catch (error) {
-      console.error('Failed to create task group:', error);
-      setTaskGroupError(extractApiError(error, 'Failed to create task group.'));
-    } finally {
-      setAddingTaskGroup(false);
-    }
+    // Nothing is created yet. "Go Live" only opens the Create Field Command
+    // modal — the MajorIncident is declared by Dashboard.handleCreateFieldSubmit
+    // only if the operator actually clicks Create there. Cancelling leaves the
+    // incident exactly as it was (no orphaned major incident / field HQ).
+    onGoLiveCreateFieldCommand?.({
+      lat: incident.location_lat,
+      lng: incident.location_lng,
+      incidentId: incident.id,
+      goLiveType,
+      incidentType: goLiveType,
+      title: incident.title,
+    });
   };
 
   const handlePriorityChange = (newPriority) => {
     if (incident && incident.id) {
       updateIncident(incident.id, { priority: newPriority });
+    }
+  };
+
+  // ── Tasks: force-typed taskings that belong to this incident, carried on
+  // the linked Field Command post. Every mobile crew of the chosen force
+  // dispatched to this incident sees the task and can advance its status.
+  const fieldKey = incident?.field_command_key || incident?.field_command || null;
+  const incidentTasks = useMemo(() => {
+    if (!incident?.id || !fieldKey) return [];
+    const fc = (Array.isArray(fieldCommands) ? fieldCommands : [])
+      .find((f) => String(f.id) === String(fieldKey));
+    return (fc?.missions || []).filter((m) => m.incident === incident.id);
+  }, [incident?.id, fieldKey, fieldCommands]);
+
+  const tasksByForce = useMemo(() => {
+    const grouped = { POLICE: [], FIRE: [], MEDICAL: [], OTHER: [] };
+    incidentTasks.forEach((t) => (grouped[t.force_type] || grouped.OTHER).push(t));
+    return grouped;
+  }, [incidentTasks]);
+
+  const handleAddTask = async (e) => {
+    e.preventDefault();
+    if (!incident?.id || !fieldKey || !taskForm.title.trim() || !taskForm.force_type) return;
+    setAddingTask(true);
+    setTaskError('');
+    try {
+      const updated = await createFieldMission(fieldKey, {
+        title: taskForm.title.trim(),
+        force_type: taskForm.force_type,
+        incident_id: incident.id,
+      });
+      upsertFieldCommand(updated);
+      setTaskForm({ title: '', force_type: '' });
+    } catch (error) {
+      console.error('Failed to create task:', error);
+      setTaskError(extractApiError(error, 'Failed to create task.'));
+    } finally {
+      setAddingTask(false);
     }
   };
 
@@ -319,11 +282,6 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
   }, [onlineUnits, incidentLat, incidentLng]);
 
   const filteredUnits = availableUnits.filter((u) => u.type === selectedType);
-  const majorFilteredUnits = useMemo(
-    () => availableUnits.filter((u) => u.type === majorDispatchType),
-    [availableUnits, majorDispatchType],
-  );
-
   const toggleUnit = (id) => {
     setSelectedUnitIds(
       selectedUnitIds.includes(id)
@@ -334,26 +292,6 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
 
   const handleClose = () => {
     setSelectedIncident && setSelectedIncident(null);
-  };
-
-  const handleMajorDispatchUnit = async () => {
-    if (!incident?.id || !majorDispatchUnitId) return;
-    setMajorDispatching(true);
-    setMajorDispatchError('');
-    try {
-      await dispatchUnitsToIncident(incident.id, [majorDispatchUnitId], { mode: 'incident' });
-      const unit = (onlineUnits || []).find((u) => String(u.id) === String(majorDispatchUnitId));
-      if (unit) {
-        upsertOnlineUnit({ id: unit.id, assignedTo: incident.id, status: 'ASSIGNED' });
-      }
-      updateIncident(incident.id, { status: 'IN_PROGRESS' });
-      setMajorDispatchUnitId('');
-    } catch (error) {
-      console.error('Failed to dispatch unit from Major Incident tab:', error);
-      setMajorDispatchError(error?.message || 'Failed to dispatch unit.');
-    } finally {
-      setMajorDispatching(false);
-    }
   };
 
   // Dispatches real, currently-online units straight onto the real Incident
@@ -422,6 +360,45 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       });
   };
 
+  const handleUnlinkFieldCommand = async () => {
+    const key = incident?.field_command_key;
+    if (!key || !incident?.id) return;
+    setFcActionBusy(true);
+    try {
+      await unassignIncidentFromField(key, incident.id);
+      updateIncident(incident.id, {
+        field_command: null, field_command_key: null, field_command_name: null,
+      });
+    } catch (error) {
+      console.error('Failed to unlink field command:', error);
+    } finally {
+      setFcActionBusy(false);
+    }
+  };
+
+  const handleRelinkFieldCommand = async () => {
+    if (!relinkFieldId || !incident?.id) return;
+    setFcActionBusy(true);
+    try {
+      const currentKey = incident.field_command_key;
+      if (currentKey && currentKey !== relinkFieldId) {
+        await unassignIncidentFromField(currentKey, incident.id);
+      }
+      await assignIncidentToField(relinkFieldId, incident.id);
+      const fc = (fieldCommands || []).find((f) => f.id === relinkFieldId);
+      updateIncident(incident.id, {
+        field_command: relinkFieldId,
+        field_command_key: relinkFieldId,
+        field_command_name: fc?.name || null,
+      });
+      setRelinkFieldId('');
+    } catch (error) {
+      console.error('Failed to reassign field command:', error);
+    } finally {
+      setFcActionBusy(false);
+    }
+  };
+
   const renderUnitCard = (unit) => {
     const meta = TYPE_META[unit.type] || TYPE_META.POLICE;
     const isSelected = selectedUnitIds.includes(unit.id);
@@ -475,18 +452,34 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       .map((u) => ({ id: u.id, name: u.name, type: u.type, is_online: true }));
     return [...serverUnits, ...optimistic].map((su) => {
       const u = unitById.get(su.id) || {};
+      // Server-derived phase from the Task row: crew-confirmed arrival wins,
+      // then "accepted / driving", then just "dispatched". Used as the
+      // fallback when client-only movement state is gone (e.g. the crew
+      // logged out and back in) so the panel doesn't revert an on-scene unit
+      // to "ASSIGNED".
+      const serverPhase = su.arrived
+        ? 'ON_SCENE'
+        : (su.task_status === 'IN_PROGRESS' ? 'EN_ROUTE' : 'ASSIGNED');
+      // Online/offline must track the LIVE unit store (fed by unit_claimed /
+      // unit_heartbeat / unit_disconnected SSE), not the incident's server
+      // snapshot — otherwise a crew that reconnects still shows "Connection
+      // lost" until the page is refreshed. Only fall back to the server flag
+      // when the store has never seen this unit.
+      const liveKnown = unitById.has(su.id);
+      const isOnline = liveKnown ? (u.is_online !== false) : (su.is_online !== false);
       return {
         id: su.id,
         name: su.name || u.name || `Unit ${su.id}`,
         type: normalizeUnitType(su.type || u.type),
-        // Server confirms the assignment but the phase (ASSIGNED / EN_ROUTE /
-        // ON_SCENE) is client-side — default to ASSIGNED, not EN_ROUTE, so a
-        // freshly dispatched unit doesn't read as "on the way" before the crew
-        // accepts.
-        status: u.status || 'ASSIGNED',
+        // Client-side movement state (from the trip animation) is more
+        // granular while it exists; otherwise fall back to the server phase.
+        status: u.status || serverPhase,
+        // Trip animation reached the pin but the crew hasn't confirmed
+        // arrival yet — shown as "Arriving" rather than "On scene".
+        atDestination: !!u.atDestination && !su.arrived,
         etaMin: u.etaMin,
         distanceKm: u.distanceKm,
-        isOnline: su.is_online !== false,
+        isOnline,
         isReal: true,
       };
     });
@@ -537,6 +530,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       <div style={{ display: 'flex', borderBottom: '1px solid #1e293b', flexShrink: 0 }}>
         {[
           { id: 'dispatch', label: '🚒 Dispatch' },
+          { id: 'tasks',    label: '🗂 Tasks' },
           { id: 'events',   label: '📋 Events'  },
           { id: 'major',    label: '🌐 Major Incident' },
           { id: 'settings', label: '⚙ Settings' },
@@ -580,6 +574,124 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
         </div>
       )}
 
+      {/* ── Tasks tab: force-typed taskings for this incident ── */}
+      {activeTab === 'tasks' && (
+        <div>
+          {!fieldKey ? (
+            <div style={{
+              fontSize: '0.82rem', color: '#94a3b8', background: '#0f172a',
+              border: '1px dashed #1f2937', borderRadius: '6px', padding: '12px', lineHeight: 1.5,
+            }}>
+              Link this incident to a Field Command post (on the <strong>Dispatch</strong> tab)
+              to assign tasks. Tasks belong to the post so its field crews can see and action them.
+            </div>
+          ) : (
+            <>
+              {/* New task — force is REQUIRED */}
+              <form onSubmit={handleAddTask} style={{ marginBottom: '1.25rem' }}>
+                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">New task</div>
+                <label style={labelStyle}>Assign to</label>
+                <div style={{ display: 'flex', gap: '6px', margin: '6px 0' }}>
+                  {FORCE_OPTIONS.map((f) => {
+                    const meta = forceMeta(f);
+                    const active = taskForm.force_type === f;
+                    return (
+                      <button
+                        type="button"
+                        key={f}
+                        onClick={() => setTaskForm((s) => ({ ...s, force_type: f }))}
+                        style={{
+                          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px',
+                          border: `1px solid ${active ? meta.color : '#374151'}`,
+                          background: active ? `${meta.color}22` : 'transparent',
+                          color: active ? meta.color : '#9ca3af',
+                          borderRadius: '8px', padding: '7px 4px', fontSize: '0.78rem',
+                          fontWeight: 600, cursor: 'pointer',
+                        }}
+                      >
+                        <span style={{ fontSize: '1rem' }}>{meta.emoji}</span>
+                        {forceLabel(f)}
+                      </button>
+                    );
+                  })}
+                </div>
+                <label style={labelStyle}>Task</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Secure the north perimeter"
+                  value={taskForm.title}
+                  onChange={(e) => setTaskForm((s) => ({ ...s, title: e.target.value }))}
+                  style={inputStyle}
+                />
+                {taskError && (
+                  <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{taskError}</div>
+                )}
+                <button
+                  type="submit"
+                  disabled={addingTask || !taskForm.title.trim() || !taskForm.force_type}
+                  style={{
+                    ...submitButtonStyle, background: '#2563eb',
+                    opacity: (addingTask || !taskForm.title.trim() || !taskForm.force_type) ? 0.6 : 1,
+                    cursor: (addingTask || !taskForm.title.trim() || !taskForm.force_type) ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {addingTask ? 'Adding…' : 'Add Task'}
+                </button>
+              </form>
+
+              {/* Existing tasks, grouped by force */}
+              {incidentTasks.length === 0 ? (
+                <div style={{ fontSize: '0.8rem', color: '#64748b' }}>No tasks for this incident yet.</div>
+              ) : (
+                FORCE_OPTIONS.filter((f) => tasksByForce[f]?.length).map((f) => {
+                  const meta = forceMeta(f);
+                  return (
+                    <div key={f} style={{ marginBottom: '14px' }}>
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px',
+                        fontSize: '0.78rem', fontWeight: 700, color: meta.color,
+                      }}>
+                        <span style={{ fontSize: '1rem' }}>{meta.emoji}</span>{forceLabel(f)}
+                      </div>
+                      {tasksByForce[f].map((t) => {
+                        const sm = TASK_STATUS_META[t.status] || TASK_STATUS_META.OPEN;
+                        return (
+                          <div key={t.id} style={{
+                            display: 'flex', alignItems: 'center', gap: '8px',
+                            background: '#0f172a', border: '1px solid #1f2937',
+                            borderRadius: '6px', padding: '8px 10px', marginBottom: '6px',
+                          }}>
+                            <span style={{
+                              flex: 1, fontSize: '0.82rem', color: '#e2e8f0',
+                              textDecoration: t.status === 'DONE' ? 'line-through' : 'none',
+                              opacity: t.status === 'DONE' ? 0.6 : 1,
+                            }}>{t.title}</span>
+                            {/* Read-only here — a task's status is driven by the
+                                field crew that owns it (mobile app / field
+                                dashboard), never from the command centre. */}
+                            <span
+                              title="Status is set by the field crew"
+                              style={{
+                                background: `${sm.color}1f`, color: sm.color,
+                                border: `1px solid ${sm.color}`,
+                                borderRadius: '999px', fontSize: '0.72rem', fontWeight: 700,
+                                padding: '3px 9px', whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {sm.label}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {/* ── Major Incident tab ── */}
       {activeTab === 'major' && (
         <div>
@@ -587,7 +699,7 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
             <div style={{ marginBottom: '1.25rem', flexDirection: 'column',  }}>
               <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Major Incident</div>
               <p style={{ fontSize: '0.82rem', color: '#9ca3af', margin: '0 0 4px 0' }}>
-                Declare this a Major Incident to unlock sector and task-group coordination.
+                Declare this a Major Incident to open a dedicated Field War-Room for it.
               </p>
               <label style={labelStyle}>Incident Type</label>
               <select
@@ -623,289 +735,41 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
             <>
               <div style={{ marginBottom: '1.25rem' }}>
                 <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">
-                  Major Incident — {liveMajorIncident?.status ?? incident.major_incident.status}
+                  Field Incident
                 </div>
-                {liveMajorIncident ? (
-                  <div style={{
-                    background: '#0f172a', border: '1px solid #1f2937', borderRadius: '6px',
-                    padding: '10px', fontSize: '0.8rem', color: '#cbd5e1', lineHeight: 1.6,
-                  }}>
-                    <div style={{ fontWeight: 700, color: '#f87171', marginBottom: '4px' }}>{liveMajorIncident.title}</div>
-                    <div>Type: {liveMajorIncident.incident_type}</div>
-                    <div>Est. Casualties: {liveMajorIncident.estimated_casualties ?? 0}</div>
-                    <div>Confirmed Deaths: {liveMajorIncident.confirmed_deaths ?? 0}</div>
-                    <div>Displaced Persons: {liveMajorIncident.displaced_persons ?? 0}</div>
-                    <div>Affected Radius: {liveMajorIncident.radius_meters ?? 0} m</div>
-                  </div>
-                ) : (
-                  <div style={{
-                    background: '#0f172a', border: '1px solid #1f2937', borderRadius: '6px',
-                    padding: '10px', fontSize: '0.8rem', color: '#9ca3af', fontStyle: 'italic',
-                  }}>
-                    Live major incident connected from regional context.
-                  </div>
-                )}
-              </div>
-
-              <div style={{ marginBottom: '1.25rem' }}>
                 <div style={{
                   background: '#0f172a', border: '1px solid #334155', borderRadius: '8px',
-                  padding: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px',
+                  padding: '12px', display: 'flex', justifyContent: 'space-between',
+                  alignItems: 'center', gap: '10px',
                 }}>
-                  <div>
+                  <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                       Active Command
                     </div>
-                    <div style={{ fontSize: '0.9rem', color: '#e2e8f0', fontWeight: 700 }}>
-                      HQ Ref #{liveMajorIncidentId}
+                    <div style={{
+                      fontSize: '0.9rem', color: '#e2e8f0', fontWeight: 700,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>
+                      {incident.title} - Field Incident
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      {incident.major_incident?.status || 'ACTIVE'}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => navigate(`/field-incident?id=${liveMajorIncidentId}`)}
-                    style={{
-                      border: '1px solid #3b82f6',
-                      background: 'rgba(59,130,246,0.12)',
-                      color: '#60a5fa',
-                      borderRadius: '6px',
-                      padding: '6px 10px',
-                      fontSize: '0.8rem',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    Open Field HQ ↗
-                  </button>
+                  {incident.major_incident?.field_key && (
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/field-incident?fieldId=${incident.major_incident.field_key}`)}
+                      style={{
+                        border: '1px solid #3b82f6', background: 'rgba(59,130,246,0.12)',
+                        color: '#60a5fa', borderRadius: '6px', padding: '6px 10px',
+                        fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Open Field HQ ↗
+                    </button>
+                  )}
                 </div>
-              </div>
-
-              <div style={{ marginBottom: '1.25rem' }}>
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Tactical Force Dispatch</div>
-                <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                  {TYPE_ORDER.map((type) => {
-                    const meta = TYPE_META[type];
-                    const active = majorDispatchType === type;
-                    return (
-                      <button
-                        key={type}
-                        type="button"
-                        onClick={() => {
-                          setMajorDispatchType(type);
-                          setMajorDispatchUnitId('');
-                        }}
-                        style={{
-                          borderColor: active ? meta.color : '#374151',
-                          background: active ? `${meta.color}20` : 'transparent',
-                          color: active ? meta.color : '#9ca3af',
-                          borderWidth: '1px',
-                          borderStyle: 'solid',
-                          padding: '4px 9px',
-                          borderRadius: '999px',
-                          fontSize: '0.76rem',
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {meta.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <label style={labelStyle}>Unit</label>
-                <select
-                  value={majorDispatchUnitId}
-                  onChange={(e) => setMajorDispatchUnitId(e.target.value)}
-                  style={inputStyle}
-                >
-                  <option value="">Select available {TYPE_META[majorDispatchType]?.label?.toLowerCase()} unit</option>
-                  {majorFilteredUnits.map((unit) => (
-                    <option key={unit.id} value={unit.id}>
-                      {unit.name || `Unit #${unit.id}`} ({Number.isFinite(unit.distance) ? `${unit.distance.toFixed(1)} km` : 'No GPS'})
-                    </option>
-                  ))}
-                </select>
-                {majorDispatchError && (
-                  <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{majorDispatchError}</div>
-                )}
-                <button
-                  type="button"
-                  onClick={handleMajorDispatchUnit}
-                  disabled={majorDispatching || !majorDispatchUnitId}
-                  style={{
-                    ...submitButtonStyle,
-                    background: '#2563eb',
-                    opacity: majorDispatching || !majorDispatchUnitId ? 0.6 : 1,
-                    cursor: majorDispatching || !majorDispatchUnitId ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {majorDispatching ? 'Dispatching…' : 'Dispatch Unit'}
-                </button>
-              </div>
-
-              <div style={{ marginBottom: '1.25rem' }}>
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Active Sectors</div>
-                {sectors.length > 0 ? (
-                  <div style={{ marginTop: '10px', marginBottom: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    {sectors.map((s) => (
-                      <div key={s.id} style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                        fontSize: '0.78rem', color: '#9ca3af',
-                        background: '#0f172a', border: '1px solid #1f2937',
-                        borderRadius: '4px', padding: '4px 8px',
-                      }}>
-                        <span>{s.name}</span>
-                        <span style={{ color: s.hazard_level === 'CRITICAL' ? '#ef4444' : '#cbd5e1', fontWeight: 700 }}>{s.hazard_level}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '8px' }}>No sectors yet.</div>
-                )}
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Add Sector</div>
-                <form onSubmit={handleAddSector}>
-                  <label style={labelStyle}>Name</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. North Zone"
-                    value={sectorForm.name}
-                    onChange={(e) => setSectorForm({ ...sectorForm, name: e.target.value })}
-                    style={inputStyle}
-                    required
-                  />
-                  <label style={labelStyle}>Hazard Level</label>
-                  <select
-                    value={sectorForm.hazardLevel}
-                    onChange={(e) => setSectorForm({ ...sectorForm, hazardLevel: e.target.value })}
-                    style={inputStyle}
-                  >
-                    <option value="LOW">Low</option>
-                    <option value="MEDIUM">Medium</option>
-                    <option value="HIGH">High</option>
-                    <option value="CRITICAL">Critical</option>
-                  </select>
-                  {sectorError && (
-                    <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{sectorError}</div>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={addingSector || !sectorForm.name.trim()}
-                    style={{
-                      ...submitButtonStyle,
-                      background: '#0284c7',
-                      cursor: addingSector || !sectorForm.name.trim() ? 'not-allowed' : 'pointer',
-                      opacity: addingSector || !sectorForm.name.trim() ? 0.6 : 1,
-                    }}
-                  >
-                    {addingSector ? 'Adding…' : 'Add Sector'}
-                  </button>
-                </form>
-              </div>
-
-              <div style={{ marginBottom: '1.25rem' }}>
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Live Task Groups</div>
-                {taskGroups.length > 0 ? (
-                  <div style={{ marginTop: '10px', marginBottom: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {taskGroups.map((tg) => {
-                      const progress = Math.max(0, Math.min(100, Number(tg.progress_percent ?? 0)));
-                      return (
-                        <div key={tg.id} style={{
-                          fontSize: '0.78rem', color: '#cbd5e1',
-                          background: '#0f172a', border: '1px solid #1f2937',
-                          borderRadius: '6px', padding: '8px',
-                        }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                            <span style={{ fontWeight: 700 }}>{tg.title}</span>
-                            <span style={{ fontSize: '0.72rem', color: '#93c5fd', textTransform: 'uppercase' }}>{tg.category?.replace(/_/g, ' ')}</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                            <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{tg.status || 'ACTIVE'}</span>
-                            <span style={{ fontSize: '0.72rem', color: '#e2e8f0', fontWeight: 700 }}>{progress}%</span>
-                          </div>
-                          <div style={{ height: '6px', background: '#1f2937', borderRadius: '999px', overflow: 'hidden' }}>
-                            <div style={{ width: `${progress}%`, height: '100%', background: progress >= 100 ? '#10b981' : '#3b82f6' }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '8px' }}>No task groups yet.</div>
-                )}
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Add Task Group</div>
-                <form onSubmit={handleAddTaskGroup}>
-                  <label style={labelStyle}>Title</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Search & Rescue Alpha"
-                    value={taskGroupForm.title}
-                    onChange={(e) => setTaskGroupForm({ ...taskGroupForm, title: e.target.value })}
-                    style={inputStyle}
-                    required
-                  />
-                  <label style={labelStyle}>Category</label>
-                  <select
-                    value={taskGroupForm.category}
-                    onChange={(e) => setTaskGroupForm({ ...taskGroupForm, category: e.target.value })}
-                    style={inputStyle}
-                  >
-                    <option value="SEARCH_RESCUE">Search &amp; Rescue</option>
-                    <option value="EVACUATION">Evacuation</option>
-                    <option value="MEDICAL">Medical Response</option>
-                    <option value="UTILITIES">Utilities/Infrastructure</option>
-                    <option value="SECURITY">Security &amp; Perimeter</option>
-                    <option value="LOGISTICS">Logistics &amp; Supply</option>
-                    <option value="DAMAGE_ASSESSMENT">Damage Assessment</option>
-                    <option value="COMMUNICATIONS">Communications</option>
-                  </select>
-
-                  {sectors.length > 0 && (
-                    <>
-                      <label style={labelStyle}>Sectors (optional)</label>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', margin: '6px 0' }}>
-                        {sectors.map((s) => {
-                          const active = taskGroupForm.sectorIds.includes(s.id);
-                          return (
-                            <button
-                              type="button"
-                              key={s.id}
-                              onClick={() => toggleTaskGroupSector(s.id)}
-                              style={{
-                                borderColor: active ? '#60a5fa' : '#374151',
-                                background: active ? 'rgba(59,130,246,0.15)' : 'transparent',
-                                color: active ? '#60a5fa' : '#9ca3af',
-                                borderWidth: '1px',
-                                borderStyle: 'solid',
-                                padding: '4px 10px',
-                                borderRadius: '999px',
-                                fontSize: '0.75rem',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              {s.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
-
-                  {taskGroupError && (
-                    <div style={{ color: '#ef4444', fontSize: '0.78rem', margin: '6px 0' }}>{taskGroupError}</div>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={addingTaskGroup || !taskGroupForm.title.trim()}
-                    style={{
-                      ...submitButtonStyle,
-                      background: '#0284c7',
-                      cursor: addingTaskGroup || !taskGroupForm.title.trim() ? 'not-allowed' : 'pointer',
-                      opacity: addingTaskGroup || !taskGroupForm.title.trim() ? 0.6 : 1,
-                    }}
-                  >
-                    {addingTaskGroup ? 'Adding…' : 'Add Task Group'}
-                  </button>
-                </form>
               </div>
             </>
           )}
@@ -915,33 +779,106 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
       {/* ── Dispatch tab content (original) ── */}
       {activeTab === 'dispatch' && (<>
 
-        {/* ── Linked Field Command (only when escalated to one) ── */}
-        {incident.field_command && (
-          <div
-            onClick={() => onSelectFieldCommand?.(incident.field_command_key)}
-            style={{
-              marginBottom: '1.25rem',
-              padding: '10px',
-              background: '#0f172a',
-              border: '1px solid #1f2937',
-              borderRadius: '6px',
-              cursor: onSelectFieldCommand ? 'pointer' : 'default',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            }}
-          >
-            <div>
+        {/* ── Linked Field Command Post — with unlink / re-assign controls ── */}
+        {(() => {
+          const openFCs = (Array.isArray(fieldCommands) ? fieldCommands : [])
+            .filter((f) => f.status !== 'CLOSED');
+          const linked = !!incident.field_command;
+          // The post this incident is already on must never be offered as a
+          // "move" target — match on every identifier it might carry.
+          const currentKeys = [
+            incident.field_command_key,
+            incident.field_command,
+            incident.field_command_name,
+          ].filter((v) => v != null).map(String);
+          const otherFCs = openFCs.filter(
+            (f) => !currentKeys.includes(String(f.id)) && !currentKeys.includes(String(f.name)),
+          );
+          const smallBtn = {
+            border: 'none', borderRadius: '5px', padding: '5px 10px',
+            fontSize: '0.72rem', fontWeight: 600, whiteSpace: 'nowrap',
+          };
+          return (
+            <div style={{
+              marginBottom: '1.25rem', padding: '10px', background: '#0f172a',
+              border: '1px solid #1f2937', borderRadius: '6px',
+              display: 'flex', flexDirection: 'column', gap: '8px',
+            }}>
               <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 Field Command Post
               </div>
-              <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#60a5fa', marginTop: '2px' }}>
-                {incident.field_command_name || `Post #${incident.field_command}`}
-              </div>
+
+              {linked ? (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => onSelectFieldCommand?.(incident.field_command_key)}
+                    style={{
+                      background: 'none', border: 'none', padding: 0, minWidth: 0,
+                      fontSize: '0.85rem', fontWeight: 600, color: '#60a5fa',
+                      cursor: onSelectFieldCommand ? 'pointer' : 'default',
+                      display: 'flex', alignItems: 'center', gap: '4px',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {incident.field_command_name || `Post #${incident.field_command}`}
+                    </span>
+                    {onSelectFieldCommand && <ChevronRight size={14} color="#60a5fa" style={{ flexShrink: 0 }} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleUnlinkFieldCommand}
+                    disabled={fcActionBusy}
+                    style={{
+                      ...smallBtn, background: 'rgba(239,68,68,0.12)',
+                      border: '1px solid #ef4444', color: '#f87171', flexShrink: 0,
+                      cursor: fcActionBusy ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    Unlink
+                  </button>
+                </div>
+              ) : (
+                <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Not linked to a post</div>
+              )}
+
+              {otherFCs.length > 0 && (
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <select
+                    value={relinkFieldId}
+                    onChange={(e) => setRelinkFieldId(e.target.value)}
+                    style={{
+                      flex: 1, minWidth: 0, padding: '5px 7px', margin: 0,
+                      background: '#1e293b', color: '#fff',
+                      border: '1px solid #475569', borderRadius: '6px',
+                      fontSize: '0.76rem', boxSizing: 'border-box',
+                    }}
+                  >
+                    <option value="" disabled>
+                      {linked ? 'Move to another post…' : 'Link to a post…'}
+                    </option>
+                    {otherFCs.map((f) => (
+                      <option key={f.id} value={f.id}>{f.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleRelinkFieldCommand}
+                    disabled={fcActionBusy || !relinkFieldId}
+                    style={{
+                      ...smallBtn, background: '#0284c7', color: '#fff', flexShrink: 0,
+                      opacity: (fcActionBusy || !relinkFieldId) ? 0.5 : 1,
+                      cursor: (fcActionBusy || !relinkFieldId) ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {linked ? 'Move' : 'Link'}
+                  </button>
+                </div>
+              )}
             </div>
-            {onSelectFieldCommand && <ChevronRight size={16} color="#60a5fa" />}
-          </div>
-        )}
+          );
+        })()}
 
         {/* ── Dispatched Units (always visible) ── */}
         <div style={{ marginBottom: '1.25rem' }}>
@@ -984,9 +921,11 @@ export function IncidentDetailsPanel({ onGoLiveCreateFieldCommand, onSelectField
                   ? { label: 'Connection lost', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' }
                   : unit.status === 'ON_SCENE'
                     ? { label: 'On scene', color: '#10b981', bg: 'rgba(16,185,129,0.12)' }
-                    : unit.status === 'EN_ROUTE'
-                      ? { label: 'On the way', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' }
-                      : { label: 'Awaiting acceptance', color: '#38bdf8', bg: 'rgba(56,189,248,0.12)' };
+                    : (unit.status === 'EN_ROUTE' && unit.atDestination)
+                      ? { label: 'Arriving — awaiting crew confirmation', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' }
+                      : unit.status === 'EN_ROUTE'
+                        ? { label: 'On the way', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' }
+                        : { label: 'Awaiting acceptance', color: '#38bdf8', bg: 'rgba(56,189,248,0.12)' };
                 const statusLabel = phase.label
                   + (unit.isOnline && unit.status === 'EN_ROUTE' && Number.isFinite(unit.etaMin) && unit.etaMin > 0
                     ? ` · ${Math.max(1, Math.round(unit.etaMin))} min`

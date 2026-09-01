@@ -55,7 +55,15 @@ export const useDashboardStore = create(
 
       // Map zoom/flash triggers — transient, not persisted
       zoomToIncidentId: null,
+      // { id, nonce } — jump the map to a field command post's marker. nonce
+      // lets the same post be re-targeted (clicked twice) and re-fly.
+      zoomToFieldCommand: null,
       flashingIncidentId: null,
+      // "Spotlight" a set of incidents: zoom the map OUT to fit them all and
+      // flash their markers a few times. Driven from the KPI header buttons.
+      // spotlightNonce forces the MapView effect to re-run even for the same id set.
+      spotlightIncidentIds: [],
+      spotlightNonce: 0,
 
       // Filters — persisted
       filters: DEFAULT_FILTERS,
@@ -135,9 +143,22 @@ export const useDashboardStore = create(
       setZoomToIncident: (id) => set({ zoomToIncidentId: id }),
       clearZoomToIncident: () => set({ zoomToIncidentId: null }),
 
+      // Jump the map to a field command post's marker (from the KPI card list).
+      zoomToFieldCommandPost: (id) => set((state) => ({
+        zoomToFieldCommand: { id, nonce: (state.zoomToFieldCommand?.nonce || 0) + 1 },
+      })),
+      clearZoomToFieldCommand: () => set({ zoomToFieldCommand: null }),
+
       // Flashing marker: highlight an incident marker for ~4 s after dispatch.
       setFlashingIncident: (id) => set({ flashingIncidentId: id }),
       clearFlashingIncident: () => set({ flashingIncidentId: null }),
+
+      // Spotlight a group of incidents on the map (zoom-to-fit + flash).
+      spotlightIncidents: (ids) => set((state) => ({
+        spotlightIncidentIds: Array.isArray(ids) ? ids : [],
+        spotlightNonce: state.spotlightNonce + 1,
+      })),
+      clearSpotlightIncidents: () => set({ spotlightIncidentIds: [] }),
 
       updateFilters: (newFilters) => set((state) => ({
         filters: { ...state.filters, ...newFilters },

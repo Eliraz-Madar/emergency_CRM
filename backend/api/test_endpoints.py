@@ -8,7 +8,7 @@ from rest_framework import status
 
 from api.models import (
     User, Incident, Unit, Task, FieldCommand, FieldCommandNote,
-    IncidentEvent, MajorIncident,
+    IncidentEvent, MajorIncident, IncidentFigureReport,
 )
 
 
@@ -379,6 +379,143 @@ class UnitClaimingTests(APITestCase):
         # the last heartbeat is older than Unit.HEARTBEAT_STALE_AFTER.
         self.assertFalse(response.json()["is_online"])
 
+    def test_reclaim_with_mock_location_keeps_last_real_position(self):
+        """A reconnecting device without a GPS fix yet reports the app's fixed
+        fallback (mobile-app/utils/location.js MOCK_LOCATION) flagged
+        is_mock_location=true — that must never overwrite a unit's last real
+        position (the "teleports back to its initial location" bug)."""
+        unit = Unit.objects.create(
+            name="Engine 11", type="Fire", location_lat=32.05, location_lng=34.78)
+        self.client.force_authenticate(self.field_user)
+        response = self.client.post(
+            "/api/units/claim/",
+            {"id": unit.id, "location_lat": 32.0853, "location_lng": 34.7818,
+             "is_mock_location": True},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        unit.refresh_from_db()
+        self.assertEqual(unit.location_lat, 32.05)
+        self.assertEqual(unit.location_lng, 34.78)
+        # The claim response / broadcast must reflect the KEPT position too,
+        # not the rejected mock reading.
+        self.assertEqual(response.json()["location_lat"], 32.05)
+
+    def test_claim_with_mock_location_accepted_for_brand_new_unit(self):
+        """A unit with no real position yet (the routine-dispatch seed default
+        of 0,0) should still get SOME position from a mock-location claim
+        rather than staying at 0,0."""
+        unit = Unit.objects.create(name="Engine 12", type="Fire", location_lat=0.0, location_lng=0.0)
+        self.client.force_authenticate(self.field_user)
+        self.client.post(
+            "/api/units/claim/",
+            {"id": unit.id, "location_lat": 32.0853, "location_lng": 34.7818,
+             "is_mock_location": True},
+            format="json",
+        )
+        unit.refresh_from_db()
+        self.assertEqual(unit.location_lat, 32.0853)
+        self.assertEqual(unit.location_lng, 34.7818)
+
+    def test_heartbeat_with_mock_location_keeps_last_real_position(self):
+        unit = Unit.objects.create(
+            name="Engine 13", type="Fire", location_lat=32.05, location_lng=34.78,
+            is_online=True)
+        self.field_user.unit = unit
+        self.field_user.save()
+        self.client.force_authenticate(self.field_user)
+        response = self.client.post(
+            "/api/units/heartbeat/",
+            {"location_lat": 32.0853, "location_lng": 34.7818, "is_mock_location": True},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        unit.refresh_from_db()
+        self.assertEqual(unit.location_lat, 32.05)
+        self.assertEqual(unit.location_lng, 34.78)
+
+    def test_heartbeat_without_mock_flag_updates_position_normally(self):
+        """Guard against over-fixing: a REAL GPS reading must still update the
+        position of a unit that is FREE TO ROAM (no active task)."""
+        unit = Unit.objects.create(
+            name="Engine 14", type="Fire", location_lat=32.05, location_lng=34.78,
+            is_online=True)
+        self.field_user.unit = unit
+        self.field_user.save()
+        self.client.force_authenticate(self.field_user)
+        self.client.post(
+            "/api/units/heartbeat/",
+            {"location_lat": 32.20, "location_lng": 34.90},
+            format="json",
+        )
+        unit.refresh_from_db()
+        self.assertEqual(unit.location_lat, 32.20)
+        self.assertEqual(unit.location_lng, 34.90)
+
+    def test_dispatched_unit_position_is_server_managed(self):
+        """A unit with an active task ignores incoming GPS on both heartbeat
+        and re-claim — its map position is server-managed so a stationary demo
+        phone can't drag the marker around."""
+        unit = Unit.objects.create(
+            name="Medic 5", type="EMS", location_lat=32.05, location_lng=34.78, is_online=True)
+        incident = Incident.objects.create(
+            title="Collision", location_lat=32.10, location_lng=34.85, priority="HIGH")
+        Task.objects.create(incident=incident, assigned_unit=unit,
+                            title="Respond", status=Task.Status.IN_PROGRESS)
+        self.field_user.unit = unit
+        self.field_user.save()
+        self.client.force_authenticate(self.field_user)
+
+        self.client.post("/api/units/heartbeat/",
+                         {"location_lat": 33.0, "location_lng": 35.5}, format="json")
+        unit.refresh_from_db()
+        self.assertEqual((unit.location_lat, unit.location_lng), (32.05, 34.78))
+
+        self.client.post("/api/units/claim/",
+                         {"id": unit.id, "location_lat": 33.0, "location_lng": 35.5},
+                         format="json")
+        unit.refresh_from_db()
+        self.assertEqual((unit.location_lat, unit.location_lng), (32.05, 34.78))
+
+    def test_disconnect_mid_drive_rolls_task_back_to_pending(self):
+        """A crew that disconnects before arriving gets its task rolled back so
+        the "On My Way" button reappears on reconnect."""
+        unit = Unit.objects.create(
+            name="Engine 15", type="Fire", location_lat=32.05, location_lng=34.78, is_online=True)
+        incident = Incident.objects.create(
+            title="Blaze", location_lat=32.10, location_lng=34.85, priority="HIGH")
+        task = Task.objects.create(incident=incident, assigned_unit=unit,
+                                   title="Respond", status=Task.Status.IN_PROGRESS)
+        self.field_user.unit = unit
+        self.field_user.save()
+        self.client.force_authenticate(self.field_user)
+
+        res = self.client.post("/api/units/disconnect/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        unit.refresh_from_db()
+        self.assertEqual(task.status, Task.Status.PENDING)
+        self.assertFalse(unit.is_online)
+
+    def test_disconnect_after_arrival_keeps_task_and_parks_at_scene(self):
+        from django.utils import timezone as _tz
+        unit = Unit.objects.create(
+            name="Engine 16", type="Fire", location_lat=32.05, location_lng=34.78, is_online=True)
+        incident = Incident.objects.create(
+            title="Fire 2", location_lat=32.10, location_lng=34.85, priority="HIGH")
+        task = Task.objects.create(
+            incident=incident, assigned_unit=unit, title="Respond",
+            status=Task.Status.IN_PROGRESS, arrived_at=_tz.now())
+        self.field_user.unit = unit
+        self.field_user.save()
+        self.client.force_authenticate(self.field_user)
+
+        self.client.post("/api/units/disconnect/")
+        task.refresh_from_db()
+        unit.refresh_from_db()
+        self.assertEqual(task.status, Task.Status.IN_PROGRESS)  # not rolled back
+        self.assertEqual((unit.location_lat, unit.location_lng), (32.10, 34.85))  # parked on scene
+
 
 class FieldCommandLinkLifecycleTests(APITestCase):
     def setUp(self):
@@ -526,6 +663,61 @@ class FieldCommandMissionTests(APITestCase):
         mission.refresh_from_db()
         self.assertEqual(mission.status, "DONE")
 
+    def test_mission_status_change_names_force_and_unit(self):
+        """A crew marking a mission on it / finished must be logged by force
+        AND by the specific mobile unit — in the field timeline and the
+        incident's own event log."""
+        incident = Incident.objects.create(
+            title="Depot blaze", location_lat=32.0, location_lng=34.0, priority="HIGH")
+        incident.field_command = self.fc
+        incident.save(update_fields=["field_command"])
+        crew_user = User.objects.create_user(
+            username="engine7_driver", password="pass1234",
+            role=User.Roles.FIELD, unit=self.attached)
+
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "Knock down the fire", "force_type": "FIRE", "incident_id": incident.id},
+            format="json",
+        )
+        mid = res.json()["missions"][0]["id"]
+
+        self.client.force_authenticate(crew_user)
+        res = self.client.patch(
+            f"/api/field-commands/{self.fc.field_key}/missions/{mid}/",
+            {"status": "IN_PROGRESS"}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        note = next(n for n in res.json()["operational_notes"]
+                    if n["kind"] == "MISSION" and "In Progress" in n["message"])
+        self.assertIn("Fire", note["message"])
+        self.assertIn("Attached Unit", note["message"])
+
+        feed = self.client.get(f"/api/events/?incident_id={incident.id}").json()
+        hit = next(e for e in feed if "in progress" in e["message"].lower()
+                   and "Knock down the fire" in e["message"])
+        self.assertIn("Fire", hit["message"])
+        self.assertIn("Attached Unit", hit["message"])
+
+    def test_event_scoped_field_command_refuses_more_incidents(self):
+        """A post opened by escalating one incident ("Go Live") is bound to it
+        and rejects assign-incident for any other."""
+        origin = Incident.objects.create(
+            title="Origin quake", location_lat=32.0, location_lng=34.0, priority="HIGH")
+        mi = MajorIncident.objects.create(
+            incident=origin, title="Origin quake",
+            incident_type=MajorIncident.IncidentType.EARTHQUAKE,
+            location_lat=32.0, location_lng=34.0)
+        bound_fc = FieldCommand.objects.create(
+            name="Bound Post", location_lat=32.0, location_lng=34.0, major_incident=mi)
+        other = Incident.objects.create(
+            title="Unrelated call", location_lat=32.1, location_lng=34.1, priority="MED")
+
+        res = self.client.post(
+            f"/api/field-commands/{bound_fc.field_key}/assign-incident/",
+            {"incident_id": other.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+
     def test_missions_blocked_on_closed_post(self):
         self.client.post(
             f"/api/field-commands/{self.fc.field_key}/close/",
@@ -537,6 +729,51 @@ class FieldCommandMissionTests(APITestCase):
             {"title": "Too late"}, format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+
+    def test_create_incident_and_force_scoped_task(self):
+        incident = Incident.objects.create(
+            title="Warehouse fire", location_lat=32.0, location_lng=34.0, priority="HIGH")
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "Ventilate the roof", "force_type": "FIRE", "incident_id": incident.id},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        m = res.json()["missions"][0]
+        self.assertEqual(m["force_type"], "FIRE")
+        self.assertEqual(m["incident"], incident.id)
+        self.assertEqual(m["incident_title"], "Warehouse fire")
+        # timeline note names the incident + force
+        note = next(n for n in res.json()["operational_notes"] if n["kind"] == "MISSION")
+        self.assertIn("Warehouse fire", note["message"])
+        # and it lands in the INCIDENT's own event log too
+        feed = self.client.get(f"/api/events/?incident_id={incident.id}").json()
+        titles = [e["message"] for e in feed]
+        self.assertTrue(any("Ventilate the roof" in t and "Fire" in t for t in titles), titles)
+
+        # advancing the task status also shows on the incident feed
+        mid = m["id"]
+        self.client.patch(
+            f"/api/field-commands/{self.fc.field_key}/missions/{mid}/",
+            {"status": "DONE"}, format="json")
+        feed = self.client.get(f"/api/events/?incident_id={incident.id}").json()
+        self.assertTrue(any("done" in e["message"].lower() and "Ventilate the roof" in e["message"]
+                            for e in feed))
+
+    def test_task_rejects_unknown_incident(self):
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "x", "force_type": "FIRE", "incident_id": 999999},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_task_rejects_bad_force_type(self):
+        res = self.client.post(
+            f"/api/field-commands/{self.fc.field_key}/missions/",
+            {"title": "x", "force_type": "MARINES"}, format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class AssignUnitAndEnRouteTests(APITestCase):
@@ -571,6 +808,35 @@ class AssignUnitAndEnRouteTests(APITestCase):
         self.incident.refresh_from_db()
         self.assertEqual(self.incident.status, Incident.Status.PENDING)
 
+    def test_redispatch_after_unassign_creates_a_fresh_pending_task(self):
+        """Dispatch → unassign (cancels the task) → dispatch the SAME unit to
+        the SAME incident again must hand the crew a LIVE PENDING task, not
+        silently reuse the cancelled one (which the mobile app filters out, so
+        the crew would never see the incident)."""
+        self.client.force_authenticate(self.dispatcher)
+        url = f"/api/incidents/{self.incident.id}/assign-unit/"
+
+        self.client.post(url, {"unit_id": self.unit.id}, format="json")
+        self.client.post(
+            f"/api/incidents/{self.incident.id}/unassign-unit/",
+            {"unit_id": self.unit.id}, format="json")
+        self.assertEqual(
+            Task.objects.get(assigned_unit=self.unit).status, Task.Status.CANCELLED)
+
+        res = self.client.post(url, {"unit_id": self.unit.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        live = Task.objects.filter(
+            assigned_unit=self.unit, incident=self.incident
+        ).exclude(status__in=Task.TERMINAL_STATUSES)
+        self.assertEqual(live.count(), 1)
+        self.assertEqual(live.first().status, Task.Status.PENDING)
+
+        # And it is visible on the mobile task feed.
+        feed = self.client.get(f"/api/tasks/?mock_unit={self.unit.id}").json()
+        self.assertTrue(any(t["incident"] == self.incident.id and t["status"] == "PENDING"
+                            for t in feed), feed)
+
     def test_field_unit_accept_advances_incident_and_logs_field_command_note(self):
         fc = FieldCommand.objects.create(
             name="North Post", location_lat=32.08, location_lng=34.78)
@@ -591,6 +857,138 @@ class AssignUnitAndEnRouteTests(APITestCase):
         self.assertTrue(
             FieldCommandNote.objects.filter(
                 field_command=fc, kind=FieldCommandNote.Kind.STATUS).exists())
+
+    def test_incident_on_scene_logs_field_command_arrival_note(self):
+        """A crew tapping "Arrived" PATCHes the incident to ON_SCENE directly
+        (not the task) — the linked Field Command Post's Operational Timeline
+        must still get an arrival entry naming the vehicle."""
+        fc = FieldCommand.objects.create(
+            name="South Post", location_lat=32.08, location_lng=34.78)
+        self.incident.field_command = fc
+        self.incident.status = Incident.Status.EN_ROUTE
+        self.incident.save(update_fields=["field_command", "status"])
+        Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+
+        self.client.force_authenticate(self.field_unit)
+        res = self.client.patch(
+            f"/api/incidents/{self.incident.id}/",
+            {"status": "ON_SCENE"}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        note = FieldCommandNote.objects.filter(
+            field_command=fc, kind=FieldCommandNote.Kind.STATUS).order_by("-created_at").first()
+        self.assertIsNotNone(note)
+        self.assertIn(self.unit.name, note.message)
+        self.assertIn("arrived on scene", note.message.lower())
+
+    def test_unassign_incident_frees_it_to_relink(self):
+        fc_a = FieldCommand.objects.create(
+            name="Post A", location_lat=32.0, location_lng=34.0)
+        fc_b = FieldCommand.objects.create(
+            name="Post B", location_lat=32.1, location_lng=34.1)
+        self.incident.field_command = fc_a
+        self.incident.save(update_fields=["field_command"])
+
+        self.client.force_authenticate(self.dispatcher)
+        # Can't link straight to B while linked to A.
+        res = self.client.post(
+            f"/api/field-commands/{fc_b.field_key}/assign-incident/",
+            {"incident_id": self.incident.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+
+        # Unlink from A...
+        res = self.client.post(
+            f"/api/field-commands/{fc_a.field_key}/unassign-incident/",
+            {"incident_id": self.incident.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.incident.refresh_from_db()
+        self.assertIsNone(self.incident.field_command_id)
+
+        # ...now B accepts it.
+        res = self.client.post(
+            f"/api/field-commands/{fc_b.field_key}/assign-incident/",
+            {"incident_id": self.incident.id}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.field_command_id, fc_b.id)
+
+    def test_task_arrive_action_marks_arrival_and_advances_incident(self):
+        fc = FieldCommand.objects.create(
+            name="Arrive Post", location_lat=32.08, location_lng=34.78)
+        self.incident.field_command = fc
+        self.incident.status = Incident.Status.EN_ROUTE
+        self.incident.save(update_fields=["field_command", "status"])
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+
+        self.client.force_authenticate(self.field_unit)
+        res = self.client.post(f"/api/tasks/{task.id}/arrive/", {}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(res.json()["arrived_at"])
+
+        task.refresh_from_db()
+        self.incident.refresh_from_db()
+        self.assertIsNotNone(task.arrived_at)
+        self.assertEqual(self.incident.status, Incident.Status.ON_SCENE)
+
+        note = FieldCommandNote.objects.filter(
+            field_command=fc, kind=FieldCommandNote.Kind.STATUS).order_by("-created_at").first()
+        self.assertIsNotNone(note)
+        self.assertIn(self.unit.name, note.message)
+        self.assertIn("arrived on scene", note.message.lower())
+
+        # Idempotent — a second tap doesn't move anything or re-log.
+        note_count = FieldCommandNote.objects.filter(field_command=fc).count()
+        res2 = self.client.post(f"/api/tasks/{task.id}/arrive/", {}, format="json")
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            FieldCommandNote.objects.filter(field_command=fc).count(), note_count)
+
+    def test_assigned_units_reports_crew_confirmed_arrival(self):
+        self.client.force_authenticate(self.dispatcher)
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+        self.incident.status = Incident.Status.EN_ROUTE
+        self.incident.save(update_fields=["status"])
+
+        body = self.client.get(f"/api/incidents/{self.incident.id}/").json()
+        self.assertFalse(body["assigned_units"][0]["arrived"])
+
+        self.client.force_authenticate(self.field_unit)
+        self.client.post(f"/api/tasks/{task.id}/arrive/", {}, format="json")
+
+        self.client.force_authenticate(self.dispatcher)
+        body = self.client.get(f"/api/incidents/{self.incident.id}/").json()
+        self.assertTrue(body["assigned_units"][0]["arrived"])
+
+    def test_field_report_operational_note_names_the_reporting_vehicle(self):
+        """A task-scoped field report is attributed to the vehicle (from the
+        dispatched Task), not the operator's login name."""
+        fc = FieldCommand.objects.create(
+            name="East Post", location_lat=32.08, location_lng=34.78)
+        self.incident.field_command = fc
+        self.incident.save(update_fields=["field_command"])
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+
+        self.client.force_authenticate(self.field_unit)
+        self.client.post(
+            "/api/field/add-event/?fieldId=default",
+            {"event_type": "STATUS_CHANGE", "title": "Task Update: Respond",
+             "description": "Notes: perimeter secure", "task_id": task.id},
+            format="multipart", HTTP_X_ACTOR_ROLE="UNIT")
+
+        fc_body = self.client.get(f"/api/field-commands/{fc.field_key}/").json()
+        reports = [n for n in fc_body["operational_notes"] if n.get("kind") == "REPORT"]
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["created_by"], self.unit.name)
+        self.assertEqual(reports[0]["unit_name"], self.unit.name)
+        self.assertIn(self.unit.name, reports[0]["message"])
 
     def test_add_event_surfaces_on_field_command_operational_timeline(self):
         fc = FieldCommand.objects.create(
@@ -671,7 +1069,7 @@ class AssignUnitAndEnRouteTests(APITestCase):
         self.assertEqual(
             body["assigned_units"],
             [{"id": self.unit.id, "name": self.unit.name, "type": self.unit.type,
-              "is_online": False, "task_status": Task.Status.PENDING}])
+              "is_online": False, "task_status": Task.Status.PENDING, "arrived": False}])
 
     def test_task_reports_action_returns_field_report_history(self):
         task = Task.objects.create(
@@ -726,3 +1124,178 @@ class AssignUnitAndEnRouteTests(APITestCase):
 
         task.refresh_from_db()
         self.assertEqual(task.status, Task.Status.CANCELLED)
+
+    def test_accepting_task_logs_exactly_one_en_route_event(self):
+        """Tapping "On My Way" writes ONE "<unit> en route" line to the regional
+        event log — not that line plus a separate "Incident status changed:
+        PENDING -> EN_ROUTE" record for the same move."""
+        self.incident.status = Incident.Status.PENDING
+        self.incident.save(update_fields=["status"])
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+
+        self.client.force_authenticate(self.field_unit)
+        res = self.client.patch(
+            f"/api/tasks/{task.id}/", {"status": "IN_PROGRESS"}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        en_route = IncidentEvent.objects.filter(
+            incident=self.incident,
+            title__icontains="en route",
+        )
+        self.assertEqual(en_route.count(), 1, list(en_route.values_list("title", flat=True)))
+        # And no duplicate "Incident status changed" row for the same transition.
+        self.assertFalse(
+            IncidentEvent.objects.filter(
+                incident=self.incident, title__icontains="EN_ROUTE").exists())
+
+    def test_repeated_status_patch_does_not_relog(self):
+        """A second identical PATCH (e.g. the crew re-submits "On the Way" from
+        the report screen) is a no-op — no second en-route line."""
+        self.incident.status = Incident.Status.PENDING
+        self.incident.save(update_fields=["status"])
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.PENDING)
+
+        self.client.force_authenticate(self.field_unit)
+        self.client.patch(
+            f"/api/tasks/{task.id}/", {"status": "IN_PROGRESS"}, format="json")
+        self.client.patch(
+            f"/api/tasks/{task.id}/", {"status": "IN_PROGRESS"}, format="json")
+
+        self.assertEqual(
+            IncidentEvent.objects.filter(
+                incident=self.incident, title__icontains="en route").count(),
+            1)
+
+    def test_arrive_twice_logs_one_arrival(self):
+        """The arrive endpoint claims the arrival atomically — a second call
+        (crew taps "Arrived" then files an on-scene report) never writes a
+        second "arrived on scene" line."""
+        self.incident.status = Incident.Status.EN_ROUTE
+        self.incident.save(update_fields=["status"])
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+
+        self.client.force_authenticate(self.field_unit)
+        self.client.post(f"/api/tasks/{task.id}/arrive/", {}, format="json")
+        self.client.post(f"/api/tasks/{task.id}/arrive/", {}, format="json")
+
+        self.assertEqual(
+            IncidentEvent.objects.filter(
+                incident=self.incident, title__icontains="arrived on scene").count(),
+            1)
+
+    def test_regional_event_feed_exposes_report_note_and_media(self):
+        """A field report shows its written note and an attachment flag in the
+        regional Event Log payload, not just an opaque headline."""
+        task = Task.objects.create(
+            incident=self.incident, assigned_unit=self.unit,
+            title="Respond", status=Task.Status.IN_PROGRESS)
+        self.client.force_authenticate(self.field_unit)
+        self.client.post(
+            "/api/field/add-event/?fieldId=default",
+            {"event_type": "UPDATE", "title": "Field report - Collapse",
+             "description": "Notes: two casualties, need backup", "task_id": task.id},
+            format="multipart", HTTP_X_ACTOR_ROLE="UNIT")
+
+        self.client.force_authenticate(self.dispatcher)
+        rows = self.client.get(
+            f"/api/events/?incident_id={self.incident.id}").json()
+        report = next(r for r in rows if r["message"] == "Field report - Collapse")
+        self.assertIn("two casualties", report["description"])
+        self.assertIn("media", report)
+        self.assertEqual(report["media"], [])
+
+
+class IncidentFigureReportTests(APITestCase):
+    """Field crews submit casualty headcounts per incident; the linked Field
+    Command Post's totals are the live sum across its incidents."""
+
+    def setUp(self):
+        self.dispatcher = _make_dispatcher()
+        self.fc = FieldCommand.objects.create(
+            name="Figures Post", location_lat=32.0, location_lng=34.0)
+        self.unit_a = Unit.objects.create(
+            name="Medic A", type=Unit.UnitType.EMS, location_lat=32.0, location_lng=34.0)
+        self.unit_b = Unit.objects.create(
+            name="Engine B", type=Unit.UnitType.FIRE, location_lat=32.0, location_lng=34.0)
+        self.crew_a = User.objects.create_user(
+            username="figs_crew_a", password="pass1234", role=User.Roles.FIELD, unit=self.unit_a)
+        self.crew_b = User.objects.create_user(
+            username="figs_crew_b", password="pass1234", role=User.Roles.FIELD, unit=self.unit_b)
+        self.inc1 = Incident.objects.create(
+            title="Mall collapse", location_lat=32.0, location_lng=34.0, priority="HIGH",
+            field_command=self.fc)
+        self.inc2 = Incident.objects.create(
+            title="Road pileup", location_lat=32.1, location_lng=34.1, priority="MED",
+            field_command=self.fc)
+
+    def test_submit_upserts_and_aggregates_to_the_post(self):
+        self.client.force_authenticate(self.crew_a)
+        res = self.client.post(
+            f"/api/incidents/{self.inc1.id}/figures/",
+            {"injured": 4, "dead": 1, "trapped": 2, "treated": 3, "evacuated": 5},
+            format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # Same crew resubmits with corrected numbers → the row is REPLACED,
+        # not added to.
+        self.client.post(
+            f"/api/incidents/{self.inc1.id}/figures/",
+            {"injured": 6, "dead": 1, "trapped": 0, "treated": 5, "evacuated": 8},
+            format="json")
+        self.assertEqual(
+            IncidentFigureReport.objects.filter(incident=self.inc1, unit=self.unit_a).count(), 1)
+
+        # A second crew reports on the OTHER incident.
+        self.client.force_authenticate(self.crew_b)
+        self.client.post(
+            f"/api/incidents/{self.inc2.id}/figures/",
+            {"injured": 2, "dead": 0, "trapped": 1, "treated": 1, "evacuated": 4},
+            format="json")
+
+        # The post's figure_totals = sum across both incidents.
+        self.client.force_authenticate(self.dispatcher)
+        fc = self.client.get(f"/api/field-commands/{self.fc.field_key}/").json()
+        self.assertEqual(fc["figure_totals"], {
+            "injured": 8, "dead": 1, "trapped": 1, "treated": 6, "evacuated": 12,
+        })
+        # ...and each linked incident carries its own subtotal.
+        inc1_row = next(i for i in fc["incidents"] if i["id"] == self.inc1.id)
+        self.assertEqual(inc1_row["figure_report"]["injured"], 6)
+
+    def test_negatives_are_clamped_to_zero(self):
+        self.client.force_authenticate(self.crew_a)
+        res = self.client.post(
+            f"/api/incidents/{self.inc1.id}/figures/",
+            {"injured": -5, "dead": "x", "trapped": 3},
+            format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        row = IncidentFigureReport.objects.get(incident=self.inc1, unit=self.unit_a)
+        self.assertEqual((row.injured, row.dead, row.trapped), (0, 0, 3))
+
+    def test_submitting_figures_logs_a_casualty_event_on_the_incident(self):
+        self.client.force_authenticate(self.crew_a)
+        self.client.post(
+            f"/api/incidents/{self.inc1.id}/figures/",
+            {"injured": 4, "trapped": 2}, format="json")
+        feed = self.client.get(f"/api/events/?incident_id={self.inc1.id}").json()
+        hit = next(e for e in feed if "Casualty figures" in e["message"])
+        self.assertIn("Medic A", hit["message"])
+        self.assertIn("Injured 4", hit["description"])
+        # And the field command's Operational Timeline gets it too.
+        fc = self.client.get(f"/api/field-commands/{self.fc.field_key}/").json()
+        self.assertTrue(any("reported figures" in n["message"] for n in fc["operational_notes"]))
+
+    def test_get_returns_every_crews_latest_row(self):
+        self.client.force_authenticate(self.crew_a)
+        self.client.post(f"/api/incidents/{self.inc1.id}/figures/", {"injured": 3}, format="json")
+        self.client.force_authenticate(self.crew_b)
+        self.client.post(f"/api/incidents/{self.inc1.id}/figures/", {"injured": 1}, format="json")
+        rows = self.client.get(f"/api/incidents/{self.inc1.id}/figures/").json()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["unit_name"] for r in rows}, {"Medic A", "Engine B"})

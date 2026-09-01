@@ -1,15 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity } from "react-native";
+import { useFocusEffect, useIsFocused } from "@react-navigation/native";
+import NetInfo from "@react-native-community/netinfo";
 import MapView, { Marker, Callout, Polyline } from "react-native-maps";
 import { API_BASE_URL } from "../config";
 import { useUser } from "../context/UserContext";
 import { getAuthHeaders } from "../utils/apiClient";
 import { getDeviceLocation, watchDeviceLocation } from "../utils/location";
-import { markOnMyWay } from "../utils/taskActions";
-import { fetchTrip, tripState } from "../utils/trip";
+import { markOnMyWay, markArrived } from "../utils/taskActions";
+import { fetchTrip, tripState, haversineKm } from "../utils/trip";
 
+// Match TasksScreen — device must be this close to the incident before the
+// crew can confirm arrival.
+const ARRIVAL_RADIUS_KM = 0.25;
+
+// Only 3 severity tiers are actually reachable from the UI (the war-room's
+// Incident Settings tab offers just Low/Medium/High) — CRITICAL is legacy
+// data, not a distinct level a dispatcher can set, so it's folded into HIGH's
+// color rather than given its own unreachable swatch in the legend below.
 const PRIORITY_COLOR = {
-  CRITICAL: "#D32F2F",
+  CRITICAL: "#F57C00",
   HIGH:     "#F57C00",
   MEDIUM:   "#FBC02D",
   MED:      "#FBC02D",
@@ -69,27 +79,52 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
   const [error, setError]         = useState("");
   const [deviceLocation, setDeviceLocation] = useState(null);
   const [onMyWayBusy, setOnMyWayBusy] = useState(false);
+  const [arrivedBusy, setArrivedBusy] = useState(false);
   // Shared en-route trip (same object the war-room map reads) + a 1 s clock so
   // the interpolated position / ETA re-render smoothly.
   const [trip, setTrip] = useState(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const { user } = useUser();
+  const isFocused = useIsFocused();
   const mapRef = useRef(null);
   // Camera is auto-framed exactly ONCE per target, then left entirely to the
   // user — no re-fits fighting their pinch-zoom.
   const fittedForRef = useRef(null);
+  // Separately: once the crew accepts and the road route is known, frame the
+  // WHOLE route + vehicle exactly once (per task) so tapping "On My Way" zooms
+  // to the journey rather than leaving whatever zoom the pending view had.
+  const framedRouteForRef = useRef(null);
 
   useEffect(() => {
     if (!token) return;
     load(true /* isFirst — show the full-screen loader only once */);
-    const iv = setInterval(() => load(false), 8000); // silent background refresh
+    const iv = setInterval(() => load(false), 5000); // silent background refresh
     return () => clearInterval(iv);
   }, [token]);
 
-  // The live version of the task the crew is driving to (prop is a stale
-  // snapshot). Falls back to the prop until the first load returns.
-  const task =
-    taskList.find((t) => t.id === selectedTask?.id) || selectedTask || null;
+  // Re-pull the instant this screen regains focus so a dispatch the war-room
+  // cancelled while we were away (a vehicle whose association to the event was
+  // removed) drops off without a manual pull-to-refresh.
+  useEffect(() => {
+    if (isFocused && token) load(false);
+  }, [isFocused, token]);
+
+  // ...and again the moment connectivity returns.
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener((state) => {
+      if (token && state.isConnected && state.isInternetReachable !== false) load(false);
+    });
+    return unsub;
+  }, [token]);
+
+  // The live version of the task the crew is driving to (the prop is a stale
+  // snapshot from when this screen mounted). Once the list has loaded, trust
+  // it: a task that's gone — or came back cancelled/done — is no longer an
+  // active association and must NOT fall back to the stale prop.
+  const liveTask = taskList.find((t) => t.id === selectedTask?.id);
+  const task = liveTask
+    ? (["DONE", "CANCELLED"].includes(liveTask.status) ? null : liveTask)
+    : (loading ? selectedTask : null);
 
   const myTaskAccepted = task?.status === "IN_PROGRESS";
   const hasCoords = task?.incident_lat != null && task?.incident_lng != null;
@@ -144,6 +179,19 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
     }
   };
 
+  const handleArrived = async () => {
+    if (!task?.id) return;
+    setArrivedBusy(true);
+    try {
+      await markArrived(task, token, user);
+      await load();
+    } catch (_) {
+      setError("Could not confirm arrival. Try again.");
+    } finally {
+      setArrivedBusy(false);
+    }
+  };
+
   // One GPS fix (+ a light watch) — only used for the vehicle marker and the
   // first camera framing before the crew accepts. Once a trip is running the
   // shared trip owns the position.
@@ -182,6 +230,19 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
 
   const ts = trip ? tripState(trip, nowMs) : null;
 
+  // Just accepted ("On My Way") and the road route is now known → zoom the
+  // camera to the whole route + the vehicle, once per task.
+  useEffect(() => {
+    if (!mapRef.current || !task?.id || !myTaskAccepted) return;
+    const route = ts?.fullRoute;
+    if (!Array.isArray(route) || route.length < 2) return;
+    if (framedRouteForRef.current === task.id) return;
+    framedRouteForRef.current = task.id;
+    // Mark the plain fit as done too so it doesn't fight this one.
+    fittedForRef.current = focusIncident?.id ?? fittedForRef.current;
+    mapRef.current.fitToCoordinates(route, { edgePadding: FIT_EDGE_PADDING, animated: true });
+  }, [task?.id, myTaskAccepted, ts?.fullRoute?.length]);
+
   // Frame the vehicle + incident once when the trip first appears, then FOLLOW
   // the vehicle — re-centre the camera on it every tick while it's moving so
   // "the screen moves according to the mobile's progress". Stops following
@@ -207,17 +268,53 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
     }
   }, [focusIncident?.id, ts?.position?.latitude, ts?.position?.longitude, ts?.arrived, deviceLocation]);
 
+  // Every time the crew opens / switches back to the Map screen, zoom the
+  // camera to the vehicle and the road still ahead of it to the event. The
+  // fit effects above only run ONCE per task, so a return visit to this tab
+  // would otherwise keep whatever zoom the crew left behind. useFocusEffect
+  // fires on every focus (fresh mount AND re-focus of a kept-mounted screen),
+  // which useIsFocused's render signal alone did not reliably do under the
+  // native-stack navigator. Live trip/GPS values are read from a ref at fire
+  // time so the callback identity stays stable (no re-fit mid-drive).
+  const focusFitRef = useRef({});
+  focusFitRef.current = { ts, deviceLocation, focusIncident };
+  useFocusEffect(
+    useCallback(() => {
+      // Let the fit effects re-run for a fresh task after this focus, too.
+      framedRouteForRef.current = null;
+      // Wait out the screen transition — fitToCoordinates is a no-op if the
+      // MapView hasn't laid out yet.
+      const timer = setTimeout(() => {
+        const { ts: t, deviceLocation: dl, focusIncident: fi } = focusFitRef.current;
+        const vehicle = t?.position
+          || (dl && { latitude: dl.latitude, longitude: dl.longitude });
+        const remaining = Array.isArray(t?.remaining) ? t.remaining : [];
+        let target = null;
+        if (remaining.length >= 2) {
+          target = remaining;                         // vehicle → road ahead → event
+        } else if (vehicle && fi) {
+          target = [vehicle, { latitude: fi.lat, longitude: fi.lng }];
+        }
+        if (target && mapRef.current) {
+          mapRef.current.fitToCoordinates(target, { edgePadding: FIT_EDGE_PADDING, animated: true });
+        }
+      }, 450);
+      return () => clearTimeout(timer);
+    }, []),
+  );
+
   const load = async (isFirst = false) => {
     if (isFirst) { setLoading(true); setError(""); }
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 7000);
+      const timeout = setTimeout(() => controller.abort(), isFirst ? 8000 : 12000);
       const url = selectedUnit?.id
         ? `${API_BASE_URL}/api/tasks/?mock_unit=${selectedUnit.id}`
         : `${API_BASE_URL}/api/tasks/`;
       const res = await fetch(url, {
         headers: getAuthHeaders(token, user),
         signal: controller.signal,
+        cache: "no-store",
       });
       clearTimeout(timeout);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -331,21 +428,38 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
       )}
 
       {activeIncident && (() => {
-        // "En route" vs "On scene" is THIS crew's own progress. Trust the live
-        // trip when we have one (the crew may be driving to an incident another
-        // unit already took ON_SCENE); only fall back to the incident's shared
-        // status when there's no trip to read.
-        const arrived = ts
-          ? ts.arrived
-          : (activeIncident.status === "ON_SCENE" || activeIncident.status === "RESOLVED");
+        // "On scene" reflects ONLY this crew's own confirmed arrival — never
+        // the shared incident status (another unit may have driven the
+        // incident to ON_SCENE while this crew is still on the road).
+        const confirmed = !!task?.arrived_at;
+        const nearScene = deviceLocation && Number.isFinite(activeIncident.lat)
+          ? (deviceLocation.isMock || haversineKm(
+              deviceLocation.latitude, deviceLocation.longitude,
+              activeIncident.lat, activeIncident.lng,
+            ) <= ARRIVAL_RADIUS_KM)
+          : false;
+        const canConfirmArrival = !confirmed
+          && task?.status === "IN_PROGRESS"
+          && (nearScene || (ts && ts.arrived));
         return (
           <View style={styles.routeCard}>
             <Text style={styles.routeCardTitle} numberOfLines={2}>{activeIncident.title}</Text>
             <Text style={styles.routeCardStatus}>
-              {arrived ? "On Scene" : "En Route"}
+              {confirmed ? "On Scene" : "En Route"}
             </Text>
-            {arrived ? (
+            {confirmed ? (
               <Text style={styles.routeCardHint}>Arrived on scene — begin operations.</Text>
+            ) : canConfirmArrival ? (
+              <TouchableOpacity
+                style={[styles.onMyWayBtn, { backgroundColor: "#1565C0" }, arrivedBusy && styles.onMyWayBtnBusy]}
+                onPress={handleArrived}
+                disabled={arrivedBusy}
+                activeOpacity={0.85}
+              >
+                {arrivedBusy
+                  ? <ActivityIndicator color="#FFFFFF" size="small" />
+                  : <Text style={styles.onMyWayBtnText}>✓  ARRIVED AT SCENE</Text>}
+              </TouchableOpacity>
             ) : ts ? (
               <View style={styles.routeMetrics}>
                 <View style={styles.routeMetric}>
@@ -366,9 +480,12 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
         );
       })()}
 
-      {/* Legend */}
+      {/* Legend — priority dots use the exact same PRIORITY_COLOR map the
+          incident pins above are colored from, so this can't drift out of
+          sync with what's actually on the map. Also explains the two other
+          markers this screen draws: the vehicle emoji and the route line. */}
       <View style={styles.legend}>
-        {[["CRITICAL","#D32F2F"],["HIGH","#F57C00"],["MED","#FBC02D"],["LOW","#388E3C"]].map(
+        {[["HIGH",PRIORITY_COLOR.HIGH],["MED",PRIORITY_COLOR.MED],["LOW",PRIORITY_COLOR.LOW]].map(
           ([label, color]) => (
             <View key={label} style={styles.legendRow}>
               <View style={[styles.dot, { backgroundColor: color }]} />
@@ -376,6 +493,15 @@ export default function IncidentMapScreen({ token, selectedUnit, selectedTask })
             </View>
           )
         )}
+        <View style={styles.legendDivider} />
+        <View style={styles.legendRow}>
+          <Text style={styles.legendVehicleIcon}>{vehicleIcon}</Text>
+          <Text style={styles.legendText}>Your vehicle</Text>
+        </View>
+        <View style={styles.legendRow}>
+          <View style={styles.legendRouteLine} />
+          <Text style={styles.legendText}>Route</Text>
+        </View>
       </View>
     </View>
   );
@@ -429,6 +555,9 @@ const styles = StyleSheet.create({
   legendRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   dot:        { width: 10, height: 10, borderRadius: 5 },
   legendText: { fontSize: 11, color: "#37474F", fontWeight: "600" },
+  legendDivider: { height: 1, backgroundColor: "#E0E6EB", marginVertical: 2 },
+  legendVehicleIcon: { fontSize: 14, width: 14, textAlign: "center", lineHeight: 14 },
+  legendRouteLine: { width: 14, height: 4, borderRadius: 2, backgroundColor: "#1d4ed8" },
 
   routeCard: {
     position: "absolute", bottom: 20, left: 16, right: 16,

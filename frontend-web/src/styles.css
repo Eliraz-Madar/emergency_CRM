@@ -344,6 +344,72 @@ body {
   color: var(--color-primary);
 }
 
+/* Clickable KPI headers (Active Incidents / Awaiting Dispatch) — reset the
+   native <button> look and keep the .kpi-card layout. */
+.kpi-card-button {
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+.kpi-card-button:active {
+  transform: translateY(0);
+}
+
+/* Open field command posts — replaces the old "Critical" card.
+   Laid out in columns of 3 so it stays short; scrolls sideways if there are
+   many posts rather than growing tall. */
+.kpi-card-fieldcommands {
+  cursor: default;
+  align-items: flex-start;
+}
+.kpi-card-fieldcommands:hover {
+  transform: none;
+  background-color: var(--color-bg-card) !important;
+  border: 1px solid var(--color-border);
+  box-shadow: 0 1px 3px var(--color-shadow);
+}
+.kpi-fc-list {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(3, auto);
+  grid-auto-columns: minmax(78px, max-content);
+  gap: 3px 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  width: 100%;
+}
+.kpi-fc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: rgba(168, 85, 247, 0.08);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.kpi-fc-item:hover {
+  background: rgba(168, 85, 247, 0.2);
+}
+.kpi-fc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+.kpi-fc-meta {
+  flex-shrink: 0;
+  color: #cbd5e1;
+  font-size: 0.68rem;
+}
+
 /* ============================================
    Filter Bar
    ============================================ */
@@ -397,6 +463,20 @@ body {
 .sort-select:hover {
   border-color: var(--color-primary);
   background: var(--color-bg-light);
+}
+
+/* The native dropdown list inherits the control's white text but pops on a
+   light OS background — white-on-white, unreadable. Force a dark row bg +
+   light text so the options are visible when the menu opens. */
+.sort-select option,
+select option {
+  background-color: #1e293b;
+  color: #f1f5f9;
+}
+.sort-select option:checked,
+select option:checked {
+  background-color: #334155;
+  color: #ffffff;
 }
 
 .filter-advanced {
@@ -686,6 +766,35 @@ body {
 .legend-icon {
   font-size: 0.9rem;
 }
+
+.map-legend-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary, #94a3b8);
+  margin-bottom: var(--spacing-xs);
+}
+
+.map-legend-title-spaced {
+  margin-top: var(--spacing-sm);
+}
+
+.legend-unit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.legend-unit-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
 
 /* Leaflet map customization */
 .leaflet-map,
@@ -1391,6 +1500,28 @@ body {
 .event-time {
   white-space: nowrap;
   color: #f8fafc !important;
+}
+
+/* Field-report body inside a regional Event Log row: the written note and/or
+   the "photo/video attached" line. */
+.event-feed .event-description {
+  margin: 2px 0 0 calc(1rem + var(--spacing-sm));
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: #cbd5e1;
+  word-break: break-word;
+}
+
+.event-feed .event-description-line {
+  margin: 1px 0;
+}
+
+.event-feed .event-description-line strong {
+  color: #f1f5f9;
+}
+
+.event-feed .event-media-note {
+  color: #93c5fd;
 }
 
 .empty-state {

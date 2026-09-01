@@ -23,6 +23,10 @@ export function startHeartbeatLoop(token, user) {
         body: JSON.stringify({
           location_lat: location.latitude,
           location_lng: location.longitude,
+          // Flags a no-GPS-fix fallback reading (see utils/location.js
+          // MOCK_LOCATION) so the backend keeps the unit's last real position
+          // instead of teleporting the marker to a fixed fallback point.
+          is_mock_location: location.isMock,
         }),
       });
     } catch {

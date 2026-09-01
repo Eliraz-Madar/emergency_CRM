@@ -16,9 +16,9 @@ import { markOnMyWay, markArrived } from "../utils/taskActions";
 //  ON_SCENE  -> markArrived  (task IN_PROGRESS + incident ON_SCENE) = "in progress"
 //  DONE      -> task DONE
 const STATUS_OPTIONS = [
-  { value: "EN_ROUTE", label: "En Route",    color: "#E65100", bg: "#FFF3E0" },
-  { value: "ON_SCENE", label: "In Progress", color: "#1565C0", bg: "#E3F2FD" },
-  { value: "DONE",     label: "Done",        color: "#2E7D32", bg: "#E8F5E9" },
+  { value: "EN_ROUTE", label: "On the Way", color: "#E65100", bg: "#FFF3E0" },
+  { value: "ON_SCENE", label: "On Scene",   color: "#1565C0", bg: "#E3F2FD" },
+  { value: "DONE",     label: "Done",       color: "#2E7D32", bg: "#E8F5E9" },
 ];
 
 // Pre-select the option that matches where the crew already is.
@@ -43,7 +43,7 @@ function timeAgo(iso) {
   return `${Math.round(h / 24)} d ago`;
 }
 
-export default function ReportScreen({ selectedTask, token, online, onDone }) {
+export default function ReportScreen({ selectedTask, token, online }) {
   const originalStatus = defaultStatusFor(selectedTask);
   const [status, setStatus] = useState(originalStatus);
   const [notes, setNotes] = useState("");
@@ -182,16 +182,24 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
   };
 
   const sendEventWithMedia = async () => {
-    const statusLabel = STATUS_OPTIONS.find((s) => s.value === status)?.label || status;
-    const descParts = [];
-    if (status !== originalStatus) descParts.push(`Status set to: ${statusLabel}`);
-    if (notes.trim()) descParts.push(`Notes: ${notes.trim()}`);
+    const trimmedNotes = notes.trim();
+    // A bare status change (On the Way / On Scene / Done) is already written to
+    // the incident's event log by sendTaskUpdate() — markOnMyWay / markArrived
+    // / the DONE PATCH each log their own line ("<unit> en route to <incident>"
+    // etc.). Posting a second "field report" event for it only duplicates that
+    // record. Send this event ONLY when the crew actually attached something:
+    // a written note, a photo, or a video.
+    if (!trimmedNotes && mediaFiles.length === 0) return;
 
+    const descParts = [];
+    if (trimmedNotes) descParts.push(`Notes: ${trimmedNotes}`);
+
+    const incidentLabel = selectedTask?.incident_title || taskTitle;
     try {
       const formData = new FormData();
-      formData.append("event_type", "STATUS_CHANGE");
+      formData.append("event_type", "UPDATE");
       formData.append("severity", "INFO");
-      formData.append("title", `Task Update: ${taskTitle}`);
+      formData.append("title", `Field report — ${incidentLabel}`);
       formData.append("description", descParts.join("\n"));
       formData.append("created_by", user?.username || "Field Unit");
       // Link the report to its incident so it reaches the regional event feed
@@ -228,11 +236,22 @@ export default function ReportScreen({ selectedTask, token, online, onDone }) {
       if (online) {
         await sendTaskUpdate();
         await sendEventWithMedia();
-        loadHistory(); // refresh the "previously sent" list before leaving
+        // Stay on this screen — the crew often files several updates for the
+        // same task. Reset the composer, refresh the history list, and just
+        // confirm with a popup instead of bouncing back to the incident.
+        setNotes("");
+        setMediaFiles([]);
+        loadHistory();
+        Alert.alert("Report sent", "Your report has been submitted.");
       } else {
         await saveReport(taskTitle, notes, offlineStatus, null);
+        setNotes("");
+        setMediaFiles([]);
+        Alert.alert(
+          "Saved offline",
+          "Your report will sync automatically when the connection is restored.",
+        );
       }
-      onDone();
     } catch (err) {
       setError(err.message || "Failed to submit report.");
       try { await saveReport(taskTitle, notes, offlineStatus, null); } catch (_) {}

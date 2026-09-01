@@ -1,4 +1,5 @@
 import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
+import { formatDateTime } from '../utils/time.js';
 
 /**
  * Read-only view of a Field Command's live state, rendered straight from the
@@ -109,11 +110,20 @@ export function FieldCommandSummaryView({ summary, sections = ALL_SECTIONS, hide
         <div>
           <Heading icon="📝" label="Operational Notes" count={notes.length || null} />
           {notes.length ? (
-            <div className="fc-scroll-area" style={{ maxHeight: '120px', overflowY: 'auto' }}>
+            <div className="fc-scroll-area" style={{ maxHeight: '160px', overflowY: 'auto' }}>
               {notes.map((note, idx) => (
-                <div key={`${note.timestamp || idx}`} style={{ fontSize: '0.78rem', padding: '4px 0' }}>
-                  <div style={{ color: '#94a3b8' }}>{note.timestamp || ''}</div>
-                  <div>{note.message || ''}</div>
+                <div
+                  key={`${note.timestamp || idx}`}
+                  style={{
+                    fontSize: '0.78rem',
+                    padding: '6px 0',
+                    borderBottom: idx < notes.length - 1 ? '1px solid rgba(148,163,184,0.15)' : 'none',
+                  }}
+                >
+                  <div style={{ color: '#94a3b8', fontSize: '0.7rem', marginBottom: '2px' }}>
+                    {note.timestamp ? formatDateTime(note.timestamp) : ''}
+                  </div>
+                  <div style={{ lineHeight: 1.35 }}>{note.message || ''}</div>
                 </div>
               ))}
             </div>

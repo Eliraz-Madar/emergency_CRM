@@ -121,9 +121,28 @@ FieldCommand                          ← NEW (real "Field Command Post")
 ├── incidents[] ← Incident.field_command (reverse FK)
 ├── units[]     ← Unit.field_command (reverse FK)
 ├── notes[]     → FieldCommandNote  (message, kind: NOTE|INCIDENT_LINKED|FORCE_ASSIGNED|MISSION|STATUS)
-├── missions[]  → FieldCommandMission (title, details, status OPEN|IN_PROGRESS|DONE,
-│                   assigned_unit → Unit nullable, must be attached to this post)
+├── missions[]  → FieldCommandMission — a force-typed task (mig. 0021):
+│                   title, details, status OPEN|IN_PROGRESS|DONE,
+│                   force_type POLICE|FIRE|MEDICAL (nullable),
+│                   incident → Incident (nullable, SET_NULL),
+│                   assigned_unit → Unit (nullable, must be attached to this post).
+│                   Created from the war-room incident panel's 🗂 Tasks tab;
+│                   every create + status change mirrors to the incident's Event
+│                   Log naming the force + mobile unit. Status read-only in the
+│                   war-room, editable from the field dashboard + mobile.
 └── closed_reason, closed_by_role, closed_by_name, closed_at
+
+FieldCommandSerializer also exposes figure_totals — {injured,dead,trapped,
+treated,evacuated} summed across every IncidentFigureReport on this post's
+incidents (drives the field dashboard's Casualty Figures panel).
+
+IncidentFigureReport                 ← NEW (mig. 0022) — a field crew's live headcount
+├── incident ─────► Incident (CASCADE)
+├── unit ─────────► Unit (nullable, SET_NULL)
+├── reported_by
+├── injured, dead, trapped, treated, evacuated  (PositiveIntegerField)
+└── unique_together (incident, unit) — the mobile app upserts one full set per
+    crew per incident; GET/POST /api/incidents/<id>/figures/
 
 MajorIncident                         ← NEW (real "Go Live" flow)
 ├── incident ─────► Incident (OneToOne, nullable) — the regional Incident it was declared from
@@ -237,20 +256,31 @@ GET /api/tasks/<id>/trip/  → { coords[[lat,lng]...], duration_s, distance_m,
 ```
 GET/POST      /api/field-commands/                     — list / create (lookup by field_key, not pk)
 POST          /api/field-commands/<id>/assign-unit/      — + logs a FORCE_ASSIGNED timeline note
-POST          /api/field-commands/<id>/assign-incident/  — + logs an INCIDENT_LINKED timeline note
-GET/POST      /api/field-commands/<id>/missions/         — list / create missions (+ MISSION note)
+POST          /api/field-commands/<id>/assign-incident/  — + logs an INCIDENT_LINKED note; 409 for an event-scoped post
+GET/POST      /api/field-commands/<id>/missions/         — list (?incident=, ?force_type=) / create a force-typed
+                                                            task (incident_id + force_type required from the war-room);
+                                                            create + status change also write to the incident's Event Log
 PATCH         /api/field-commands/<id>/missions/<mid>/   — status / assignee / title / details
+                                                            (status change logged by force + mobile unit)
 PATCH         /api/field-commands/<id>/metrics/          — casualty/evacuated counts, phase
 POST          /api/field-commands/<id>/close/            — cascades: releases units, closes incidents
+
+GET/POST      /api/incidents/<id>/figures/               — NEW — GET every crew's casualty headcount;
+                                                            POST upserts the caller's {injured,dead,trapped,
+                                                            treated,evacuated} (IsAuthenticated)
 ```
 
 **Central ↔ field real-time sync.** `_broadcast_realtime()` relays the field-command
-assignment/mission/close actions AND `field_command_note_added` (a mobile unit filed
-a field report against a linked incident) — `_FIELD_DASHBOARD_RELAYED_ACTIONS` —
-onto the Field Incident Command dashboard's separate SSE stream
-(`/api/field/updates/stream/`, via `_push_field_sse`), so an open field dashboard
-re-fetches and stays in lockstep with the war-room view of that post — no reload.
-The regional dashboard already consumed these on `/api/updates/stream/`.
+assignment/mission/close actions, `field_command_note_added` (a mobile unit filed a
+field report or casualty figures against a linked incident), AND
+`unit_claimed`/`unit_disconnected` (which now carry `field_command_id` via
+`_unit_field_key`) — `_FIELD_DASHBOARD_RELAYED_ACTIONS` — onto the Field Incident
+Command dashboard's separate SSE stream (`/api/field/updates/stream/`, via
+`_push_field_sse`), so an open field dashboard re-fetches and stays in lockstep with
+the war-room view of that post — no reload. The regional dashboard already consumed
+these on `/api/updates/stream/`; its incident panel also derives a crew's
+online/offline state from the live `onlineUnits` store, so a reconnect flips
+"Connection lost" → "On scene"/"En route" without a refresh.
 
 **Field reports on a post's Operational Timeline.** `FieldCommandSerializer.get_operational_notes`
 returns the post's own typed `FieldCommandNote`s *plus* every `IncidentEvent` with
@@ -289,8 +319,16 @@ GET  /api/tasks/<id>/trip/             — the shared en-route trip (OSRM path +
                                           war-room map and mobile map both read this one object
 GET  /api/tasks/<id>/reports/          — this task's field-report history (IncidentEvent list, newest
                                           first, with media) — the "Previously sent" list on ReportScreen
+POST /api/tasks/<id>/arrive/           — the crew confirms arrival (idempotent; stamps Task.arrived_at,
+                                          parks the unit on the incident, fires the arrival announcement)
+GET  /api/field-commands/<key>/missions/?incident=&force_type=  — the crew's force-matched tasks for an
+                                          incident (mobile Missions screen; TaskSerializer exposes
+                                          field_command_key so the app knows <key>)
+GET/POST /api/incidents/<id>/figures/  — casualty headcount for an incident (mobile Figures screen)
 POST /api/tasks/<id>/by-incident/<id>/
 POST /api/units/claim/  |  POST /api/units/disconnect/  |  POST /api/units/heartbeat/
+                                          — claim/heartbeat bodies include is_mock_location so the
+                                            server ignores a mock GPS fix for a dispatched unit
 POST /api/push-token/
 POST /api/field/add-event/?fieldId=<id>  — a mobile report sends task_id + incident_id so the event
                                             links to both (see IncidentEvent.task)
@@ -312,9 +350,10 @@ POST /api/mobile/unit-status/          — mirrors live web status into the mobi
 #### Regional Dashboard (real DB — DRF router)
 ```
 GET/POST/PATCH/DELETE /api/incidents/                — IncidentViewSet
-POST /api/incidents/<id>/assign-unit/    — create a Task on the REAL incident, advance
-                                            OPEN→PENDING, push, log to a linked post
+POST /api/incidents/<id>/assign-unit/    — reuse a live Task or create a fresh PENDING one (never a
+                                            stale CANCELLED/DONE one), advance OPEN→PENDING, push, log
 POST /api/incidents/<id>/unassign-unit/  — cancel the unit's non-terminal Task (war-room "Cancel")
+POST /api/incidents/<id>/figures/        — GET/POST casualty headcount per (incident, crew)
 POST /api/incidents/<id>/note/
 GET/POST/PATCH/DELETE /api/units/                     — UnitViewSet (?claimable=true, ?type=,
                                                         ?lat&lng sort, ?with_assignment=true)
@@ -364,7 +403,7 @@ GET  /api/field/updates/stream/     — SSE stream (present in api/client.js but
 #### `store/dashboard.js` (Regional)
 - `incidents`, `onlineUnits` (real DB `Unit` rows — this is now the map/dispatch source of truth), `fieldCommands` (real DB `FieldCommand` rows), `events`.
 - `units` (legacy/demo array) is kept for backward compatibility but superseded by `onlineUnits`.
-- Each `onlineUnits` entry also carries **client-only** fields that are never sent by `GET /api/units/`: `assignedTo`, `status` (`ASSIGNED`/`EN_ROUTE`/`ON_SCENE`), `route`/`fullRoute`, `tripAcceptedAt`/`tripDurationS`/`tripSpeedup`, `arrivalAnnounced`. `reconcileUnitAssignments(incidents, units, prev)` (in `Dashboard.jsx`) rebuilds `assignedTo`/`status` from the DB Task rows on every reload so a dispatch survives navigating away; `stepEnRouteUnits()` (a 1s `setInterval`) advances every `EN_ROUTE` vehicle along its trip and speaks its arrival once.
+- Each `onlineUnits` entry also carries **client-only** fields that are never sent by `GET /api/units/`: `assignedTo`, `status` (`ASSIGNED`/`EN_ROUTE`/`ON_SCENE`), `route`/`fullRoute`, `tripAcceptedAt`/`tripDurationS`/`tripSpeedup`, `atDestination`. `reconcileUnitAssignments(incidents, units, prev)` (in `Dashboard.jsx`) rebuilds `assignedTo`/`status` from the DB Task rows on every reload so a dispatch survives navigating away; `stepEnRouteUnits()` (a 1s `setInterval`) advances every `EN_ROUTE` vehicle along its trip. The spoken arrival/en-route line is fired only from the SSE handlers via `announceOnce` (see `utils/announce.js`), never from this tick.
 - `upsertOnlineUnit()` / `upsertFieldCommand()` — merge-by-id-or-insert, used by SSE handlers so partial updates don't clobber the rest of the record.
 - `addIncident()` dedupes by id — defense-in-depth against duplicate delivery (e.g. a stray second SSE connection).
 - Persisted via `zustand/middleware persist` (key `ecm-dashboard-ui`), **schema version 2** with a `migrate()` that discards stale `filters`/`activeFilter` shapes across two prior breaking changes (channel vocabulary standardization, then dropping `CLOSED` from `DEFAULT_FILTERS.statuses`). Only `activeFilter`, `filters`, `sortBy` persist — `selectedIncidentId` is deliberately excluded so a closed/dismissed detail panel never silently reopens after a refresh.
@@ -394,11 +433,7 @@ Top-level state: `majorIncident`, `fieldCommandStatus`, `fieldCommandSummary`, `
 
 The regional dashboard consumes `/api/updates/stream/` via `src/services/realtime.js` (`RealtimeService`). The **Field Incident Command dashboard** consumes its own stream `/api/field/updates/stream/` (`connectToFieldIncidentStream()`) — the legacy `incident_update` shape plus the `field_command_*` actions the backend relays onto it (see the Field Command Post API section); on a matching `field_command_id` it silently re-fetches the post (`applyFieldCommandData`, held in a ref so the stream isn't re-subscribed per field switch).
 
-**Duplicate-connection fix (regional):**
-
-Previously, React's Strict Mode double-invoking mount→cleanup→mount in dev could leave two live `EventSource` connections open. Fixed in `dc2f0ef` with two changes in `Dashboard.jsx`'s data-init `useEffect`:
-1. A local `let cancelled = false` closure flag, checked immediately before `new RealtimeService(...).connect()` — lets the first (discarded) Strict-Mode pass's cleanup bail out *before* it ever opens a connection.
-2. The live connection is held in a `useRef` (not `useState`), so cleanup always disconnects the actual current instance rather than a stale one captured at render time.
+**Single-connection guarantee (regional):** `RealtimeService` keeps **at most one live `EventSource` per instance** — a dropped socket is fully closed (handlers detached + `.close()`) before a replacement is scheduled, `onopen`/`onmessage` ignore a superseded socket, and `es.onerror` **always** closes and schedules exactly one owned reconnect (it does not leave the browser's native EventSource auto-retry racing our reconnect + the dashboard's `reconnectNonce` — that race delivered every event 2–3× and doubled the spoken announcements). `Dashboard.jsx`'s data-init `useEffect` also uses a `let cancelled = false` closure flag (checked immediately before `connect()`) + a `useRef` for the live connection, so React Strict Mode's dev double-mount can't open a second one, and an offline-recovery bump of `reconnectNonce` re-runs the effect (whose cleanup disconnects the old stream) rather than hand-rolling a second connection.
 
 ```
 EventSource connects → connectionStatus = CONNECTING (yellow)
@@ -413,17 +448,20 @@ EventSource connects → connectionStatus = CONNECTING (yellow)
 ```
 Dashboard (Regional, /regional)
 ├── KPICards, IncidentList, MapView, EventFeed, FilterBar
-├── IncidentDetailsPanel   — built on shared SidePanel; tabs: Dispatch | Events | Major Incident | Settings
-│                            (Settings = Incident Severity + Close Incident, split out of the Dispatch
-│                            tab so the primary dispatch action isn't buried under secondary controls)
-└── FieldCommandDetailsPanel  — built on shared SidePanel; tabs: Overview | Assign | Missions | Close
+│   (clicking a post in the KPI "Field Command Posts" card flies the map to its 🎖️ marker)
+├── IncidentDetailsPanel   — built on shared SidePanel; tabs: Dispatch | 🗂 Tasks | Events | Major Incident | Settings
+│   ├── Tasks         — per-incident force-typed tasks: pick 🚓/🚒/🚑 (REQUIRED) + title → createFieldMission;
+│   │                   list grouped by force, status shown as a READ-ONLY pill (the field crew owns it)
+│   ├── Major Incident — a live incident shows one "Field Incident" card ("{title} - Field Incident" +
+│   │                    status + "Open Field HQ ↗" → /field-incident?fieldId=<field_key>); no sector /
+│   │                    task-group / tactical-dispatch UI (removed)
+│   └── Settings      — Incident Severity + Close Incident
+└── FieldCommandDetailsPanel  — built on shared SidePanel; tabs: Overview | Assign | Close
     ├── Overview — FieldCommandSummaryView (shared) — status/phase/casualties, linked Major
     │              Incident, Operational Notes, Assigned Incidents, Assigned Forces, Missions
-    ├── Assign   — "Link incidents / units": two independently-scrolling columns, each
-    │              excluding already-linked/CLOSED entries; POLICE🚓/FIRE🚒/EMS🚑 icons
-    │              (utils/agencyMeta.js, keyed off Incident.channel / Unit.type)
-    ├── Missions — FieldCommandMissionsTab — create a mission (title/details/force), and
-    │              set status (Open/In progress/Done) + assignee on existing ones
+    ├── Assign   — "Link incidents": excludes already-linked/CLOSED. HIDDEN when the post is
+    │              event-scoped (major_incident set — opened via Go Live from one incident;
+    │              backend assign-incident also 409s). No unit-attach column.
     └── Close    — "Close Field Command Post" form (reason + FIELD_OPERATOR/COMMAND_CENTER role)
 
 Selecting a unit / incident / field command on the regional map is 3-way mutually
@@ -439,26 +477,37 @@ FieldCommandSummaryView — shared read-only render of a post's incidents/forces
             tab), so the two dashboards show identical data.
 
 FieldIncidentDashboard (/field-incident)
-├── FieldCommandAssignmentsPanel  ← NEW — "Central Command" panel, tabbed
-│                          (Incidents / Forces / Missions), placed first in the left column
-│                          so it's readable without scrolling; rows via FieldCommandSummaryView
-├── SituationOverview    ← reads the store directly; fetches real Perimeter when mode === LIVE
-│                          (metric-card CSS compacted for the narrower shared column)
-├── SectorMap            ← hazard-level grid
-├── TaskGroupPanel       ← progress bars, category hierarchy
-├── PerimeterMapPicker   — Leaflet click-to-draw polygon tool (react-leaflet)
-└── OperationalTimeline  ← event log; FieldCommandNote entries render typed by `kind`
-                           (Incident Assigned / Force Attached / Mission / Status),
-                           REPORT entries render mobile field reports in full
-                           (📢, "Field Report — <incident>", "by <reporter>",
-                           photo/video thumbnails), plus live central-room updates
-                           via the field SSE relay (incl. `field_command_note_added`)
+  Left column:
+  ├── SituationOverview        ← now JUST the identity header (field name + type/status
+  │                              badges), pinned to the top. Metric grid + quick-stat +
+  │                              critical-alerts block removed.
+  ├── FieldCommandAssignmentsPanel  ← "Central Command" panel, tabbed (Incidents / Forces /
+  │                              Missions); flex-grows to fill the column with its own inner
+  │                              scroll — the dominant panel. Rows via FieldCommandSummaryView.
+  └── CasualtyFiguresPanel     ← NEW — post-wide {injured,trapped,dead,treated,evacuated}
+                                 totals (summary.figure_totals) + per-incident breakdown
+                                 (summary.incidents[].figure_report); live via SSE.
+  Center column:
+  ├── IncidentTaskBoard        ← NEW (replaced SectorMap) — force-grouped task board,
+  │                              status editable (updateFieldMission)
+  └── OperationalTimeline      ← FieldCommandNote entries typed by `kind` (Incident Assigned /
+                                 Force Attached / Mission / Status — a status change names the
+                                 force + mobile unit); REPORT entries render mobile field
+                                 reports in full (📢, "Field Report — <incident>", "by
+                                 <reporter>", thumbnails); live central-room updates via the
+                                 field SSE relay (incl. `field_command_note_added`,
+                                 `unit_claimed`/`unit_disconnected`)
+  Right column:
+  └── FieldForcesPanel         ← NEW (replaced TaskGroupPanel) — units on the ground grouped
+                                 by agency + live phase (Dispatched → En route → On scene →
+                                 Task done → Connection lost)
+  PerimeterMapPicker            — Leaflet click-to-draw polygon tool (LIVE / Go-Live path)
 ```
 
 **Closed/read-only handling:** Closed incidents/field-commands are hidden by default rather than made globally read-only — `DEFAULT_FILTERS.statuses` excludes `CLOSED` (still viewable via the FilterBar status chip); `DashboardSelector.jsx`'s field-command picker filters out `status === 'CLOSED'` entries; `FieldCommandDetailsPanel.jsx`'s "Link Incident" list excludes closed incidents. `IncidentDetailsPanel.jsx` hides the "Close Incident" action once already closed but does not otherwise lock the panel.
 
 ### `frontend-web/src/utils/units.js`
-Pure helpers extracted from MapView's dispatch modal: `calculateDistanceKm()` (haversine) and `getSortedAvailableUnits(units, point, filterFn)` — filters to online units that aren't EN_ROUTE/ON_SCENE/already attached to a FieldCommand, then sorts nearest-first. Reused by Dashboard.jsx's FieldCommand creation checklist and `FieldCommandDetailsPanel.jsx`'s "Assign Global Forces."
+Pure helpers extracted from MapView's dispatch modal: `calculateDistanceKm()` (haversine) and `getSortedAvailableUnits(units, point, filterFn)` — filters to online units that aren't EN_ROUTE/ON_SCENE/already attached to a FieldCommand, then sorts nearest-first. Reused by Dashboard.jsx's FieldCommand creation checklist and the incident panel's Dispatch tab.
 
 ### `frontend-web/src/utils/agencyMeta.js`
 Single POLICE/FIRE/EMS/HOMEFRONT (+ AMBULANCE alias) `{emoji, color}` palette: `getUnitTypeMeta(unit[, fallback])` (keys off `Unit.type`), `getIncidentChannelMeta(incident[, fallback])` (keys off `Incident.channel`). Optional 2nd arg overrides the default `🚨` unknown-marker (the map's point-dispatch diamond passes a `⚡` bolt). Used by `FieldCommandSummaryView`, `FieldCommandDetailsPanel`, `MapView.jsx` (unit icons + point-dispatch markers), and `IncidentList.jsx` (point-dispatch rows). MapView's hidden/legacy `<MapContainer>` still has its own `policeIcon`/`fireIcon`/`medicalIcon` (dead — 0×0 map).
@@ -507,15 +556,23 @@ mobile-app/utils/taskActions.js
     only when it's still OPEN/PENDING). markArrived(task) — incident → ON_SCENE.
 ```
 
-### Dispatch acceptance & live route (`IncidentMapScreen.js`, `TasksScreen.js`)
+### Dispatch acceptance, missions & figures (`TasksScreen.js`, `MissionsScreen.js`, `FiguresScreen.js`, `IncidentMapScreen.js`)
 
-- `TasksScreen` shows **On My Way** while the crew's own task is `PENDING`, then
-  **Arrived on scene** while it's `IN_PROGRESS` — gated on the task, not the shared
-  incident status, so a unit added to an already-`ON_SCENE` incident can still accept.
+- `TasksScreen` (header **"INCIDENTS"**, was "My Tasks") shows **On My Way** while the
+  crew's own task is `PENDING`, then **Arrived on scene** while `IN_PROGRESS` — gated
+  on the task, not the shared incident status. Each incident card also carries
+  **🗺 ROUTE**, **🗂 MISSIONS**, **🔢 FIGURES**, **FILE REPORT**. 5 s polling.
+- `MissionsScreen` — `GET /api/field-commands/<key>/missions/?incident=&force_type=<crew's force>`
+  (force resolved from `Unit.type`: FIRE→FIRE, EMS/AMBULANCE→MEDICAL, else POLICE);
+  each task has **ON IT** / **FINISHED** which PATCH the mission; polls every 10 s.
+- `FiguresScreen` — a ± stepper form per incident (injured/trapped/dead/treated/
+  evacuated), prefilled from this crew's last `GET .../figures/` row; **SEND FIGURES**
+  POSTs the full set (replaces the previous row).
 - After accepting, `IncidentMapScreen` fetches the shared trip and draws the road
-  route + a moving vehicle marker, shows live distance / ETA, and the camera
-  **follows the vehicle** as it advances. "En Route" vs "On Scene" is read from the
-  trip (`ts.arrived`), not the incident status.
+  route + a moving vehicle marker, shows live distance / ETA, and **re-zooms to the
+  route + vehicle on every screen focus** (`useFocusEffect` + `fitToCoordinates`).
+  Only 3 severity levels (CRITICAL folded into HIGH). "En Route" vs "On Scene" is
+  read from the trip (`ts.arrived`), not the incident status.
 
 ### Polymorphic Report Submission
 ```
@@ -535,7 +592,7 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 ### Backend Storage
 | Type | Location | Content |
 |---|---|---|
-| SQLite DB | `backend/db.sqlite3` | Incident, Unit, Task, FieldCommand, MajorIncident, Sector, TaskGroup, Perimeter, IncidentEvent, ReportMedia |
+| SQLite DB | `backend/db.sqlite3` | Incident, Unit, Task, FieldCommand, FieldCommandNote, FieldCommandMission, MajorIncident, Sector, TaskGroup, Perimeter, IncidentEvent, ReportMedia, IncidentFigureReport |
 | Media files | `backend/media/report_media/YYYY/MM/DD/` | Uploaded images and videos |
 | Static files | `backend/static/` | Django admin static assets |
 
@@ -600,6 +657,9 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 | `0017_fieldcommandnote_kind_fieldcommandmission` | FieldCommandNote.kind; **FieldCommandMission model** |
 | `0018_incidentevent_task` | IncidentEvent.task FK (nullable, SET_NULL) — links a mobile field report to its Task |
 | `0019_merge_mobile_dispatch_mirror_incidents` | **Data migration:** fold every `mobile_dispatch` "mirror" Incident (a second row with `mock_incident_id` == a real Incident's pk) back into the real one — moves open tasks + events, deletes the duplicate. One-off cleanup for rows the old bridge left behind |
+| `0020_task_arrived_at` | `Task.arrived_at` — the crew's own confirmed-arrival timestamp (distinct from the shared incident status) |
+| `0021_fieldcommandmission_force_type_and_more` | `FieldCommandMission.force_type` (POLICE/FIRE/MEDICAL) + `.incident` FK — turns a mission into a force-typed, incident-scoped task |
+| `0022_incidentfigurereport` | **`IncidentFigureReport` model** — per (incident, unit) casualty headcount |
 
 ---
 
@@ -620,8 +680,32 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 
 ---
 
-**Last Updated:** 2026-08-30
-**Architecture Version:** 4.2
+**Last Updated:** 2026-09-01
+**Architecture Version:** 4.3
+
+**Changelog v4.3 (Sep 1, 2026 — force-typed tasks, casualty figures, field-dashboard rework, permanent double-voice fix):**
+
+*Force-typed tasks (`FieldCommandMission` + migration `0021`):*
+- `FieldCommandMission` gained `force_type` (POLICE/FIRE/MEDICAL) + `incident` FK. A "mission" is now a force-typed task scoped to an incident, created from the war-room incident panel's new **🗂 Tasks** tab (force + title required). `FieldCommandViewSet.missions` POST accepts `incident_id`/`force_type` and validates the incident; GET filters `?incident=`/`?force_type=`.
+- Every task create AND every status change is mirrored into the incident's own Event Log (`_log_task_to_incident_feed`) and logged by **force + mobile unit** (`_mission_actor_label`) on both the incident feed and the field command's Operational Timeline. `_log_status_change` gained an `event_type` param.
+- Status is **read-only in the war-room** (a static pill) — only the owning field crew changes it, from the field dashboard (`IncidentTaskBoard`) or the mobile **Missions** screen.
+
+*Casualty figures (`IncidentFigureReport` + migration `0022`):*
+- New model + `GET/POST /api/incidents/<id>/figures/`. Mobile **Figures** screen: a stepper form per incident (injured/trapped/dead/treated/evacuated), upserted per (incident, unit). `FieldCommandSerializer.figure_totals` sums across the post's incidents; the field dashboard's new **CasualtyFiguresPanel** shows the totals + a per-incident breakdown, live via the `field_command_note_added` relay.
+
+*Field Incident Command dashboard rework:*
+- `SectorMap` → **`IncidentTaskBoard`** (force-grouped, status editable), `TaskGroupPanel` → **`FieldForcesPanel`** (units by agency + live phase). `SituationOverview` reduced to the identity header (field name + type/status badges) — the static metric grid / quick-stat / critical-alerts were removed. `FieldCommandAssignmentsPanel` ("Central Command") now flex-grows to fill the column with its own inner scroll. `SectorMap.jsx`, `TaskGroupPanel.jsx`, `FieldCommandMissionsTab.jsx` **deleted**.
+- Major Incident tab in the war-room simplified to one "Field Incident" card + "Open Field HQ ↗" (`IncidentSerializer.get_major_incident` returns `field_key`/`field_command_name`); tactical-dispatch / sectors / task-groups UI removed. An **event-scoped** post (opened via Go Live from one incident) can't take more incidents — Assign tab hidden + `assign-incident` 409.
+
+*Live status + reconnect:*
+- The war-room incident panel derives a crew's online/offline from the live `onlineUnits` store, so a reconnect flips "Connection lost" → "On scene"/"En route" without a refresh. `unit_claimed`/`unit_disconnected` carry `field_command_id` and are relayed to the field stream.
+- Disconnect/reconnect keeps the unit's **last position** (server-managed while it has an active task): disconnect mid-drive snapshots the interpolated spot and rolls the task to PENDING; disconnect after arrival parks at the scene; reclaim accepts phone GPS only with no active task / no mock fix (`is_mock_location` sent by the mobile).
+- `assign-unit` reuses only a non-terminal Task — a stale CANCELLED/DONE one is never handed back (re-dispatch-after-cancel fix).
+
+*Permanent double-voice fix (`utils/announce.js`, `services/realtime.js`, `simulated/realtime.py`):*
+- All announce dedup + speaker state on a `window.__ecmAnnounce` hub; a per-exact-sentence guard (no repeat within 12 s); a single-speaker election via `navigator.locks` (`ecm-speaker`). `RealtimeService.onerror` always closes + owns one reconnect. `get_realtime_service()` creation lock-guarded.
+
+*Tests:* +7 (`IncidentFigureReportTests`, force-typed task + Event Log + actor-label + event-scoped-post cases, re-dispatch, disconnect/reconnect) — **89 backend tests**.
 
 **Changelog v4.2 (Aug 27–30, 2026 — field-unit dispatch lifecycle, shared en-route trip, timeline reports):**
 

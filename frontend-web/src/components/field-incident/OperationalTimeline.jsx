@@ -5,7 +5,7 @@
  * Provides operational decision trail for major incident response.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFieldIncidentStore } from '../../store/fieldIncident';
 import { formatTime } from '../../utils/time.js';
 
@@ -13,6 +13,17 @@ const OperationalTimeline = ({ onShowDetails }) => {
   const events = useFieldIncidentStore((s) => s.events);
   const [showLegend, setShowLegend] = useState(false);
   const [severityFilter, setSeverityFilter] = useState('ALL');
+  // A picture opened from a report — shown in an in-pane lightbox (same tab,
+  // no new browser tab) with the report message above it. Not the event
+  // details modal: clicking a thumbnail must not also open that.
+  const [lightbox, setLightbox] = useState(null);
+
+  useEffect(() => {
+    if (!lightbox) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setLightbox(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightbox]);
 
   // Safety check: ensure events is an array
   const safeEvents = Array.isArray(events) ? events : [];
@@ -223,15 +234,22 @@ const OperationalTimeline = ({ onShowDetails }) => {
                             className="event-media-thumb"
                             controls
                             preload="metadata"
+                            onClick={(e) => e.stopPropagation()}
                           />
                         ) : (
-                          <a key={m.id} href={m.file_url} target="_blank" rel="noreferrer">
-                            <img
-                              src={m.file_url}
-                              alt="Field attachment"
-                              className="event-media-thumb"
-                            />
-                          </a>
+                          <img
+                            key={m.id}
+                            src={m.file_url}
+                            alt="Field attachment"
+                            className="event-media-thumb"
+                            style={{ cursor: 'zoom-in' }}
+                            onClick={(e) => {
+                              // Stay in this tab, open the picture in-pane, and
+                              // don't also trigger the row's event-details modal.
+                              e.stopPropagation();
+                              setLightbox({ media: m, event });
+                            }}
+                          />
                         )
                       )}
                     </div>
@@ -240,6 +258,33 @@ const OperationalTimeline = ({ onShowDetails }) => {
               </div>
             )
           })}
+        </div>
+      )}
+
+      {lightbox && (
+        <div
+          className="timeline-lightbox-overlay"
+          onClick={() => setLightbox(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="timeline-lightbox" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="timeline-lightbox-close"
+              onClick={() => setLightbox(null)}
+              title="Close"
+            >
+              ✕
+            </button>
+            <div className="timeline-lightbox-caption">
+              <strong>{lightbox.event?.title || 'Field attachment'}</strong>
+              {lightbox.event?.description && (
+                <span>{lightbox.event.description}</span>
+              )}
+            </div>
+            <img src={lightbox.media.file_url} alt="Field attachment" />
+          </div>
         </div>
       )}
     </div>

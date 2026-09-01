@@ -69,13 +69,19 @@ class RealtimeUpdateService:
         self.simulation_enabled = enabled
 
 
-# Global instance
+# Global instance. runserver is multi-threaded, so guard creation with a lock —
+# an unsynchronised check-then-create let two threads build two services, after
+# which broadcasts reached only whichever one was assigned last and every other
+# SSE client went silent (or, depending on ordering, got events twice).
 _realtime_service = None
+_realtime_service_lock = threading.Lock()
 
 
 def get_realtime_service() -> RealtimeUpdateService:
-    """Get or create realtime service."""
+    """Get or create the one realtime service."""
     global _realtime_service
     if _realtime_service is None:
-        _realtime_service = RealtimeUpdateService()
+        with _realtime_service_lock:
+            if _realtime_service is None:
+                _realtime_service = RealtimeUpdateService()
     return _realtime_service

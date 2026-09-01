@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { SidePanel } from './SidePanel.jsx';
 import { FieldCommandSummaryView } from './FieldCommandSummaryView.jsx';
-import { FieldCommandMissionsTab } from './FieldCommandMissionsTab.jsx';
-import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
+import { getIncidentChannelMeta } from '../utils/agencyMeta.js';
 
 /**
  * FieldCommand detail panel — extracted from Dashboard.jsx's inline
@@ -36,18 +35,29 @@ export function FieldCommandDetailsPanel({
   closeFieldRole,
   setCloseFieldRole,
   incidents,
-  sortedAssignableUnits,
   onRefresh,
   onClose,
   onCloseFieldCommand,
   onLinkIncident,
-  onAssignUnit,
-  onCreateMission,
-  onUpdateMission,
 }) {
   const [activeTab, setActiveTab] = useState('overview');
 
   if (!selectedFieldCommand) return null;
+
+  // A post opened by escalating a single incident ("Go Live") belongs to that
+  // incident alone — no more incidents can ever be linked to it, so there is
+  // nothing for the Assign tab to do.
+  const eventScoped = Boolean(
+    fieldCommandSummary?.major_incident || selectedFieldCommand?.major_incident,
+  );
+  // guard against a stale 'assign' selection carried over from another post
+  const currentTab = eventScoped && activeTab === 'assign' ? 'overview' : activeTab;
+
+  const tabs = [
+    { id: 'overview', label: '📋 Overview' },
+    ...(eventScoped ? [] : [{ id: 'assign', label: '🔗 Assign' }]),
+    { id: 'close', label: '⚙ Close' },
+  ];
 
   const linkableIncidents = Array.isArray(incidents)
     ? incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED')
@@ -90,22 +100,17 @@ export function FieldCommandDetailsPanel({
 
       {/* ── Tab Bar ── */}
       <div style={{ display: 'flex', borderBottom: '1px solid #1e293b', flexShrink: 0, marginTop: '10px' }}>
-        {[
-          { id: 'overview',  label: '📋 Overview' },
-          { id: 'assign',    label: '🔗 Assign'   },
-          { id: 'missions',  label: '🎯 Missions' },
-          { id: 'close',     label: '⚙ Close'     },
-        ].map(({ id, label }) => (
+        {tabs.map(({ id, label }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
             style={{
               flex: 1,
               padding: '9px 0',
-              background: activeTab === id ? 'rgba(59,130,246,0.10)' : 'transparent',
-              color: activeTab === id ? '#60a5fa' : '#6b7280',
+              background: currentTab === id ? 'rgba(59,130,246,0.10)' : 'transparent',
+              color: currentTab === id ? '#60a5fa' : '#6b7280',
               border: 'none',
-              borderBottom: activeTab === id ? '2px solid #3b82f6' : '2px solid transparent',
+              borderBottom: currentTab === id ? '2px solid #3b82f6' : '2px solid transparent',
               cursor: 'pointer',
               fontSize: '0.82rem',
               fontWeight: '600',
@@ -116,15 +121,15 @@ export function FieldCommandDetailsPanel({
         ))}
       </div>
 
-      {/* assign tab: the two columns below each scroll independently, so the
-          outer wrapper must not also scroll (same "don't double-scroll"
-          rule IncidentDetailsPanel.jsx applies to its Events tab). */}
+      {/* the assign tab manages its own inner scroll area, so the outer
+          wrapper must not also scroll (same "don't double-scroll" rule
+          IncidentDetailsPanel.jsx applies to its Events tab). */}
       <div
-        className={activeTab === 'assign' ? '' : 'cc-list-scrollable'}
+        className={currentTab === 'assign' ? '' : 'cc-list-scrollable'}
         style={{
           flex: 1,
           minHeight: 0,
-          overflowY: activeTab === 'assign' ? 'hidden' : 'auto',
+          overflowY: currentTab === 'assign' ? 'hidden' : 'auto',
           padding: '1rem',
           display: 'flex',
           flexDirection: 'column',
@@ -136,98 +141,54 @@ export function FieldCommandDetailsPanel({
             the field command's own dashboard (FieldIncidentDashboard) never
             drift apart. All sections shown here; the field dashboard reuses
             the same component with a narrower `sections` list. */}
-        {activeTab === 'overview' && (
+        {currentTab === 'overview' && (
           <FieldCommandSummaryView summary={fieldCommandSummary} />
         )}
 
-        {/* ── Missions tab: give this post titled taskings, optionally handed
-              to one of its attached forces. ── */}
-        {activeTab === 'missions' && (
-          <FieldCommandMissionsTab
-            missions={fieldCommandSummary?.missions || []}
-            units={fieldCommandSummary?.units || []}
-            disabled={(fieldCommandSummary?.status || selectedFieldCommand?.status) === 'CLOSED'}
-            busy={fieldCommandLoading}
-            onCreateMission={onCreateMission}
-            onUpdateMission={onUpdateMission}
-          />
-        )}
-
-        {/* ── Assign tab: two independently-scrolling columns (Incidents | Units)
-              instead of two stacked lists — each column keeps its own scroll
-              area so scrolling one never affects the other. ── */}
-        {activeTab === 'assign' && (
+        {/* ── Assign tab: link incidents to this post. Units are NOT assigned
+              to a field command — they're dispatched to incidents, and the
+              post coordinates them through the incidents it owns. ── */}
+        {currentTab === 'assign' && (
           <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-            <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#e2e8f0', marginBottom: '10px', flexShrink: 0 }}>
-              Link incidents / units
+            <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#e2e8f0', marginBottom: '4px', flexShrink: 0 }}>
+              Link incidents
+            </div>
+            <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '10px', flexShrink: 0 }}>
+              Forces are dispatched to incidents, not to the post.
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', flex: 1, minHeight: 0 }}>
-              {/* Incidents column */}
-              <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, border: '1px solid #1f2937', borderRadius: '6px', padding: '8px' }}>
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2" style={{ flexShrink: 0 }}>Incidents</div>
-                <div className="cc-list-scrollable" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                  {/* Closed incidents are never linkable — they're done,
-                      not a target for further field-command coordination. */}
-                  {linkableIncidents.length ? (
-                    linkableIncidents.map((inc) => (
-                      <div key={inc.id} style={{ marginBottom: '8px' }}>
-                        <div
-                          style={{ fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3, marginBottom: '3px' }}
-                        >
-                          {getIncidentChannelMeta(inc).emoji} {inc.title || `Incident ${inc.id}`}
-                        </div>
-                        <button
-                          className="feed-toggle"
-                          style={{ width: '100%', fontSize: '0.68rem', padding: '0.2rem 0.4rem' }}
-                          onClick={() => onLinkIncident(inc.id)}
-                        >
-                          Link
-                        </button>
+            <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, border: '1px solid #1f2937', borderRadius: '6px', padding: '8px', flex: 1 }}>
+              <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2" style={{ flexShrink: 0 }}>Unlinked incidents</div>
+              <div className="cc-list-scrollable" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                {/* Closed incidents are never linkable — they're done,
+                    not a target for further field-command coordination. */}
+                {linkableIncidents.length ? (
+                  linkableIncidents.map((inc) => (
+                    <div key={inc.id} style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div
+                        style={{ flex: 1, fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3 }}
+                      >
+                        {getIncidentChannelMeta(inc).emoji} {inc.title || `Incident ${inc.id}`}
                       </div>
-                    ))
-                  ) : (
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>No unlinked incidents</div>
-                  )}
-                </div>
-              </div>
-
-              {/* Units column */}
-              <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, border: '1px solid #1f2937', borderRadius: '6px', padding: '8px' }}>
-                <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2" style={{ flexShrink: 0 }}>Units (nearest first)</div>
-                <div className="cc-list-scrollable" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                  {sortedAssignableUnits.length ? (
-                    sortedAssignableUnits.map((unit) => (
-                      <div key={unit.id} style={{ marginBottom: '8px' }}>
-                        <div
-                          style={{ fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3, marginBottom: '3px' }}
-                        >
-                          {getUnitTypeMeta(unit).emoji} {unit.name || `Unit ${unit.id}`}
-                          {' '}
-                          <span style={{ color: '#64748b' }}>
-                            ({Number.isFinite(unit.distanceKm) ? `${unit.distanceKm.toFixed(1)} km` : 'No GPS'})
-                          </span>
-                        </div>
-                        <button
-                          className="feed-toggle"
-                          style={{ width: '100%', fontSize: '0.68rem', padding: '0.2rem 0.4rem' }}
-                          onClick={() => onAssignUnit(unit.id)}
-                        >
-                          Assign
-                        </button>
-                      </div>
-                    ))
-                  ) : (
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>No unassigned forces available</div>
-                  )}
-                </div>
+                      <button
+                        className="feed-toggle"
+                        style={{ fontSize: '0.68rem', padding: '0.2rem 0.6rem', flexShrink: 0 }}
+                        onClick={() => onLinkIncident(inc.id)}
+                      >
+                        Link
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>No unlinked incidents</div>
+                )}
               </div>
             </div>
           </div>
         )}
 
         {/* ── Close tab ── */}
-        {activeTab === 'close' && (
+        {currentTab === 'close' && (
           <div>
             <div className="cc-section-label text-xs uppercase text-slate-500 font-bold mb-2">Close Field Command Post</div>
             <textarea

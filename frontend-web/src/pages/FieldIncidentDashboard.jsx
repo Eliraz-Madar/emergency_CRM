@@ -23,10 +23,12 @@ import {
   getMajorIncidentSectors,
   getMajorIncidentTaskGroups,
   submitMajorIncidentPerimeter,
+  updateFieldMission,
 } from '../api/client';
 import SituationOverview from '../components/field-incident/SituationOverview';
-import SectorMap from '../components/field-incident/SectorMap';
-import TaskGroupPanel from '../components/field-incident/TaskGroupPanel';
+import CasualtyFiguresPanel from '../components/field-incident/CasualtyFiguresPanel';
+import IncidentTaskBoard from '../components/field-incident/IncidentTaskBoard';
+import FieldForcesPanel from '../components/field-incident/FieldForcesPanel';
 import OperationalTimeline from '../components/field-incident/OperationalTimeline';
 import PerimeterMapPicker from '../components/field-incident/PerimeterMapPicker';
 import FieldCommandAssignmentsPanel from '../components/field-incident/FieldCommandAssignmentsPanel';
@@ -60,13 +62,19 @@ const buildFieldCommandNoteEvents = (operationalNotes) => (
     // A mobile field report carries the reporter, the incident it's about and
     // any photo/video attachments — surface all of it, not just the message.
     if (note.kind === 'REPORT') {
+      // Attribute the report to the reporting vehicle (backend resolves it
+      // from the dispatched task), falling back to whatever `created_by`
+      // carries for older, non-task-scoped entries.
+      const reporter = note.unit_name || note.created_by || null;
       return {
         id: `report-${note.timestamp}-${idx}`,
         event_type: meta.event_type,
         severity: 'INFO',
-        title: note.incident_title ? `Field Report — ${note.incident_title}` : meta.title,
+        title: note.incident_title
+          ? `Field Report — ${note.incident_title}${reporter ? ` (${reporter})` : ''}`
+          : meta.title,
         description: note.message,
-        created_by: note.created_by || null,
+        created_by: reporter,
         media: Array.isArray(note.media) ? note.media : [],
         created_at: note.timestamp,
       };
@@ -84,7 +92,33 @@ const buildFieldCommandNoteEvents = (operationalNotes) => (
 const sortByCreatedAtDesc = (events) =>
   events.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-const buildLiveTimelineEvents = (sectors, taskGroups, operationalNotes) => {
+// Full-detail timeline card for every incident linked to this control room —
+// so "an event was assigned to us" carries its type, priority, status,
+// location and description, not just a one-line "Incident Assigned" note.
+const buildLinkedIncidentEvents = (incidents) => (
+  (incidents || []).map((inc) => {
+    const details = [
+      inc.channel ? `Channel: ${inc.channel}` : null,
+      inc.priority ? `Priority: ${inc.priority}` : null,
+      `Status: ${inc.status}`,
+      Number.isFinite(inc.location_lat) && Number.isFinite(inc.location_lng)
+        ? `Location: ${inc.location_lat.toFixed(4)}, ${inc.location_lng.toFixed(4)}`
+        : null,
+      inc.description ? `Details: ${inc.description}` : null,
+    ].filter(Boolean).join('\n');
+    return {
+      id: `linked-incident-${inc.id}`,
+      event_type: 'ASSIGNMENT',
+      severity: inc.priority === 'CRITICAL' ? 'CRITICAL'
+        : inc.priority === 'HIGH' ? 'WARNING' : 'INFO',
+      title: `Incident: ${inc.title}`,
+      description: details,
+      created_at: inc.created_at,
+    };
+  })
+);
+
+const buildLiveTimelineEvents = (sectors, taskGroups, operationalNotes, incidents) => {
   const sectorEvents = (sectors || []).map((s) => ({
     event_type: 'STATUS_CHANGE',
     severity: s.hazard_level === 'CRITICAL' ? 'CRITICAL' : 'INFO',
@@ -101,13 +135,17 @@ const buildLiveTimelineEvents = (sectors, taskGroups, operationalNotes) => {
   }));
   return sortByCreatedAtDesc([
     ...buildFieldCommandNoteEvents(operationalNotes),
+    ...buildLinkedIncidentEvents(incidents),
     ...sectorEvents,
     ...taskEvents,
   ]);
 };
 
-const buildFieldCommandTimelineEvents = (operationalNotes) =>
-  sortByCreatedAtDesc(buildFieldCommandNoteEvents(operationalNotes));
+const buildFieldCommandTimelineEvents = (operationalNotes, incidents) =>
+  sortByCreatedAtDesc([
+    ...buildFieldCommandNoteEvents(operationalNotes),
+    ...buildLinkedIncidentEvents(incidents),
+  ]);
 
 const FieldIncidentDashboard = () => {
   const navigate = useNavigate();
@@ -202,13 +240,34 @@ const FieldIncidentDashboard = () => {
       ]);
       setSectors(Array.isArray(sectors) ? sectors : []);
       setTaskGroups(Array.isArray(taskGroups) ? taskGroups : []);
-      setEvents(buildLiveTimelineEvents(sectors, taskGroups, fieldCommandData?.operational_notes));
+      setEvents(buildLiveTimelineEvents(
+        sectors, taskGroups, fieldCommandData?.operational_notes, fieldCommandData?.incidents,
+      ));
     } else {
       setSectors([]);
       setTaskGroups([]);
-      setEvents(buildFieldCommandTimelineEvents(fieldCommandData?.operational_notes));
+      setEvents(buildFieldCommandTimelineEvents(
+        fieldCommandData?.operational_notes, fieldCommandData?.incidents,
+      ));
     }
   }, [setFieldCommandData, setSectors, setTaskGroups, setEvents]);
+
+  // Field operator advances a task on the board — PATCH then re-pull the post
+  // so the board + timeline reflect it (a mobile crew's update arrives the
+  // same way via the field_command_mission_updated SSE relay).
+  const [taskBusyId, setTaskBusyId] = useState(null);
+  const handleTaskStatus = useCallback(async (missionId, status) => {
+    if (!fieldId) return;
+    setTaskBusyId(missionId);
+    try {
+      await updateFieldMission(fieldId, missionId, { status });
+      await applyFieldCommandData(fieldId);
+    } catch (err) {
+      console.error('Failed to update task status:', err);
+    } finally {
+      setTaskBusyId(null);
+    }
+  }, [fieldId, applyFieldCommandData]);
 
   // Kept current for the SSE effect (empty deps — see its comment) so a
   // relayed central-room update can refresh the currently-shown post without
@@ -310,9 +369,7 @@ const FieldIncidentDashboard = () => {
       // real post earlier in this same tab session (client-side routing
       // doesn't remount the store) — reset() clears majorIncident/sectors/
       // taskGroups/events/fieldCommandStatus in one atomic set, not just
-      // mode, so no real data can leak into any child panel (SectorMap/
-      // TaskGroupPanel don't have SituationOverview's own ROUTINE-mode
-      // display override, so mode alone wouldn't be enough to mask it).
+      // mode, so no real data can leak into any child panel.
       resetFieldIncidentStore();
       // Local component state, not covered by the store's reset() — left
       // over from an earlier real-post view in this same tab session, this
@@ -432,6 +489,7 @@ const FieldIncidentDashboard = () => {
               }
             } else if (data.type === 'user_action' && (
               data.action === 'field_command_incident_assigned' ||
+              data.action === 'field_command_incident_unassigned' ||
               data.action === 'field_command_unit_assigned' ||
               data.action === 'field_command_closed' ||
               data.action === 'field_command_mission_created' ||
@@ -439,7 +497,11 @@ const FieldIncidentDashboard = () => {
               // A mobile unit filed a field report against a linked incident —
               // its Operational Timeline entry (with reporter + attachments)
               // rides along in the refreshed operational_notes.
-              data.action === 'field_command_note_added'
+              data.action === 'field_command_note_added' ||
+              // A crew on a linked incident dropped offline / reconnected —
+              // refresh so the assigned-forces status flips live.
+              data.action === 'unit_claimed' ||
+              data.action === 'unit_disconnected'
             )) {
               // The central room linked an incident, attached a force, gave a
               // mission, or closed this post. These are relayed onto this
@@ -1046,17 +1108,25 @@ const FieldIncidentDashboard = () => {
             rows). Real posts only; a drill has no FieldCommand behind it.
             Situation Overview (metrics/alerts) sits below as reference. */}
         <section className="dashboard-section overview-section">
+          <SituationOverview />
           {(mode === 'FIELD_COMMAND' || mode === 'LIVE') && fieldCommandSummary && (
             <FieldCommandAssignmentsPanel summary={fieldCommandSummary} />
           )}
-          <SituationOverview />
+          {(mode === 'FIELD_COMMAND' || mode === 'LIVE') && fieldCommandSummary && (
+            <CasualtyFiguresPanel summary={fieldCommandSummary} />
+          )}
         </section>
 
-        {/* Center Column: Sectors and Tasks */}
+        {/* Center Column: force-grouped task board + operational timeline */}
         <section className="dashboard-section operations-section">
           <div className="operations-column">
             <div className="operations-card sectors-card">
-              <SectorMap />
+              <IncidentTaskBoard
+                summary={fieldCommandSummary}
+                onStatusChange={handleTaskStatus}
+                busyId={taskBusyId}
+                disabled={isClosed}
+              />
             </div>
             <div className="operations-card timeline-card">
               <OperationalTimeline onShowDetails={setSelectedTimelineEvent} />
@@ -1064,9 +1134,9 @@ const FieldIncidentDashboard = () => {
           </div>
         </section>
 
-        {/* Right Column: Task Groups */}
+        {/* Right Column: forces on the ground */}
         <section className="dashboard-section tasks-section">
-          <TaskGroupPanel />
+          <FieldForcesPanel summary={fieldCommandSummary} />
         </section>
       </main>
 

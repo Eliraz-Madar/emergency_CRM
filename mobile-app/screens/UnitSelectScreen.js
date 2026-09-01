@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   View, Text, SectionList, TouchableOpacity,
   StyleSheet, ActivityIndicator, StatusBar, Platform,
 } from "react-native";
+import NetInfo from "@react-native-community/netinfo";
 import * as Notifications from "expo-notifications";
 import { API_BASE_URL } from "../config";
 import { useUser } from "../context/UserContext";
@@ -92,6 +93,7 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
   const [locationNotice, setLocationNotice]   = useState("");
   const [deviceLocation, setDeviceLocation]   = useState(null);
   const { user } = useUser();
+  const deviceLocationRef = useRef(null);
 
   const accentColor = TYPE_COLOR[user?.unit_type] ?? "#1565C0";
   const icon = TYPE_ICON[user?.unit_type] ?? "🚨";
@@ -100,17 +102,46 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
     loadUnits();
   }, []);
 
-  const loadUnits = async () => {
-    setLoading(true);
-    setError("");
+  // Keep the list live — a dispatch attached to a unit (or removed from it)
+  // by the war-room shows up here on its own, no pull-to-refresh, exactly
+  // like MY TASKS. This screen is rendered OUTSIDE the NavigationContainer
+  // (App.js returns it before the navigator), so no navigation hooks here —
+  // it only mounts while the user is on unit selection, so an unconditional
+  // 5 s poll is exactly the right scope.
+  const refreshUnitsRef = useRef(null);
+  refreshUnitsRef.current = () => loadUnits({ silent: true });
+
+  useEffect(() => {
+    const iv = setInterval(() => refreshUnitsRef.current(), 5000);
+    return () => clearInterval(iv);
+  }, []);
+
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener((state) => {
+      if (state.isConnected && state.isInternetReachable !== false) {
+        refreshUnitsRef.current();
+      }
+    });
+    return unsub;
+  }, []);
+
+  const loadUnits = async ({ silent = false } = {}) => {
+    if (!silent) { setLoading(true); setError(""); }
     try {
-      const location = await getDeviceLocation();
+      // A silent background refresh reuses the last known GPS fix — no need to
+      // re-query location every 5 s.
+      const location = silent && deviceLocationRef.current
+        ? deviceLocationRef.current
+        : await getDeviceLocation();
+      deviceLocationRef.current = location;
       setDeviceLocation(location);
-      setLocationNotice(
-        location.isMock
-          ? "Live GPS unavailable — showing nearby units without distance sorting."
-          : ""
-      );
+      if (!silent) {
+        setLocationNotice(
+          location.isMock
+            ? "Live GPS unavailable — showing nearby units without distance sorting."
+            : ""
+        );
+      }
 
       const params = new URLSearchParams({
         claimable: "true",
@@ -120,19 +151,29 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
       });
       if (user?.unit_type) params.set("type", user.unit_type);
 
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), silent ? 12000 : 8000);
       const res = await fetch(`${API_BASE_URL}/api/units/?${params.toString()}`, {
         headers: getAuthHeaders(token, user),
+        signal: controller.signal,
+        cache: "no-store",
       });
+      clearTimeout(timeout);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (data.length === 0) {
-        setError("No unclaimed units nearby.\nAsk a dispatcher to register a unit, then retry.");
-      }
       setUnits(data);
+      if (!silent) {
+        setError(
+          data.length === 0
+            ? "No unclaimed units nearby.\nAsk a dispatcher to register a unit, then retry."
+            : "",
+        );
+      }
     } catch {
-      setError("Could not load units. Check your connection.");
+      // Background failures stay quiet — never wipe the list or flash an error.
+      if (!silent) setError("Could not load units. Check your connection.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -149,6 +190,9 @@ export default function UnitSelectScreen({ token, onSelectUnit }) {
           id: unit.id,
           location_lat: location.latitude,
           location_lng: location.longitude,
+          // Flags a no-GPS-fix fallback reading so a reconnect doesn't
+          // teleport this unit's marker to it (see utils/location.js).
+          is_mock_location: location.isMock,
         }),
       });
 

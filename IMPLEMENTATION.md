@@ -65,10 +65,19 @@ State: `majorIncident`, `fieldCommandStatus`, `fieldCommandSummary`, `sectors`, 
 Dashboard.jsx (Regional)
 ├── KPICards, IncidentList, MapView, EventFeed, FilterBar
 ├── IncidentDetailsPanel   (built on shared SidePanel; hides "Close Incident" once CLOSED)
-└── FieldCommandDetailsPanel  (built on shared SidePanel) — tabs: Overview / Assign / Missions / Close
+│   tabs: Dispatch / 🗂 Tasks / Events / Major Incident / Settings
+│   ├── Tasks         → per-incident force-typed tasks. Add: pick 🚓/🚒/🚑 (REQUIRED) + title →
+│   │                    createFieldMission(fieldKey, {title, force_type, incident_id}); list grouped by
+│   │                    force, status shown as a READ-ONLY pill (the field crew drives it, not the war-room)
+│   └── Major Incident → if the incident has gone live: one "Field Incident" card
+│                        ("{incident.title} - Field Incident" + status + "Open Field HQ ↗"),
+│                        driven by IncidentSerializer.get_major_incident's field_key. No sector /
+│                        task-group / tactical-dispatch UI here anymore (removed).
+└── FieldCommandDetailsPanel  (built on shared SidePanel) — tabs: Overview / Assign / Close
     ├── Overview  → FieldCommandSummaryView (shared, read-only)
-    ├── Assign    → link incidents / attach forces (excludes already-linked or CLOSED)
-    ├── Missions  → FieldCommandMissionsTab — create a mission, set status/assignee
+    ├── Assign    → link incidents (excludes already-linked or CLOSED). HIDDEN when the post is
+    │               event-scoped (opened via "Go Live" from one incident — major_incident set;
+    │               backend assign-incident also 409s). No unit-attach column / no Missions tab.
     └── Close     → Close Field Command Post form (reason + FIELD_OPERATOR/COMMAND_CENTER)
 
 Selecting a unit / an incident / a field command on the regional map is mutually
@@ -83,15 +92,32 @@ FieldCommandSummaryView — shared read-only render of a post's incidents / forc
   optional 2nd-arg fallback) — also used by MapView.jsx + IncidentList.jsx.
 
 FieldIncidentDashboard.jsx
-├── FieldCommandAssignmentsPanel  ← NEW — "Central Command" panel (tabbed:
-│     Incidents / Forces / Missions), first in the left column so it's visible
-│     without scrolling; rows come from FieldCommandSummaryView
-├── SituationOverview  — fetches the real Perimeter when mode === 'LIVE' (compacted CSS)
-├── SectorMap, TaskGroupPanel, OperationalTimeline  — timeline now shows typed
-│     entries for central-room assignments/missions (NOTE_KIND_META)
-└── PerimeterMapPicker  — Leaflet click-to-draw polygon tool; emits ordered
-                           {lat,lng}[] which the page POSTs via submitMajorIncidentPerimeter()
+  Left column (overview-section):
+  ├── SituationOverview  ← now JUST the identity header: field name + type/status
+  │     badges, pinned to the top. The old Estimated Casualties / Displaced
+  │     Persons metric grid + Incident Status quick-stat + critical-alerts block
+  │     were removed (the static MajorIncident estimate never moved).
+  ├── FieldCommandAssignmentsPanel  — "Central Command" panel (tabbed:
+  │     Incidents / Forces / Missions); `flex: 1 1 auto; min-height: 260px` so it
+  │     GROWS to fill the column, with its own inner scroll — the dominant panel.
+  └── CasualtyFiguresPanel  ← NEW — post-wide {injured,trapped,dead,treated,
+        evacuated} totals from summary.figure_totals + a per-incident breakdown
+        from summary.incidents[].figure_report; refreshes on the
+        field_command_note_added SSE relay.
+  Center column:
+  ├── IncidentTaskBoard  ← NEW (replaced SectorMap) — force-grouped task board
+  │     (POLICE/FIRE/MEDICAL), status editable here via updateFieldMission()
+  └── OperationalTimeline  — typed entries for central-room assignments/tasks
+        (NOTE_KIND_META); a task status change names the force + mobile unit
+  Right column:
+  └── FieldForcesPanel  ← NEW (replaced TaskGroupPanel) — every unit committed to
+        the post's incidents, grouped by agency, live phase
+        (Dispatched → En route → On scene → Task done → Connection lost),
+        deduped by unit id keeping the most-advanced phase
+  PerimeterMapPicker  — Leaflet click-to-draw polygon tool (LIVE / Go-Live path only)
 ```
+
+`SectorMap.jsx`, `TaskGroupPanel.jsx`, and `FieldCommandMissionsTab.jsx` were **deleted**.
 
 ### Routing (Units)
 Units use OSRM public routing for road paths and nearest-road snapping (both web dashboard and, as of Aug 2026, the mobile app's `IncidentMapScreen` via `mobile-app/utils/routing.js`). The public endpoint can rate-limit or time out — a straight-line haversine fallback route always renders in that case; for production, use a private OSRM or another routing provider.
@@ -110,9 +136,10 @@ These replaced the mock data generator entirely for the regional dashboard (Aug 
 - **`Task`** — terminal once DONE/CANCELLED; only a Commander can CANCEL. `TaskViewSet` also exposes `GET /api/tasks/<id>/trip/` (the shared en-route trip — see "Field-unit dispatch lifecycle" below) and `GET /api/tasks/<id>/reports/` (this task's field-report history, `IncidentEvent`s newest-first with media).
 - **`IncidentEvent`** — gained a nullable `task` FK (`SET_NULL`): a mobile field report (`POST /api/field/add-event/`) sends `task_id` + `incident_id`, so the event links to both. Powers `/api/tasks/<id>/reports/` and the field-report entries on a linked Field Command Post's timeline.
 - **`FieldCommand` / `FieldCommandNote` / `FieldCommandMission`** (NEW) — the real "Field Command Post" feature (right-click "Open Field Command Post" on the regional map). Closing a post cascades: releases every assigned `Unit.field_command`, force-closes every linked `Incident`.
-  - **`FieldCommandNote.kind`** (`NOTE | INCIDENT_LINKED | FORCE_ASSIGNED | MISSION | STATUS`) — plain operator notes are `NOTE`; the other kinds are auto-logged by the backend whenever the central room links an incident / attaches a force / creates or advances a mission, so the field command's own Operational Timeline reflects everything it receives. Rendered with a distinct icon/type on the field dashboard (`NOTE_KIND_META` in `FieldIncidentDashboard.jsx`).
-  - **`FieldCommandMission`** — a titled tasking the war-room gives a post (`title`, `details`, `status` = `OPEN | IN_PROGRESS | DONE`, optional `assigned_unit` — which must already be attached to the post). Independent of `Incident`/`Task`. Managed from the war-room panel's **Missions** tab; shown read-only on the field dashboard.
-- **`MajorIncident` / `Sector` / `TaskGroup` / `Perimeter`** (NEW real models) — back the "Go Live" flow, declared from a real `Incident` by a Commander. Entirely separate from the mock `field_incident_*` endpoints, which are untouched.
+  - **`FieldCommandNote.kind`** (`NOTE | INCIDENT_LINKED | FORCE_ASSIGNED | MISSION | STATUS`) — plain operator notes are `NOTE`; the other kinds are auto-logged by the backend whenever the central room links an incident / attaches a force / creates or advances a task, so the field command's own Operational Timeline reflects everything it receives. Rendered with a distinct icon/type on the field dashboard (`NOTE_KIND_META` in `FieldIncidentDashboard.jsx`).
+  - **`FieldCommandMission`** — now a **force-typed task scoped to an incident** (migration `0021`): `title`, `details`, `status` = `OPEN | IN_PROGRESS | DONE`, **`force_type`** = `POLICE | FIRE | MEDICAL` (nullable), **`incident`** FK (nullable, `SET_NULL`), optional `assigned_unit`. Created from the war-room incident panel's **🗂 Tasks** tab (force + title required) — `FieldCommandViewSet.missions` POST validates the incident exists and accepts `incident_id`/`force_type`. Each create AND every status change is mirrored into the incident's own Event Log (`_log_task_to_incident_feed` → `_log_status_change` with `event_type=ASSIGNMENT`/`CASUALTY_UPDATE` + an `incident_event_added` broadcast). A status change is logged by **force + mobile unit** (`_mission_actor_label(actor, mission)` → `"Fire · Engine 7"`) on both the incident Event Log and the field command's Operational Timeline. Status is editable from the field dashboard (`IncidentTaskBoard`) and the crew's mobile app (`MissionsScreen`); **read-only in the war-room**.
+- **`IncidentFigureReport`** (NEW, migration `0022`) — a field crew's current casualty headcount for one incident: `injured / dead / trapped / treated / evacuated` (`PositiveIntegerField`), plus `incident` FK (CASCADE), `unit` FK (nullable, `SET_NULL`), `reported_by`. `unique_together = (incident, unit)` — the mobile app POSTs a fresh full set each time and it **overwrites** the crew's previous row, so the row is always that crew's latest. Endpoint: `GET/POST /api/incidents/<id>/figures/` (`IncidentViewSet.figures`, `permission_classes=[IsAuthenticated]`). POST resolves the unit from `request.user.unit`, clamps negatives to 0, logs a `CASUALTY_UPDATE` IncidentEvent + a `field_command_note_added` broadcast so the field dashboard re-pulls live. `FieldCommandSerializer.figure_totals` sums the latest rows across **all** the post's incidents; `FieldCommandIncidentSerializer.figure_report` is the per-incident subtotal (`sum_figure_reports()` helper in `serializers.py`).
+- **`MajorIncident` / `Sector` / `TaskGroup` / `Perimeter`** (NEW real models) — back the "Go Live" flow, declared from a real `Incident` by a Commander. Entirely separate from the mock `field_incident_*` endpoints, which are untouched. `IncidentSerializer.get_major_incident` returns `{id, status, field_key, field_command_name}` (the real coordinating post's public key) so the war-room's Major Incident tab links to the correct field HQ.
 
 ### Unit Claim / Heartbeat / Disconnect
 
@@ -157,7 +184,15 @@ The whole flow is driven by the crew's **own `Task`**, not the shared `Incident.
 
 **Mobile accept button** (`TasksScreen` / `IncidentMapScreen`): **On My Way** shows while the crew's own task is `PENDING`, **Arrived** while `IN_PROGRESS` — so a unit added to an already-`ON_SCENE` incident can still accept and drive. `IncidentMapScreen` draws the route + a moving vehicle, shows live distance/ETA, and the camera follows the vehicle; "En Route" vs "On Scene" is read from the trip (`ts.arrived`), not the incident status.
 
-**War-room voice:** `stepEnRouteUnits` speaks *"&lt;Unit&gt; has arrived at &lt;incident&gt;"* exactly once (an `arrivalAnnounced` flag on the unit), when the interpolation reaches the destination.
+**War-room voice (`utils/announce.js`):** the spoken line ("&lt;Unit&gt; is on its way / has arrived at &lt;incident&gt;") is fired ONLY from `Dashboard.jsx`'s SSE handlers (`task_status_update`→IN_PROGRESS, `task_arrived`) via `announceOnce(dedupKey, message, meta)` — never from a React effect or the trip interpolation, so a remount can't replay it. It kept doubling across sessions; the fix is layered so the symptom cannot recur regardless of cause:
+1. **`window.__ecmAnnounce` hub** — all dedup + speaker state lives on one per-tab object, so HMR / a second bundle / a dynamic import can't spawn a parallel announcer with its own map.
+2. **Per-event dedup** — an in-memory `Map` keyed on `dedupKey` (`enroute:<unit>:<incident>` / `arrived:<unit>:<incident>`), then best-effort `localStorage['ecm-announced-v1']` so a reload doesn't replay. `forgetAnnouncement()` clears a key (a crew that disconnects mid-drive and re-accepts should hear "on its way" again).
+3. **Per-sentence guard** — `_speak()` refuses the exact same text twice within 12 s, whatever path asks.
+4. **Single-speaker election** — one tab holds the exclusive `navigator.locks` lock `ecm-speaker` for its lifetime and is the only tab whose `_speak()` runs; others queue on the lock and stay muted but still draw their own map bubble (`ecm-announce` CustomEvent → `MapView.jsx`).
+5. **`services/realtime.js`** — `es.onerror` always closes the socket and schedules exactly one owned reconnect (never leaves the browser's native EventSource auto-retry racing our reconnect + the dashboard's `reconnectNonce`); superseded sockets are ignored in `onopen`/`onmessage`.
+6. **`simulated/realtime.py`** — `get_realtime_service()` creation is lock-guarded (runserver is multithreaded).
+
+The old `store/fieldIncident.js` `dispatchUnitsToIncident` raw `speechSynthesis.speak` (SIMULATION drill path) now also routes through `announceOnce`.
 
 ### Field Command Post API
 
@@ -220,8 +255,15 @@ GET/POST /api/major-incidents/<id>/task-groups/               — optionally lin
 5. If heartbeats stop for any reason: unit reports offline automatically after 60s
    (Unit.is_actively_online), no background job needed. The incident it was
    dispatched to keeps it in `assigned_units` (greyed "Connection lost"); it
-   re-appears live on reconnect.
+   re-appears live on reconnect — and in the war-room incident panel that
+   flip is now LIVE (the panel derives online/offline from the `onlineUnits`
+   store fed by `unit_claimed`/`unit_disconnected` SSE, not the stale
+   `incident.assigned_units` snapshot). `unit_claimed`/`unit_disconnected` now
+   carry `field_command_id` and are relayed to the field SSE stream so the
+   field dashboard's Forces panel flips live too.
 ```
+
+**Disconnect/reconnect keeps the last position (`disconnect`/`claim`/`heartbeat`/`arrive` in `views.py`):** while a unit has an active task its position is fully server-managed (claim spot → interpolated trip → arrival park → disconnect snapshot), so a stationary demo phone can't keep snapping the marker back. Helpers: `_has_real_position(unit)`, `_active_task_for_unit(unit)`, `_trip_position(task_id)` (server-side interpolation of the same trip). On `disconnect` mid-drive the interpolated position is snapshotted, the trip ended, and the not-yet-arrived task rolled back to `PENDING` (broadcast `task_status_update` PENDING → war-room shows "awaiting acceptance", `forgetAnnouncement` lets "on its way" replay, the "On My Way" button reappears on reconnect). Disconnect after arrival parks the unit on the incident. Reconnect (`claim`/`heartbeat`) accepts phone GPS only when the unit has no real stored position OR (not a mock fix AND no active task) — the mobile sends `is_mock_location` in the claim/heartbeat body.
 
 ### Dispatch Acceptance & Live Route (Mobile)
 ```
@@ -310,8 +352,9 @@ The SIMULATION drill still uses the old `fieldIncident.js` `dispatchUnitsToIncid
 | | `MobileUnitStatusEndpointTests` | Missing/invalid field 400s; valid update accepted |
 | | `UnitClaimingTests` | Full claim/disconnect lifecycle: default-offline, claimable filter, claim-by-id/name, conflict on active claim, re-claim releases previous unit, stale-heartbeat reports offline |
 | | `FieldCommandLinkLifecycleTests` | Prevents duplicate active MajorIncident↔FieldCommand link on create/update; cascade-closes linked incidents |
-| | `FieldCommandMissionTests` | Create/update missions; force must be attached to the post; blocked on a closed post |
-| | `AssignUnitAndEnRouteTests` | `assign-unit` targets the real incident + advances to PENDING; field-unit accept advances the incident + logs a field-command note; add-event surfaces on the field command's Operational Timeline as a `REPORT` (reporter + incident name); `assigned_unit_ids` drops terminal/closed/disconnected while **`assigned_units` keeps a disconnected vehicle**; **`active_assignment` is opt-in**; `GET /api/tasks/<id>/reports/` returns the task's report history; closing an incident cancels its open tasks |
+| | `FieldCommandMissionTests` | Create/update force-typed tasks; force must be attached to the post; blocked on a closed post; **task create + every status change lands on the incident's Event Log**; rejects an unknown incident / a bad force_type; a status change names the **force + mobile unit**; an event-scoped post 409s on `assign-incident`; accepting a task logs exactly one en-route event; a repeated status PATCH doesn't re-log |
+| | `AssignUnitAndEnRouteTests` | `assign-unit` targets the real incident + advances to PENDING; **re-dispatch after unassign creates a fresh PENDING task** (never reuses a CANCELLED one); field-unit accept advances the incident + logs a field-command note; add-event surfaces on the field command's Operational Timeline as a `REPORT` (reporter + incident name); `assigned_unit_ids` drops terminal/closed/disconnected while **`assigned_units` keeps a disconnected vehicle**; **`active_assignment` is opt-in**; `GET /api/tasks/<id>/reports/` returns the task's report history; closing an incident cancels its open tasks; **disconnect mid-drive rolls the task to PENDING**; **disconnect after arrival keeps the task + parks at the scene**; a dispatched unit's position is server-managed; a mock-location reclaim/heartbeat keeps the last real position |
+| | `IncidentFigureReportTests` | Casualty figures upsert per (incident, unit) + aggregate to the post's `figure_totals`; negatives clamp to 0; submitting logs a `CASUALTY_UPDATE` event on the incident + the field command timeline; GET returns every crew's latest row |
 | `test_permissions.py` | `TaskPermissionAuthenticationTests` | Anonymous list/patch on `/api/tasks/` rejected |
 | | `TaskPermissionRoleTests` | Field unit patches only status; dispatcher can create tasks; documents a known gap (field unit can patch a task not assigned to them) |
 | | `ReadOnlyOrAdminDispatcherGapTests` | **Documents (does not fix)** that anonymous users can currently create incidents / delete units |
@@ -360,15 +403,19 @@ The SIMULATION drill still uses the old `fieldIncident.js` `dispatchUnitsToIncid
 ### Done since last major revision
 - [x] Real database integration for regional dashboard + Field Command Post
 - [x] Real Major Incident "Go Live" flow (Sector/TaskGroup/Perimeter)
-- [x] Live unit tracking (claim/heartbeat/disconnect)
-- [x] Automated backend test suite
+- [x] Live unit tracking (claim/heartbeat/disconnect); disconnect/reconnect keeps the last position, server-managed while dispatched
+- [x] Automated backend test suite (89 tests)
 - [x] Field-unit dispatch lifecycle: On My Way / Arrived, shared en-route trip (war-room + mobile in lock-step), ASSIGNED phase, arrival voice announcement
 - [x] Per-task field-report history; mobile reports (with photos/videos + reporter) on the Field Command Post's Operational Timeline
-- [x] Disconnected-crew persistence on the incident (`assigned_units`) + reactive unassign
-- [x] Duplicate-incident fix (`mobile_dispatch` mirror rows) + cleanup migration
+- [x] Disconnected-crew persistence on the incident (`assigned_units`) + reactive unassign + LIVE online/offline flip in the war-room panel
+- [x] Duplicate-incident fix (`mobile_dispatch` mirror rows) + cleanup migration; re-dispatch-after-cancel fix
+- [x] **Force-typed tasks** per incident (POLICE/FIRE/MEDICAL), war-room 🗂 Tasks tab (read-only status) + mobile Missions screen; every create/status change on the incident Event Log, naming force + unit
+- [x] **Casualty figures** (`IncidentFigureReport`): mobile Figures screen per incident, live per-post totals panel on the field dashboard
+- [x] Field dashboard rework: SectorMap→IncidentTaskBoard, TaskGroupPanel→FieldForcesPanel, SituationOverview reduced to the identity header, Central Command panel enlarged
+- [x] War-room double-voice fixed permanently (window hub + per-sentence guard + Web-Lock speaker election + single-connection SSE client)
 
 ### Still open
-- [ ] Real database integration for the Field Incident Command Dashboard's own sector/task-group data (currently mock, with a real MajorIncident optionally layered on top)
+- [ ] Real database integration for the Field Incident Command Dashboard's own sector/task-group data (the training-sim SectorMap/TaskGroupPanel are gone from the *real* FIELD_COMMAND view; the SIMULATION drill still uses mock data)
 - [ ] Fix the two documented permission gaps above
 - [ ] Map clustering for 100+ incidents
 - [ ] Advanced analytics & reporting
@@ -376,6 +423,8 @@ The SIMULATION drill still uses the old `fieldIncident.js` `dispatchUnitsToIncid
 
 ---
 
-**Dashboard Version:** 4.2 | **Last Updated:** 2026-08-30 | **Status:** Demo/MVP — regional dashboard and Field Command Post real; training simulation dashboard mock with real overlay
+**Dashboard Version:** 4.3 | **Last Updated:** 2026-09-01 | **Status:** Demo/MVP — regional dashboard and Field Command Post real; training simulation dashboard mock with real overlay
+
+**v4.3 (Sep 1):** force-typed tasks per incident (POLICE/FIRE/MEDICAL) — war-room 🗂 Tasks tab (status read-only, driven by the field crew), mobile Missions screen, every create/status change on the incident Event Log naming the force + mobile unit (`FieldCommandMission` gained `force_type`+`incident`, migration `0021`); casualty figures (`IncidentFigureReport`, migration `0022`) — mobile Figures stepper per incident, live per-post totals panel on the field dashboard; field dashboard rework (SectorMap→IncidentTaskBoard, TaskGroupPanel→FieldForcesPanel, SituationOverview→identity header only, Central Command panel enlarged, `SectorMap`/`TaskGroupPanel`/`FieldCommandMissionsTab` deleted); Major Incident tab simplified to a "Field Incident" card + "Open Field HQ" (`get_major_incident` returns `field_key`); event-scoped posts can't take more incidents (Assign tab hidden + 409); war-room incident panel flips a crew online/offline LIVE; disconnect/reconnect keeps the last position (server-managed while dispatched); re-dispatch after unassign creates a fresh PENDING task; war-room double-voice fixed permanently (window hub + per-sentence guard + Web-Lock speaker election + single-connection SSE client + lock-guarded `get_realtime_service`). 89 backend tests.
 
 **v4.2 (Aug 27–30):** field-unit dispatch lifecycle (On My Way / Arrived) + shared en-route trip keeping the war-room map and the mobile map in lock-step; per-task field-report history; mobile reports (reporter + media) on the Field Command Post's Operational Timeline; disconnected crews stay attached to the incident (`assigned_units`, greyed) with reactive unassign; `mobile_dispatch` no longer spawns duplicate "mirror" incidents (+ migration `0019` cleanup); en-route route/motion decoupled from the shared `Incident.status`.
