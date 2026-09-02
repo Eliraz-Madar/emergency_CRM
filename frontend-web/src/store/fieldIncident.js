@@ -2071,16 +2071,30 @@ export const useFieldIncidentStore = create((set, get) => ({
   },
 }));
 
-// Cross-tab sync (Field <-> War-Room)
+// Cross-tab sync — ONLY for the training drill / routine view.
+//
+// Real command posts (mode FIELD_COMMAND / LIVE) must NOT sync across tabs:
+// each tab loads its own post from the API and stays live via the field SSE
+// relay. Broadcasting their state made a second tab opened on post B overwrite
+// a first tab still showing post A — the channel carried the whole payload
+// (fieldCommandSummary, incidents, events…) with no post identity, so the
+// receiver applied it blindly. Now the sender only broadcasts in SIMULATION/
+// ROUTINE mode, and the receiver ignores anything that isn't SIMULATION/
+// ROUTINE or that would land on a tab currently viewing a real post.
 if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
   const fieldSyncChannel = new BroadcastChannel('field-incident-sync');
   const tabId = `tab-${Math.random().toString(36).slice(2)}`;
   let applyingRemote = false;
+  const DRILL_MODES = new Set(['SIMULATION', 'ROUTINE']);
 
   fieldSyncChannel.onmessage = (event) => {
     if (!event?.data || event.data.source === tabId) return;
     const payload = event.data.payload;
     if (!payload || typeof payload !== 'object') return;
+    if (!DRILL_MODES.has(payload.mode)) return;
+    // Never let a drill broadcast stomp a tab that's showing a real post.
+    const localMode = useFieldIncidentStore.getState().mode;
+    if (localMode === 'FIELD_COMMAND' || localMode === 'LIVE') return;
 
     applyingRemote = true;
     useFieldIncidentStore.setState(payload);
@@ -2089,6 +2103,7 @@ if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
 
   useFieldIncidentStore.subscribe((state) => {
     if (applyingRemote) return;
+    if (!DRILL_MODES.has(state.mode)) return;
     const payload = {
       mode: state.mode,
       simulationType: state.simulationType,

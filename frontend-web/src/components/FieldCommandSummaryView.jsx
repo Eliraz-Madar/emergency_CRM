@@ -1,5 +1,6 @@
-import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
+import { getUnitTypeMeta } from '../utils/agencyMeta.js';
 import { formatDateTime } from '../utils/time.js';
+import { IncidentSeverityIcon } from './IncidentSeverityIcon.jsx';
 
 /**
  * Read-only view of a Field Command's live state, rendered straight from the
@@ -25,6 +26,41 @@ const MISSION_STATUS_META = {
   IN_PROGRESS: { label: 'In progress', color: '#3b82f6' },
   DONE: { label: 'Done', color: '#10b981' },
 };
+
+// Per-incident casualty figures shown inline on each assigned-incident row —
+// same five headcounts the field crews submit (IncidentFigureReport), same
+// order/labels/colours the Casualty Figures grid uses. Only non-zero figures
+// are rendered.
+const FIGURE_META = [
+  { key: 'injured', label: 'Injured', color: '#f59e0b', icon: '🩹' },
+  { key: 'trapped', label: 'Trapped', color: '#ef4444', icon: '⛓️' },
+  { key: 'dead', label: 'Dead', color: '#94a3b8', icon: '🕯️' },
+  { key: 'treated', label: 'Treated', color: '#3b82f6', icon: '➕' },
+  { key: 'evacuated', label: 'Evacuated', color: '#10b981', icon: '🚸' },
+];
+
+function IncidentFigures({ report }) {
+  const nonZero = FIGURE_META.filter((f) => (Number(report?.[f.key]) || 0) > 0);
+  if (nonZero.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '5px', width: '100%' }}>
+      {nonZero.map((f) => (
+        <span
+          key={f.key}
+          title={f.label}
+          style={{
+            fontSize: '0.68rem', fontWeight: 700, lineHeight: 1,
+            color: f.color, background: `${f.color}1f`,
+            border: `1px solid ${f.color}55`, borderRadius: '999px',
+            padding: '2px 6px', whiteSpace: 'nowrap',
+          }}
+        >
+          {f.icon} {Number(report[f.key]) || 0}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 const rowStyle = {
   display: 'flex',
@@ -139,14 +175,15 @@ export function FieldCommandSummaryView({ summary, sections = ALL_SECTIONS, hide
           {incidents.length ? (
             <div className="fc-scroll-area" style={{ maxHeight: '240px', overflowY: 'auto' }}>
               {incidents.map((incident) => (
-                <div key={incident.id} style={rowStyle}>
-                  <span>{getIncidentChannelMeta(incident).emoji}</span>
+                <div key={incident.id} style={{ ...rowStyle, flexWrap: 'wrap' }}>
+                  <IncidentSeverityIcon incident={incident} />
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {incident.title || 'Incident'}
                   </span>
                   {incident.status && (
                     <span style={tagStyle}>{String(incident.status).replace(/_/g, ' ')}</span>
                   )}
+                  <IncidentFigures report={incident.figure_report} />
                 </div>
               ))}
             </div>
@@ -179,7 +216,7 @@ export function FieldCommandSummaryView({ summary, sections = ALL_SECTIONS, hide
 
       {show('missions') && (
         <div>
-          <Heading icon="🎯" label="Missions" count={missions.length} />
+          <Heading icon="🎯" label="Tasks" count={missions.length} />
           {missions.length ? (
             <div className="fc-scroll-area" style={{ maxHeight: '260px', overflowY: 'auto' }}>
               {missions.map((mission) => {
@@ -207,7 +244,7 @@ export function FieldCommandSummaryView({ summary, sections = ALL_SECTIONS, hide
               })}
             </div>
           ) : (
-            <div style={emptyStyle}>No missions</div>
+            <div style={emptyStyle}>No tasks</div>
           )}
         </div>
       )}

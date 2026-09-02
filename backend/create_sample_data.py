@@ -54,18 +54,26 @@ for fu in FIELD_USERS:
             "unit":      unit,
         },
     )
-    if created:
+    # Always re-assert password and unit link so a re-run repairs a drifted user
+    changed = []
+    if not user.check_password(fu["password"]):
         user.set_password(fu["password"])
+        changed.append("password")
+    if user.unit_id != unit.id:
+        user.unit = unit
+        changed.append("unit link")
+    if user.role != "fieldunit" or not user.is_active:
+        user.role = "fieldunit"
+        user.is_active = True
+        changed.append("role/active")
+    if created or changed:
         user.save()
+    if created:
         print(f"✓ Created user: {fu['username']} / {fu['password']}  →  {unit.name}")
+    elif changed:
+        print(f"  Repaired {', '.join(changed)} for: {fu['username']}  →  {unit.name}")
     else:
-        # Make sure existing user is linked to the correct unit
-        if user.unit_id != unit.id:
-            user.unit = unit
-            user.save()
-            print(f"  Updated unit link for: {fu['username']}  →  {unit.name}")
-        else:
-            print(f"  Exists user: {fu['username']}")
+        print(f"  Exists user: {fu['username']}")
 
 # ── 3. Keep legacy fieldunit1 for backward compat ────────────────────────────
 legacy, created = User.objects.get_or_create(

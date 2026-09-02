@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { SidePanel } from './SidePanel.jsx';
 import { FieldCommandSummaryView } from './FieldCommandSummaryView.jsx';
-import { getIncidentChannelMeta } from '../utils/agencyMeta.js';
+import { IncidentSeverityIcon } from './IncidentSeverityIcon.jsx';
 
 /**
  * FieldCommand detail panel — extracted from Dashboard.jsx's inline
@@ -63,10 +63,10 @@ export function FieldCommandDetailsPanel({
     ? incidents.filter((inc) => !inc.field_command && inc.status !== 'CLOSED')
     : [];
 
-  // Shared POLICE/FIRE/EMS/HOMEFRONT palette — see utils/agencyMeta.js.
-  // The read-only Overview lists get the same icons via FieldCommandSummaryView;
-  // getUnitTypeMeta / getIncidentChannelMeta below are for the Assign tab's
-  // linkable lists.
+  // Incident rows everywhere in both dashboards lead with the shared
+  // severity dot (IncidentSeverityIcon / utils/incidentMeta.js) — the Assign
+  // tab's linkable list below and the read-only Overview list (via
+  // FieldCommandSummaryView) both use it, so every incident marker matches.
 
   return (
     <SidePanel title="Field Command Overview" onClose={onClose}>
@@ -77,13 +77,27 @@ export function FieldCommandDetailsPanel({
             Incidents: {fieldCommandSummary?.incidents?.length ?? selectedFieldCommand.incidents_count ?? 0} | Forces: {fieldCommandSummary?.units?.length ?? selectedFieldCommand.units_count ?? 0}
           </div>
         </div>
-        <button
-          className="feed-toggle"
-          onClick={onRefresh}
-          style={{ fontSize: '0.75rem', flexShrink: 0 }}
-        >
-          ⟳ Refresh
-        </button>
+        <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+          <button
+            className="feed-toggle"
+            onClick={() => window.open(
+              `/field-incident?fieldId=${encodeURIComponent(selectedFieldCommand.id)}`,
+              '_blank',
+              'noopener,noreferrer',
+            )}
+            style={{ fontSize: '0.75rem' }}
+            title="Open this post's Field Incident Command dashboard"
+          >
+            🧭 Dashboard
+          </button>
+          <button
+            className="feed-toggle"
+            onClick={onRefresh}
+            style={{ fontSize: '0.75rem' }}
+          >
+            ⟳ Refresh
+          </button>
+        </div>
       </div>
 
       {fieldCommandError && (
@@ -166,9 +180,10 @@ export function FieldCommandDetailsPanel({
                   linkableIncidents.map((inc) => (
                     <div key={inc.id} style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <div
-                        style={{ flex: 1, fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3 }}
+                        style={{ flex: 1, fontSize: '0.76rem', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.3, display: 'flex', alignItems: 'center', gap: '6px' }}
                       >
-                        {getIncidentChannelMeta(inc).emoji} {inc.title || `Incident ${inc.id}`}
+                        <IncidentSeverityIcon incident={inc} />
+                        <span>{inc.title || `Incident ${inc.id}`}</span>
                       </div>
                       <button
                         className="feed-toggle"

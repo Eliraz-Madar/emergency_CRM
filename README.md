@@ -59,6 +59,8 @@ The system uses JWT tokens. The sample data script creates these accounts automa
 
 Field-unit users log in, then either pick a routine unit from the legacy list (`/api/mobile/units/`) or **claim** a real DB unit directly (`POST /api/units/claim/`), which marks it online and starts sending live GPS heartbeats every 25s.
 
+Re-running `create_sample_data.py` is safe — it re-asserts each canonical user's password, unit link and role (so a locally-changed account is repaired, not skipped).
+
 To create additional users via Django shell:
 ```bash
 cd backend
@@ -79,7 +81,7 @@ Coordinates multiple incidents across a region, backed by real DB data (not simu
 
 - Live incident list with sorting, filtering, and search — closed incidents hidden by default
 - Explicit status workflow: Open → Pending → En Route → On Scene → Resolved → Closed (Closed requires a reason and can only be set by a dispatcher/admin)
-- Severity/priority levels: LOW, MED, HIGH, CRITICAL with color coding
+- Severity/priority levels: LOW, MED, HIGH, CRITICAL — every incident list (here and on the field dashboard) leads with the same coloured severity dot (green → amber → red → deep-red)
 - Unit dispatch with road routing (OSRM) — a dispatched unit shows as "Awaiting acceptance" until the crew taps **On My Way** in the app, then drives to the incident on the map in real time
 - The vehicle's road route, position, ETA and remaining distance come from **one shared trip object** that the mobile app reads too, so the war-room map and the phone are always in lock-step
 - A spoken announcement ("Unit … is on its way / has arrived at …") fires **exactly once** per event, even with several dashboard tabs open, the dev server restarting, or the SSE reconnecting: one browser tab is elected the "speaker" via a Web Lock, a per-sentence guard blocks any repeat within 12 s, and the SSE client keeps a single connection and owns its own reconnect
@@ -89,24 +91,27 @@ Coordinates multiple incidents across a region, backed by real DB data (not simu
 - Details panel stays open after dispatch for continued monitoring
 - Dispatch state survives page refresh — units resume their routes automatically on reload
 - **Force-typed tasks per incident**: open an incident → **🗂 Tasks** tab → pick a force (🚓 Police / 🚒 Fire / 🚑 Medical, required) and a title. The task is logged to the incident's Event Log and pushed to the field crews. Its status (Open / On it / Done) is **read-only in the war-room** — only the field crew that owns it changes it (mobile app or the field dashboard). Every status change names which force and which mobile unit made it.
-- **Field Command Post**: right-click the map (or use the creation panel) to open a real command post, assign units/incidents to it, track casualty/evacuated counts, and close it — closing cascades to release its units and force-close its linked incidents
+- **Field Command Post**: right-click the map (or use the creation panel) to open a real command post, assign units/incidents to it, track casualty/evacuated counts, and close it — closing cascades to release its units and force-close its linked incidents (every affected dashboard updates live)
   - A post opened by escalating a single incident ("Go Live") is bound to that incident and cannot take on others — its **Assign** tab is hidden
   - Everything the post receives (incident linked, force attached, task given) is pushed live to that post's own Field Incident Command dashboard and logged to its Operational Timeline
+  - **Closing or deleting an incident removes it from the post entirely** — its tasks, its field reports and its casualty figures all leave the post's dashboard (a *closed* post keeps its full record as an archive)
+  - Clicking a 🎖️ marker on the map opens the post's detail panel on the right; its header has a 🧭 **Dashboard** button that opens that post's own Field Incident Command dashboard in a new tab
   - Clicking a post in the KPI "Field Command Posts" card flies the map to its 🎖️ marker
+- The map opens **already framed on the current incidents** rather than a fixed centre
 - Interactive Leaflet map with incident, unit, and field-command-post markers — selecting a vehicle, an incident, or a field command clears the others (one detail panel at a time)
 - Real-time updates via SSE (new incidents/units/posts appear automatically — one live connection, no duplicates)
-- KPI cards: total incidents, active, critical, available units
-- All timestamps displayed in 24-hour UTC format (DD/MM/YYYY HH:MM:SS)
+- KPI cards: active incidents, awaiting dispatch, open field command posts, and available units (broken down by force — 🚓 / 🚒 / 🚑)
+- All timestamps displayed in 24-hour format (DD/MM/YYYY HH:MM:SS)
 
 #### Field Incident Command Dashboard — `http://localhost:5173/field-incident`
 
 Command-level management of a single large-scale incident (earthquake, missile strike, building collapse). This view is a **training simulation** by default (seeded mock sector/task-group data) — a dispatcher can instead **declare a real Major Incident** from an actual regional Incident ("Go Live"), which switches this dashboard into live mode showing real data.
 
-- **Left column**: the field command's name + type/status badges pinned at the top, then the **Central Command** panel (the incidents / forces / tasks the war-room assigned to this post, tabbed, with its own scroll — the dominant panel), then **Casualty Figures** (see below)
-- **Casualty Figures panel** — live totals of injured / trapped / dead / treated / evacuated, summed across every incident this post coordinates, from the mobile crews' figure reports; a per-incident breakdown below. Updates live via SSE, no reload
+- **Left column**: the field command's name + type/status badges pinned at the top, then the **Central Command** panel — two tabs, **Incidents** and **Tasks**. Each incident row leads with a severity dot and shows its own casualty figures inline. (There is no "Forces" tab — units are committed to incidents, not to the post.) Below it, **Casualty Figures** (see below)
+- **Casualty Figures panel** — live post-wide totals of injured / trapped / dead / treated / evacuated, summed across every incident this post coordinates, from the mobile crews' figure reports. Updates live via SSE, no reload (the per-incident numbers are shown inline on the Incidents tab above)
 - **Task board** (center) — every force-typed task for the post's incidents, grouped Police / Fire / Medical, each with its live status; editable here (the field war-room) and from the crew's mobile app
 - **Forces on the ground** (right) — every unit committed to the post's incidents, grouped by agency, with live phase (Dispatched → En route → On scene → Task done → Connection lost)
-- Operational timeline (decision trail) — central-room assignments/tasks show as distinct typed entries (naming the force + mobile unit on a status change), and every **field report a mobile unit sends** (status + notes + photos/videos) appears here in full, listed with the incident name and who reported it — updated live, no reload
+- Operational timeline (decision trail) — central-room assignments/tasks show as distinct typed entries (naming the force + mobile unit on a status change), and every **field report a mobile unit sends** (status + notes + photos/videos) appears here in full, listed with the incident name and who reported it, each stamped with the full date + time — updated live, no reload. A closed event's entries leave the timeline automatically
 - Real-time SSE: the training-simulation stream (training mode) and live central-room updates for a real post (incident links, force attachments, tasks, unit connect/disconnect, casualty figures)
 - **Go Live**: declare a Major Incident from a real Incident, draw a danger-zone perimeter on the map, and create real sectors/task groups tied to it
 
@@ -210,9 +215,11 @@ curl -X POST http://localhost:8000/api/token/ \
 ```
 backend/
     api/
-        models.py           # User, Incident, Unit, Task, FieldCommand, FieldCommandNote,
-                             # FieldCommandMission (force_type + incident), MajorIncident, Sector,
-                             # TaskGroup, Perimeter, IncidentEvent, ReportMedia, IncidentFigureReport
+        models.py           # User, Incident, Unit, Task, FieldCommand,
+                             # FieldCommandNote (kind + incident FK, CASCADE),
+                             # FieldCommandMission (force_type + incident FK, CASCADE),
+                             # MajorIncident, Sector, TaskGroup, Perimeter,
+                             # IncidentEvent, ReportMedia, IncidentFigureReport
         views.py            # Real ModelViewSets + Field Command/Go-Live endpoints + SSE + training-sim endpoints
         serializers.py
         permissions.py      # Role-based: admin, dispatcher, fieldunit (see known gap in ARCHITECTURE.md)
@@ -242,14 +249,15 @@ frontend-web/
             IncidentDetailsPanel.jsx    # Built on SidePanel; tabs Dispatch / Tasks / Events / Major Incident / Settings
             FieldCommandDetailsPanel.jsx  # Built on SidePanel; tabs Overview / Assign / Close (Assign hidden for event-scoped posts)
             FieldCommandSummaryView.jsx   # Shared read-only post summary (war-room + field dash)
+            IncidentSeverityIcon.jsx    # The one severity-dot marker used by every incident list
             SidePanel.jsx               # Shared right-side panel shell
             MapView.jsx
             EventFeed.jsx
             FilterBar.jsx
             field-incident/
                 SituationOverview.jsx           # Just the field name + type/status badges (top of the left column)
-                CasualtyFiguresPanel.jsx        # Live injured/trapped/dead/treated/evacuated totals + per-incident breakdown
-                FieldCommandAssignmentsPanel.jsx  # "Central Command" tabbed panel (grows to fill the left column)
+                CasualtyFiguresPanel.jsx        # Live post-wide injured/trapped/dead/treated/evacuated totals
+                FieldCommandAssignmentsPanel.jsx  # "Central Command" tabbed panel (Incidents / Tasks) — grows to fill the left column
                 IncidentTaskBoard.jsx           # Force-grouped task board (replaced SectorMap)
                 FieldForcesPanel.jsx            # Units on the ground grouped by agency + live phase (replaced TaskGroupPanel)
                 OperationalTimeline.jsx
@@ -262,9 +270,10 @@ frontend-web/
         services/
             realtime.js         # SSE client — one live EventSource per instance, owns its own reconnect
         utils/
-            time.js             # 24-hour timestamp formatters (en-GB locale, hour12: false)
+            time.js             # 24-hour timestamp formatters (en-GB locale, hour12: false; formatDateTimeShort = DD/MM/YYYY HH:MM)
             units.js            # Distance/nearest-available-unit helpers
-            agencyMeta.js       # Shared POLICE/FIRE/EMS icon + colour palette
+            agencyMeta.js       # Shared POLICE/FIRE/EMS icon (🚓/🚒/🚑) + colour palette
+            incidentMeta.js     # Canonical incident-severity → colour/label map (LOW→CRITICAL)
             announce.js         # One-shot war-room announcements: window-hub dedup + per-sentence guard + Web-Lock speaker election
     package.json
     vite.config.js
@@ -382,6 +391,10 @@ Fixed. `assign-unit` used to hand back any existing Task for that unit+incident 
 ### Same incident shows twice in the war-room list
 
 An old `mobile_dispatch` bug created a second "mirror" incident (same title, own task) when a real incident's id was dispatched through the bridge. This is fixed; migration `0019` merges the mirrors already in your DB — just run `python manage.py migrate`.
+
+### A closed / deleted incident's reports or tasks still show on a field command post
+
+Fixed. Every field-command log line and task now records the incident's own id (not its title), so closing or deleting an event removes it from the post entirely. Migrations `0023`–`0026` add the id link and clean up log lines that were mis-associated by title (e.g. two incidents both named "Theft") — run `python manage.py migrate`. A *closed* post keeps its full history as a read-only archive.
 
 ### OSRM routing timeouts
 

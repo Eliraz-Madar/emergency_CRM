@@ -120,11 +120,13 @@ FieldCommand                          ← NEW (real "Field Command Post")
 ├── major_incident ─────► MajorIncident (nullable, unique while ACTIVE)
 ├── incidents[] ← Incident.field_command (reverse FK)
 ├── units[]     ← Unit.field_command (reverse FK)
-├── notes[]     → FieldCommandNote  (message, kind: NOTE|INCIDENT_LINKED|FORCE_ASSIGNED|MISSION|STATUS)
+├── notes[]     → FieldCommandNote  (message, kind: NOTE|INCIDENT_LINKED|FORCE_ASSIGNED|MISSION|STATUS,
+│                   incident → Incident nullable CASCADE (mig. 0023/0025) — every auto-logged
+│                   kind carries the event it is about; a plain NOTE may not)
 ├── missions[]  → FieldCommandMission — a force-typed task (mig. 0021):
 │                   title, details, status OPEN|IN_PROGRESS|DONE,
 │                   force_type POLICE|FIRE|MEDICAL (nullable),
-│                   incident → Incident (nullable, SET_NULL),
+│                   incident → Incident (nullable, CASCADE — mig. 0025),
 │                   assigned_unit → Unit (nullable, must be attached to this post).
 │                   Created from the war-room incident panel's 🗂 Tasks tab;
 │                   every create + status change mirrors to the incident's Event
@@ -132,9 +134,16 @@ FieldCommand                          ← NEW (real "Field Command Post")
 │                   war-room, editable from the field dashboard + mobile.
 └── closed_reason, closed_by_role, closed_by_name, closed_at
 
+**A live post only ever shows its still-active events.** `FieldCommandSerializer`
+drops `incidents` / `missions` / `operational_notes` / `figure_totals` entries for
+any CLOSED incident; closing an incident also *unlinks* it and *deletes* the post's
+`FieldCommandNote`s + `FieldCommandMission`s about it (`IncidentViewSet.perform_update`).
+A CLOSED post keeps its complete record as a read-only archive (the filter is
+skipped once `FieldCommand.status == CLOSED`).
+
 FieldCommandSerializer also exposes figure_totals — {injured,dead,trapped,
 treated,evacuated} summed across every IncidentFigureReport on this post's
-incidents (drives the field dashboard's Casualty Figures panel).
+still-open incidents (drives the field dashboard's Casualty Figures panel).
 
 IncidentFigureReport                 ← NEW (mig. 0022) — a field crew's live headcount
 ├── incident ─────► Incident (CASCADE)
@@ -174,7 +183,9 @@ PushToken
 
 **Incident state machine (`Incident.TRANSITIONS`, `api/models.py`):** explicit forward-only map of `{current_status: {next_status: {allowed roles}}}`. `OPEN → PENDING → EN_ROUTE → ON_SCENE → RESOLVED → CLOSED`, with a legacy `IN_PROGRESS` path kept for rows written by the mobile-dispatch bridge (which writes status directly, bypassing the state machine). **CLOSED is reachable only via an explicit Commander action** (bypasses the table entirely) and always requires `closed_reason` + `closed_by`. A field unit can only resolve an incident once every assigned `Task` is DONE/CANCELLED; a Commander can always override.
 
-**FieldCommand closure cascade:** closing a post (`FieldCommandSerializer.update`) releases every assigned `Unit.field_command = None` and force-closes every linked `Incident` with `closed_by = COMMAND_CENTER`.
+**FieldCommand closure cascade:** closing a post (`FieldCommandSerializer.update`) releases every assigned `Unit.field_command = None` and force-closes every linked `Incident` with `closed_by = COMMAND_CENTER`. `FieldCommandViewSet.close` then broadcasts each cascaded incident's `incident_status_update` + unit releases + logs the closure to the audit trail, so the war-room map / list / any other open dashboard drop them live (the serializer does the DB cascade as a bulk update with no per-row signal).
+
+**Closing a single incident on a still-active post:** `IncidentViewSet.perform_update` unlinks it (`field_command = None`), cancels its non-terminal tasks, deletes the post's `FieldCommandNote`s + `FieldCommandMission`s for it, and broadcasts `field_command_incident_unassigned` — so a closed event leaves the post's dashboard, map count, timeline and casualty totals entirely.
 
 ---
 
@@ -284,12 +295,20 @@ online/offline state from the live `onlineUnits` store, so a reconnect flips
 
 **Field reports on a post's Operational Timeline.** `FieldCommandSerializer.get_operational_notes`
 returns the post's own typed `FieldCommandNote`s *plus* every `IncidentEvent` with
-`source == UNIT` on one of its linked incidents — each `REPORT` entry carrying the
-reporter (`created_by`), the incident name, and any photo/video attachments
-(`media[]`). The mobile report screen (`POST /api/field/add-event/`) no longer logs
-a flat note string; the merge in the serializer is the single source, so a report
-shows on the timeline in full (`📢 Field Report — <incident>`, `by <reporter>`,
-thumbnails) rather than as a one-line status string.
+`source == UNIT` on one of its **still-open** linked incidents — each `REPORT` entry
+carrying the reporter (`created_by`), the incident name, and any photo/video
+attachments (`media[]`). The mobile report screen (`POST /api/field/add-event/`) no
+longer logs a flat note string; the merge in the serializer is the single source, so
+a report shows on the timeline in full (`📢 Field Report — <incident>`, `by
+<reporter>`, thumbnails) rather than as a one-line status string.
+
+**Event identity is the incident id, never its title.** Every auto-logged
+`FieldCommandNote` is written with the incident's own FK (`_log_field_command_note(…,
+incident=…)`), the timeline filter keys off that FK's `status`, and delete/close
+target a post's notes/missions by FK — so two incidents both named "Theft" (one
+deleted yesterday, one open today) are entirely independent. The one place a title
+was ever used is the one-off backfill in migration 0024 (old free-text log lines
+that carried no id at all), guarded by a chronological check + migration 0026.
 
 ### Major Incident "Go Live" API
 
@@ -390,7 +409,7 @@ GET  /api/field/updates/stream/     — SSE stream (present in api/client.js but
                                        consumed by FieldIncidentDashboard.jsx)
 ```
 
-**Removed in Aug 2026:** every `/api/mock/*` endpoint (`mock/incidents/`, `mock/units/`, `mock/events/`, `mock/updates/stream/`, etc.) — replaced by the real endpoints above. `backend/utils/mock_data.py`, `polling_service.py`, `realtime.py`, `field_incident_data.py` were deleted. **`backend/simulated/`** (a separate, untouched package: `mock_data.py`, `field_incident_data.py`, `realtime.py`, `mock_api_client.py`) still exists and exclusively backs the `/api/field/...` training-simulation endpoints.
+**Removed in Aug 2026:** every `/api/mock/*` endpoint (`mock/incidents/`, `mock/units/`, `mock/events/`, `mock/updates/stream/`, etc.) — replaced by the real endpoints above. `backend/utils/mock_data.py`, `polling_service.py`, `realtime.py`, `field_incident_data.py` were deleted. **`backend/simulated/`** (a separate, untouched package: `mock_data.py`, `field_incident_data.py`, `realtime.py`) still exists and exclusively backs the `/api/field/...` training-simulation endpoints.
 
 **Auto-simulation disabled:** the field-incident SSE stream no longer randomly advances sector/task state on a timer — state changes only in response to an explicit API call (`/api/field/simulate/`, `PATCH /api/tasks/<id>/`, etc.). This was a deliberate fix so nothing mutates silently with no corresponding request in the log.
 
@@ -427,7 +446,7 @@ Top-level state: `majorIncident`, `fieldCommandStatus`, `fieldCommandSummary`, `
 
 **Mobile bridge:** on module load, an IIFE registers the 50 generated routine units with `POST /mobile/register-units/`; dispatch/cancel/status-change actions mirror to `/mobile/dispatch/`, `/mobile/cancel-dispatch/`, `/mobile/unit-status/`.
 
-**Storage keys:** `localStorage['fieldId']` (durable per-station config); `sessionStorage['ecm-dispatch-assignments']` (session-scoped dispatch state, written/cleaned by `dispatchUnitsToIncident`/`cancelUnitDispatch`/`moveUnits`). Cross-tab sync via `BroadcastChannel('field-incident-sync')` propagates `mode, simulationType, simulationStep, majorIncident, fieldCommandStatus, fieldCommandSummary, sectors, taskGroups, events, incidents, units, routineUnits`.
+**Storage keys:** `localStorage['fieldId']` (durable per-station config); `sessionStorage['ecm-dispatch-assignments']` (session-scoped dispatch state, written/cleaned by `dispatchUnitsToIncident`/`cancelUnitDispatch`/`moveUnits`). Cross-tab sync via `BroadcastChannel('field-incident-sync')` propagates `mode, simulationType, simulationStep, majorIncident, fieldCommandStatus, fieldCommandSummary, sectors, taskGroups, events, incidents, units, routineUnits` — **but only in `SIMULATION`/`ROUTINE` mode**, and it never applies onto a tab currently viewing a real post (`FIELD_COMMAND`/`LIVE`). Each real-post tab loads its own post from the API and stays live via the field SSE relay; broadcasting the whole payload with no post identity used to make a second tab opened on post B overwrite a first tab still showing post A.
 
 ### Real-Time Communication (SSE)
 
@@ -456,9 +475,13 @@ Dashboard (Regional, /regional)
 │   │                    status + "Open Field HQ ↗" → /field-incident?fieldId=<field_key>); no sector /
 │   │                    task-group / tactical-dispatch UI (removed)
 │   └── Settings      — Incident Severity + Close Incident
-└── FieldCommandDetailsPanel  — built on shared SidePanel; tabs: Overview | Assign | Close
+└── FieldCommandDetailsPanel  — built on shared SidePanel; tabs: Overview | Assign | Close.
+    │              Opens when a 🎖️ field-command marker is clicked on the regional map
+    │              (marker click → this panel; there is no map popup). Header carries a
+    │              🧭 **Dashboard** button → opens `/field-incident?fieldId=<key>` in a new tab.
     ├── Overview — FieldCommandSummaryView (shared) — status/phase/casualties, linked Major
-    │              Incident, Operational Notes, Assigned Incidents, Assigned Forces, Missions
+    │              Incident, Operational Notes, Assigned Incidents (each row leads with the
+    │              shared severity dot + shows its casualty figures inline), Assigned Forces, Tasks
     ├── Assign   — "Link incidents": excludes already-linked/CLOSED. HIDDEN when the post is
     │              event-scoped (major_incident set — opened via Go Live from one incident;
     │              backend assign-incident also 409s). No unit-attach column.
@@ -481,21 +504,27 @@ FieldIncidentDashboard (/field-incident)
   ├── SituationOverview        ← now JUST the identity header (field name + type/status
   │                              badges), pinned to the top. Metric grid + quick-stat +
   │                              critical-alerts block removed.
-  ├── FieldCommandAssignmentsPanel  ← "Central Command" panel, tabbed (Incidents / Forces /
-  │                              Missions); flex-grows to fill the column with its own inner
-  │                              scroll — the dominant panel. Rows via FieldCommandSummaryView.
-  └── CasualtyFiguresPanel     ← NEW — post-wide {injured,trapped,dead,treated,evacuated}
-                                 totals (summary.figure_totals) + per-incident breakdown
-                                 (summary.incidents[].figure_report); live via SSE.
+  ├── FieldCommandAssignmentsPanel  ← "Central Command" panel, tabbed **Incidents / Tasks**
+  │                              (the Forces tab was removed — units are committed to
+  │                              incidents, not to the post; "Missions" was renamed "Tasks").
+  │                              Each incident row leads with the shared severity dot and
+  │                              shows its casualty figures inline. Flex-grows to fill the
+  │                              column with its own inner scroll — the dominant panel.
+  └── CasualtyFiguresPanel     ← post-wide {injured,trapped,dead,treated,evacuated}
+                                 totals only (summary.figure_totals); the per-incident
+                                 breakdown moved inline onto the Central Command rows.
+                                 Live via SSE.
   Center column:
   ├── IncidentTaskBoard        ← NEW (replaced SectorMap) — force-grouped task board,
   │                              status editable (updateFieldMission)
   └── OperationalTimeline      ← FieldCommandNote entries typed by `kind` (Incident Assigned /
-                                 Force Attached / Mission / Status — a status change names the
+                                 Force Attached / Task / Status — a status change names the
                                  force + mobile unit); REPORT entries render mobile field
                                  reports in full (📢, "Field Report — <incident>", "by
-                                 <reporter>", thumbnails); live central-room updates via the
-                                 field SSE relay (incl. `field_command_note_added`,
+                                 <reporter>", thumbnails); each entry stamped **DD/MM/YYYY,
+                                 HH:MM** (`formatDateTimeShort`) so entries from different days
+                                 can't be confused; live central-room updates via the field
+                                 SSE relay (incl. `field_command_note_added`,
                                  `unit_claimed`/`unit_disconnected`)
   Right column:
   └── FieldForcesPanel         ← NEW (replaced TaskGroupPanel) — units on the ground grouped
@@ -510,7 +539,10 @@ FieldIncidentDashboard (/field-incident)
 Pure helpers extracted from MapView's dispatch modal: `calculateDistanceKm()` (haversine) and `getSortedAvailableUnits(units, point, filterFn)` — filters to online units that aren't EN_ROUTE/ON_SCENE/already attached to a FieldCommand, then sorts nearest-first. Reused by Dashboard.jsx's FieldCommand creation checklist and the incident panel's Dispatch tab.
 
 ### `frontend-web/src/utils/agencyMeta.js`
-Single POLICE/FIRE/EMS/HOMEFRONT (+ AMBULANCE alias) `{emoji, color}` palette: `getUnitTypeMeta(unit[, fallback])` (keys off `Unit.type`), `getIncidentChannelMeta(incident[, fallback])` (keys off `Incident.channel`). Optional 2nd arg overrides the default `🚨` unknown-marker (the map's point-dispatch diamond passes a `⚡` bolt). Used by `FieldCommandSummaryView`, `FieldCommandDetailsPanel`, `MapView.jsx` (unit icons + point-dispatch markers), and `IncidentList.jsx` (point-dispatch rows). MapView's hidden/legacy `<MapContainer>` still has its own `policeIcon`/`fireIcon`/`medicalIcon` (dead — 0×0 map).
+Single POLICE/FIRE/EMS/HOMEFRONT (+ AMBULANCE alias) `{emoji, color}` palette: `getUnitTypeMeta(unit[, fallback])` (keys off `Unit.type`), `getIncidentChannelMeta(incident[, fallback])` (keys off `Incident.channel`). Optional 2nd arg overrides the default `🚨` unknown-marker (the map's point-dispatch diamond passes a `⚡` bolt). Police is `🚓` (car) and Fire is `🚒` (truck) everywhere — the regional `IncidentList` filter chips, the KPI "Available Units" chips and the MapView report/dispatch dropdowns were brought in line (they used to show `👮` / `🔥`). Used by `MapView.jsx` (unit icons + point-dispatch markers), `FieldForcesPanel`/`IncidentTaskBoard` (force-group headers).
+
+### `frontend-web/src/utils/incidentMeta.js` + `components/IncidentSeverityIcon.jsx`
+One canonical incident-**severity** palette: `getIncidentSeverityMeta(incident)` → `{level,label,color}` keyed by `Incident.priority` (LOW green → MED amber → HIGH red → CRITICAL deep-red; "MEDIUM" aliased), `getIncidentSeverityColor(incident)`. `IncidentSeverityIcon` renders it as a filled dot with a soft halo. Every incident **list** in both dashboards leads with this one marker — the regional `IncidentList` (its left accent bar + level badge pull the same colour), `FieldCommandSummaryView`'s Assigned-Incidents section, and `FieldCommandDetailsPanel`'s Assign tab — so an incident row looks identical everywhere, keyed purely to "how urgent", not the responding agency.
 
 ---
 
@@ -660,6 +692,10 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 | `0020_task_arrived_at` | `Task.arrived_at` — the crew's own confirmed-arrival timestamp (distinct from the shared incident status) |
 | `0021_fieldcommandmission_force_type_and_more` | `FieldCommandMission.force_type` (POLICE/FIRE/MEDICAL) + `.incident` FK — turns a mission into a force-typed, incident-scoped task |
 | `0022_incidentfigurereport` | **`IncidentFigureReport` model** — per (incident, unit) casualty headcount |
+| `0023_fieldcommandnote_incident` | `FieldCommandNote.incident` FK (nullable) — every auto-logged log line now records the incident it is about, so a live post's timeline can drop entries for a closed/unlinked event by id (not by parsing the title) |
+| `0024_backfill_and_prune_field_command_log` | **Data migration:** backfill `FieldCommandNote.incident` on existing rows (match the quoted title against incidents that already existed when the note was written), then delete every note/mission tied to a closed, unlinked or deleted incident |
+| `0025_alter_fieldcommandmission_incident_and_more` | `FieldCommandNote.incident` **and** `FieldCommandMission.incident` → `on_delete=CASCADE` — deleting an event now also deletes the post's log lines and field tasks about it |
+| `0026_drop_misdated_field_command_notes` | **Data migration:** safety net for 0024 — drop any note whose `created_at` predates its linked incident (a mis-match left by a since-deleted same-titled event) |
 
 ---
 
@@ -680,8 +716,37 @@ Offline: saveReport() → SQLite (expo-sqlite) → SyncScreen uploads when back 
 
 ---
 
-**Last Updated:** 2026-09-01
-**Architecture Version:** 4.3
+**Last Updated:** 2026-09-02
+**Architecture Version:** 4.4
+
+**Changelog v4.4 (Sep 2, 2026 — field-command log integrity, incident-severity marker, cross-tab isolation, UI polish):**
+
+*Field-command log tied to the incident id, not its title (migrations `0023`–`0026`):*
+- `FieldCommandNote` gained an `incident` FK (`0023`); it and `FieldCommandMission.incident` are now `on_delete=CASCADE` (`0025`). Every auto-logged log line is written with `incident=<that incident>`; deleting an event deletes the post's log lines + field tasks about it.
+- **Closing an incident** on a still-active post unlinks it, cancels its tasks, **deletes** the post's `FieldCommandNote`s/`FieldCommandMission`s for it, and broadcasts `field_command_incident_unassigned` — the event leaves the post's dashboard, map count, timeline and casualty totals entirely.
+- `FieldCommandSerializer` filters `incidents`/`missions`/`operational_notes`/`figure_totals` to a live post's **still-open** events; a CLOSED post keeps its full archive.
+- `FieldCommandViewSet.close` now broadcasts each cascaded incident's `incident_status_update` + unit releases + audit log (the serializer does the DB cascade as a bulk update).
+- One-off cleanup: `0024` backfills the FK on old rows (title match constrained to incidents that existed when the note was written) and prunes stale notes/missions; `0026` drops any note that predates its incident (a title-collision safety net).
+
+*Incident-severity marker (`utils/incidentMeta.js` + `components/IncidentSeverityIcon.jsx`):*
+- One canonical `priority → {level,label,color}` map (LOW green → MED amber → HIGH red → CRITICAL deep-red) + a filled-dot component. Every incident list in both dashboards (regional `IncidentList`, `FieldCommandSummaryView`, `FieldCommandDetailsPanel` Assign tab) now leads with the same dot, keyed to severity — replacing the mix of per-agency emoji / per-status glyphs.
+
+*Cross-tab isolation (`store/fieldIncident.js`):*
+- The `field-incident-sync` `BroadcastChannel` now only syncs in `SIMULATION`/`ROUTINE` mode and never applies onto a tab viewing a real post. Opening post B in a second tab used to turn the first tab (post A) into B.
+
+*Field Incident Command dashboard — Central Command panel:*
+- The **Forces** tab was removed (units are committed to incidents, not the post); **Missions → Tasks**. Each incident row leads with the severity dot and shows its casualty figures **inline**; `CasualtyFiguresPanel` keeps only the post-wide totals.
+
+*Regional dashboard polish:*
+- Map opens **framed on the live incidents** (`fitBounds`) instead of a fixed centre. "Available Units" KPI card redesigned with colour-coded per-agency chips. Clicking a 🎖️ field-command marker opens the side panel directly (no map popup); its header carries a 🧭 **Dashboard** button → `/field-incident?fieldId=<key>`. Police `🚓` / Fire `🚒` icons made consistent across the filter chips + dropdowns.
+
+*Operational Timeline:* entries now stamp `DD/MM/YYYY, HH:MM` (`formatDateTimeShort` in `utils/time.js`), not just the time.
+
+*`create_sample_data.py`:* re-running it now re-asserts an existing user's password / unit link / role (it only set them on first creation before, so a drifted account stayed broken).
+
+*Tests:* 89 backend tests (unchanged count; `FieldCommandMission` filter + `FieldCommandNote.incident` covered by existing `FieldCommandMissionTests`).
+
+*Repo cleanup:* removed accidental URL-fragment junk files (`Frontend`, `Mobile`, `Web`, `backend/Backend`); `.gitignore` now also excludes `backend/media/`, DB backups, `STUDY_GUIDE/`, `.claude/`.
 
 **Changelog v4.3 (Sep 1, 2026 — force-typed tasks, casualty figures, field-dashboard rework, permanent double-voice fix):**
 

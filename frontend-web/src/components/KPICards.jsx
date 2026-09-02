@@ -109,13 +109,23 @@ export function KPICards({ fieldCommands = [], onSelectFieldCommand }) {
         </div>
       </div>
 
-      <div className="kpi-card" style={{ borderLeftColor: '#10b981' }}>
+      <div className="kpi-card kpi-card-units" style={{ borderLeftColor: '#10b981' }}>
         <div className="kpi-icon">🚑</div>
         <div className="kpi-content">
-          <div className="kpi-value">{totalAvailable}</div>
-          <div className="kpi-label">Available Units</div>
-          <div className="kpi-subtext" style={{ marginTop: 2, fontSize: '0.7rem', color: '#6b7280' }}>
-            Pol: {policeCount} | Fire: {fireCount} | Med: {medicalCount}
+          <div className="kpi-units-head">
+            <span className="kpi-units-total">{totalAvailable}</span>
+            <span className="kpi-label">Available Units</span>
+          </div>
+          <div className="kpi-units-breakdown">
+            <span className="kpi-unit-chip kpi-unit-chip-police" title="Police units available">
+              🚓 {policeCount}
+            </span>
+            <span className="kpi-unit-chip kpi-unit-chip-fire" title="Fire units available">
+              🚒 {fireCount}
+            </span>
+            <span className="kpi-unit-chip kpi-unit-chip-medical" title="Medical units available">
+              🚑 {medicalCount}
+            </span>
           </div>
         </div>
       </div>

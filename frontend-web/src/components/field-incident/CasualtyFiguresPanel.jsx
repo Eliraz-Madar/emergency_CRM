@@ -4,11 +4,12 @@
  * Every crew submits {injured, dead, trapped, treated, evacuated} per incident
  * from the mobile app (Incidents → Figures). The backend keeps one row per
  * (incident, crew) and this panel shows the post-wide totals — the sum across
- * every incident this command coordinates — plus a per-incident breakdown.
- * Data is `summary.figure_totals` / `summary.incidents[].figure_report` from
- * FieldCommandSerializer; it refreshes on the same `field_command_note_added`
- * SSE the rest of the dashboard already listens to, so the numbers finally
- * move when a report comes in.
+ * every incident this command coordinates. The per-incident breakdown now
+ * lives inline on each row of the Central Command "Incidents" tab, next to the
+ * event it belongs to, rather than as a second list down here.
+ * Data is `summary.figure_totals` from FieldCommandSerializer; it refreshes on
+ * the same `field_command_note_added` SSE the rest of the dashboard already
+ * listens to, so the numbers finally move when a report comes in.
  */
 
 const FIGURES = [
@@ -24,10 +25,7 @@ const sumAll = (t) => FIGURES.reduce((n, f) => n + (Number(t?.[f.key]) || 0), 0)
 
 const CasualtyFiguresPanel = ({ summary }) => {
   const totals = summary?.figure_totals || zero;
-  const incidents = Array.isArray(summary?.incidents) ? summary.incidents : [];
-  const reported = incidents
-    .map((inc) => ({ title: inc.title, fig: inc.figure_report || zero }))
-    .filter((r) => sumAll(r.fig) > 0);
+  const anyReported = sumAll(totals) > 0;
 
   return (
     <div className="casualty-figures-panel">
@@ -48,24 +46,7 @@ const CasualtyFiguresPanel = ({ summary }) => {
         ))}
       </div>
 
-      {reported.length === 0 ? (
-        <p className="cf-none">No figures reported yet.</p>
-      ) : (
-        <div className="cf-breakdown">
-          {reported.map((r, i) => (
-            <div key={i} className="cf-breakdown-row">
-              <span className="cf-breakdown-title" title={r.title}>{r.title}</span>
-              <span className="cf-breakdown-nums">
-                {FIGURES.filter((f) => (Number(r.fig[f.key]) || 0) > 0).map((f) => (
-                  <span key={f.key} style={{ color: f.color }}>
-                    {f.icon}{Number(r.fig[f.key]) || 0}
-                  </span>
-                ))}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
+      {!anyReported && <p className="cf-none">No figures reported yet.</p>}
     </div>
   );
 };

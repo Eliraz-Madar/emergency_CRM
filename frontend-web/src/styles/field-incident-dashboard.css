@@ -1175,7 +1175,9 @@
 
 .event-metadata {
   display: flex;
-  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
   font-size: 0.8rem;
   color: var(--fi-text-secondary);
 }
@@ -1194,6 +1196,10 @@
 .event-time,
 .event-creator {
   color: var(--fi-text-secondary);
+}
+
+.event-time {
+  white-space: nowrap;
 }
 
 .event-description {

@@ -6,6 +6,13 @@ import { getSortedAvailableUnits } from '../utils/units.js';
 import { getUnitTypeMeta, getIncidentChannelMeta } from '../utils/agencyMeta.js';
 import { ANNOUNCE_EVENT } from '../utils/announce.js';
 
+// Fallback view only — used before any incident has loaded, or if there are
+// genuinely no active incidents to frame. Centre of the central district
+// (Tel Aviv metro), not Jerusalem. Once incidents arrive the map fits itself
+// to them (see the "initial fit" effect below).
+const DEFAULT_MAP_CENTER = [32.0853, 34.7818];
+const DEFAULT_MAP_ZOOM = 11;
+
 // The "on its way" / "arrived" map bubble and the spoken line are BOTH driven
 // from Dashboard.jsx's SSE handlers via announceOnce() — one dedup gate
 // (localStorage), one fire per real backend broadcast. This component no
@@ -36,6 +43,9 @@ export function MapView({
   // unitId set that was EN_ROUTE on the previous render — used only to pan the
   // camera towards a unit that just went en route (no announcement here).
   const prevEnRouteRef = useRef(new Set());
+  // Guards the one-time "frame the map on the active incidents" pan that runs
+  // as soon as the first batch of incidents lands after mount.
+  const didInitialFitRef = useRef(false);
   const onMapCreateFieldCommandRef = useRef(onMapCreateFieldCommand);
   const onMapReportIncidentRef = useRef(onMapReportIncident);
   const onMapDispatchForceRef = useRef(onMapDispatchForce);
@@ -304,7 +314,7 @@ export function MapView({
   useEffect(() => {
     if (mapInstanceRef.current) return; // Already initialized
 
-    const map = L.map(mapRef.current).setView([31.77, 35.22], 11); // Center on Tel Aviv
+    const map = L.map(mapRef.current).setView(DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '© OpenStreetMap contributors',
@@ -361,8 +371,64 @@ export function MapView({
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
       }
+      // The next map instance (React StrictMode's dev remount, or a real
+      // route re-entry) is a brand-new Leaflet map at the fallback centre and
+      // needs its own opening fit — the guard tracks "has THIS map been
+      // framed", so clear it whenever the map it referred to goes away.
+      didInitialFitRef.current = false;
     };
   }, []);
+
+  // Open the regional map already framed on the live incidents, instead of a
+  // fixed district centre. Runs once: the first time incidents are available
+  // after mount it fits the view to them, then never touches the camera again
+  // (all later camera moves are user-driven — selection, spotlight, dispatch).
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || didInitialFitRef.current) return;
+
+    const points = incidents
+      .map((i) => [
+        i.latitude ?? i.location_lat ?? i.lat,
+        i.longitude ?? i.location_lng ?? i.lng,
+      ])
+      .filter(([la, ln]) => Number.isFinite(la) && Number.isFinite(ln));
+
+    // No incidents loaded yet — wait for the next update rather than locking
+    // in the fallback centre.
+    if (points.length === 0) return;
+
+    // The store often has incidents before Leaflet has measured its container
+    // (flex layout still settling) — and the container can report a real
+    // height while its width is still 0, which makes getBoundsZoom return
+    // maxZoom so the fit clamps in tight on the wrong spot. Retry on a short
+    // timer (NOT requestAnimationFrame — that's paused while the tab is
+    // backgrounded) until BOTH dimensions are real, then fit exactly once.
+    let timer = 0;
+    let tries = 0;
+    const tryFit = () => {
+      if (didInitialFitRef.current || !mapInstanceRef.current) return;
+      map.invalidateSize({ animate: false });
+      const size = map.getSize();
+      if ((size.x < 40 || size.y < 40) && tries < 40) {
+        tries += 1;
+        timer = setTimeout(tryFit, 100);
+        return;
+      }
+      didInitialFitRef.current = true;
+      // animate: false on purpose — this is the opening view, it should just BE
+      // there, not fly in from the fallback centre on every page load.
+      try {
+        if (points.length === 1) {
+          map.setView(points[0], 13, { animate: false });
+        } else {
+          map.fitBounds(L.latLngBounds(points), { padding: [60, 60], maxZoom: 13, animate: false });
+        }
+      } catch { /* ignore Leaflet bounds errors */ }
+    };
+    timer = setTimeout(tryFit, 0);
+    return () => { if (timer) clearTimeout(timer); };
+  }, [incidents]);
 
   // Zoom map to a dispatched incident + its units whenever zoomToIncidentId is set
   useEffect(() => {
@@ -629,34 +695,12 @@ export function MapView({
         }
       ).addTo(map);
 
+      // Click the marker → open this post's details in the right-hand side
+      // panel (FieldCommandDetailsPanel). No map popup — the side panel is
+      // where every action lives, including "Open Field Dashboard".
       marker.on('click', () => {
         if (onFieldCommandSelect) {
           onFieldCommandSelect(field);
-        }
-      });
-
-      marker.bindPopup(`
-        <div class="map-popup">
-          <strong>${field.name || field.id}</strong>
-          <p>Incidents: ${field.incidents_count ?? 0}</p>
-          <p>Forces: ${field.units_count ?? 0}</p>
-          <button class="field-command-open" style="width:100%; margin-top:8px; padding:8px 10px; border:none; border-radius:6px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer;">
-            Open Command
-          </button>
-        </div>
-      `);
-
-      marker.on('popupopen', (event) => {
-        const popupEl = event.popup.getElement();
-        if (!popupEl) return;
-        const button = popupEl.querySelector('.field-command-open');
-        if (button) {
-          button.onclick = (ev) => {
-            ev.preventDefault();
-            if (onFieldCommandSelect) {
-              onFieldCommandSelect(field);
-            }
-          };
         }
       });
 
@@ -1038,7 +1082,7 @@ export function MapView({
                   onChange={(e) => setIncidentForm({ ...incidentForm, type: e.target.value })}
                   style={inputStyle}
                 >
-                  <option value="POLICE">👮 Police</option>
+                  <option value="POLICE">🚓 Police</option>
                   <option value="EMS">🚑 EMS</option>
                   <option value="FIRE">🚒 Fire &amp; Rescue</option>
                 </select>
@@ -1123,7 +1167,7 @@ export function MapView({
                   }}
                   style={inputStyle}
                 >
-                  <option value="POLICE">👮 Police</option>
+                  <option value="POLICE">🚓 Police</option>
                   <option value="EMS">🚑 EMS</option>
                   <option value="FIRE">🚒 Fire &amp; Rescue</option>
                 </select>

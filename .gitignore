@@ -3,10 +3,13 @@ backend/venv/
 __pycache__/
 *.py[cod]
 backend/db.sqlite3
+backend/db.sqlite3.bak*
+backend/db.sqlite3.bak-*
 
 # Django
 /staticfiles/
 /media/
+backend/media/
 
 # Node/React
 frontend-web/node_modules/
@@ -24,3 +27,10 @@ Thumbs.db
 
 # Local change documentation (not committed)
 final changes/
+
+# Local-only study material (kept out of GitHub per project owner)
+STUDY_GUIDE/
+STUDY_GUIDE.zip
+
+# Editor / agent config
+.claude/

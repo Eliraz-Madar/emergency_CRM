@@ -5,24 +5,27 @@ import { FieldCommandSummaryView } from '../FieldCommandSummaryView.jsx';
  * Field dashboard — "Central Command" panel.
  *
  * Shows what the central/war-room command has handed this post: linked
- * incidents, attached forces, and missions. One tab visible at a time so the
- * panel stays compact and never needs the whole left column to scroll to see
- * it. The rows themselves come from the shared FieldCommandSummaryView, so
- * this and the regional dashboard's field-command panel can't drift apart.
+ * incidents (each with its live casualty figures) and tasks. One tab visible
+ * at a time so the panel stays compact and never needs the whole left column
+ * to scroll to see it. The rows themselves come from the shared
+ * FieldCommandSummaryView, so this and the regional dashboard's field-command
+ * panel can't drift apart.
+ *
+ * Forces are deliberately NOT a tab here — units are committed to incidents,
+ * not to the post itself, so a rescue post never has its own force roster to
+ * show. (The war-room's own panel still lists directly-attached forces.)
  *
  * `summary` is the raw FieldCommandSerializer payload (store.fieldCommandSummary).
  */
 
 const TABS = [
   { id: 'incidents', icon: '🚨', label: 'Incidents', key: 'incidents' },
-  { id: 'forces', icon: '👥', label: 'Forces', key: 'units' },
-  { id: 'missions', icon: '🎯', label: 'Missions', key: 'missions' },
+  { id: 'missions', icon: '🎯', label: 'Tasks', key: 'missions' },
 ];
 
 export default function FieldCommandAssignmentsPanel({ summary }) {
   const counts = {
     incidents: Array.isArray(summary?.incidents) ? summary.incidents.length : 0,
-    units: Array.isArray(summary?.units) ? summary.units.length : 0,
     missions: Array.isArray(summary?.missions) ? summary.missions.length : 0,
   };
 

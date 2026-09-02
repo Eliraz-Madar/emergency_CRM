@@ -7,7 +7,7 @@
 
 import { useState, useEffect } from 'react';
 import { useFieldIncidentStore } from '../../store/fieldIncident';
-import { formatTime } from '../../utils/time.js';
+import { formatDateTimeShort } from '../../utils/time.js';
 
 const OperationalTimeline = ({ onShowDetails }) => {
   const events = useFieldIncidentStore((s) => s.events);
@@ -47,8 +47,9 @@ const OperationalTimeline = ({ onShowDetails }) => {
   };
 
   /**
-   * Helper function to extract just the time from an event
-   * Returns HH:MM format or empty string if date is invalid
+   * Full date + time for an event ("DD/MM/YYYY, HH:MM"), so entries from
+   * different days can't be mistaken for one another. Empty string if the
+   * date is missing/invalid.
    * IMPORTANT: This returns static data, no re-renders with moving time
    */
   const getEventTime = (event) => {
@@ -69,9 +70,8 @@ const OperationalTimeline = ({ onShowDetails }) => {
         : new Date(event.time);
     }
 
-    // Validate and return HH:MM format (24-hour clock)
     if (date && !isNaN(date.getTime())) {
-      return formatTime(date).slice(0, 5); // "HH:MM" — drop seconds for timeline brevity
+      return formatDateTimeShort(date);
     }
 
     // Return empty string for invalid dates

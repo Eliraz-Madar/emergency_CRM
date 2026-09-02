@@ -22,6 +22,15 @@ const DATETIME_OPTS = {
   hour12: false,
 };
 
+const DATETIME_SHORT_OPTS = {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+};
+
 /**
  * Format any date-like value as "HH:MM:SS" (24-hour, local timezone).
  * Returns '--:--:--' for invalid input.
@@ -40,4 +49,14 @@ export const formatDateTime = (value) => {
   const d = new Date(value);
   if (isNaN(d.getTime())) return '--';
   return d.toLocaleString('en-GB', DATETIME_OPTS);
+};
+
+/**
+ * Format any date-like value as "DD/MM/YYYY, HH:MM" (24-hour, local timezone,
+ * no seconds). Returns '--' for invalid input.
+ */
+export const formatDateTimeShort = (value) => {
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return '--';
+  return d.toLocaleString('en-GB', DATETIME_SHORT_OPTS);
 };

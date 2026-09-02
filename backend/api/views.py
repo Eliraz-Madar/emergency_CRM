@@ -145,14 +145,20 @@ def _actor_fields(actor):
     }
 
 
-def _log_field_command_note(field_command, kind, message):
+def _log_field_command_note(field_command, kind, message, incident=None):
     """Append a typed entry to a field command's operational log. These
     surface on the field command's own Operational Timeline (via
     FieldCommandSerializer.get_operational_notes) so the post sees every
     tasking / assignment it receives from the central room — persisted, not
-    just a transient toast."""
+    just a transient toast.
+
+    Pass `incident` for any entry that is about a specific event — the field
+    dashboard drops it from the timeline once that incident is closed/unlinked
+    (and the close flow deletes it outright), so a live post only shows what is
+    still active."""
     FieldCommandNote.objects.create(
         field_command=field_command, kind=kind, message=message,
+        incident=incident,
     )
 
 
@@ -456,35 +462,57 @@ class IncidentViewSet(viewsets.ModelViewSet):
             # field commander's timeline nowhere until now.
             if instance.field_command_id:
                 fc = instance.field_command
-                active_task = (
-                    instance.tasks
-                    .exclude(status__in=Task.TERMINAL_STATUSES)
-                    .select_related("assigned_unit")
-                    .order_by("-timestamp")
-                    .first()
-                )
-                unit = active_task.assigned_unit if active_task else None
-                unit_name = (
-                    unit.name if unit
-                    else (f"Unit {active_task.mock_unit_id}"
-                          if active_task and active_task.mock_unit_id else "A unit")
-                )
-                if instance.status == Incident.Status.ON_SCENE:
-                    note_msg = f"{unit_name} arrived on scene at '{instance.title}' and is starting operations."
+                if instance.status == Incident.Status.CLOSED:
+                    # The event is done — erase everything this post logged for
+                    # it (its field tasks + every timeline entry about it) and
+                    # cut it loose, so a live post's dashboard, the war-room
+                    # map count and the casualty totals never carry a closed
+                    # event.
+                    FieldCommandMission.objects.filter(
+                        field_command=fc, incident=instance).delete()
+                    FieldCommandNote.objects.filter(
+                        field_command=fc, incident=instance).delete()
+                    instance.field_command = None
+                    instance.save(update_fields=["field_command"])
+                    _broadcast_realtime({
+                        "type": "user_action",
+                        "action": "field_command_incident_unassigned",
+                        **_actor_fields(actor),
+                        "field_command_id": fc.field_key,
+                        "incident_id": instance.id,
+                        "status": fc.status,
+                        **FieldCommandSerializer(fc).data,
+                    })
                 else:
-                    note_msg = (
-                        f"Incident '{instance.title}' status changed: "
-                        f"{old_status} → {instance.status}."
+                    active_task = (
+                        instance.tasks
+                        .exclude(status__in=Task.TERMINAL_STATUSES)
+                        .select_related("assigned_unit")
+                        .order_by("-timestamp")
+                        .first()
                     )
-                _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, note_msg)
-                _broadcast_realtime({
-                    "type": "user_action",
-                    "action": "field_command_note_added",
-                    **_actor_fields(actor),
-                    "field_command_id": fc.field_key,
-                    "incident_id": instance.id,
-                    **FieldCommandSerializer(fc).data,
-                })
+                    unit = active_task.assigned_unit if active_task else None
+                    unit_name = (
+                        unit.name if unit
+                        else (f"Unit {active_task.mock_unit_id}"
+                              if active_task and active_task.mock_unit_id else "A unit")
+                    )
+                    if instance.status == Incident.Status.ON_SCENE:
+                        note_msg = f"{unit_name} arrived on scene at '{instance.title}' and is starting operations."
+                    else:
+                        note_msg = (
+                            f"Incident '{instance.title}' status changed: "
+                            f"{old_status} → {instance.status}."
+                        )
+                    _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, note_msg, incident=instance)
+                    _broadcast_realtime({
+                        "type": "user_action",
+                        "action": "field_command_note_added",
+                        **_actor_fields(actor),
+                        "field_command_id": fc.field_key,
+                        "incident_id": instance.id,
+                        **FieldCommandSerializer(fc).data,
+                    })
 
     @action(detail=True, methods=["post"], url_path="assign-unit")
     def assign_unit(self, request, pk=None):
@@ -562,6 +590,7 @@ class IncidentViewSet(viewsets.ModelViewSet):
                 _log_field_command_note(
                     fc, FieldCommandNote.Kind.FORCE_ASSIGNED,
                     f"{unit.name} dispatched to '{incident.title}'.",
+                    incident=incident,
                 )
                 _broadcast_realtime({
                     "type": "user_action",
@@ -672,6 +701,7 @@ class IncidentViewSet(viewsets.ModelViewSet):
             _log_field_command_note(
                 fc, FieldCommandNote.Kind.STATUS,
                 f"{unit_name} reported figures on '{incident.title}': {summary_line}.",
+                incident=incident,
             )
             _broadcast_realtime({
                 "type": "user_action",
@@ -831,7 +861,7 @@ class TaskViewSet(viewsets.ModelViewSet):
                     fc_msg = f"{unit_name} stood down from '{incident.title}'."
                 else:
                     fc_msg = f"{unit_name}: {old_status} → {instance.status} on '{incident.title}'"
-                _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, fc_msg)
+                _log_field_command_note(fc, FieldCommandNote.Kind.STATUS, fc_msg, incident=incident)
                 _broadcast_realtime({
                     "type": "user_action",
                     "action": "field_command_note_added",
@@ -932,6 +962,7 @@ class TaskViewSet(viewsets.ModelViewSet):
                 _log_field_command_note(
                     fc, FieldCommandNote.Kind.STATUS,
                     f"{unit_name} arrived on scene at '{incident.title}' and is starting operations.",
+                    incident=incident,
                 )
                 _broadcast_realtime({
                     "type": "user_action",
@@ -1337,6 +1368,7 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             _log_field_command_note(
                 field_command, FieldCommandNote.Kind.INCIDENT_LINKED,
                 f"Incident assigned by command center: {incident.title}.",
+                incident=incident,
             )
         _broadcast_realtime({
             "type": "user_action",
@@ -1374,6 +1406,7 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
         _log_field_command_note(
             field_command, FieldCommandNote.Kind.STATUS,
             f"Incident unlinked by command center: {incident.title}.",
+            incident=incident,
         )
         _broadcast_realtime({
             "type": "user_action",
@@ -1441,6 +1474,7 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
         _log_field_command_note(
             field_command, FieldCommandNote.Kind.MISSION,
             f"Task assigned by command center: {mission.title}{scope}{assignee}.",
+            incident=mission.incident,
         )
         force = mission.get_force_type_display() if mission.force_type else "the field"
         _log_task_to_incident_feed(
@@ -1477,6 +1511,7 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             _log_field_command_note(
                 field_command, FieldCommandNote.Kind.MISSION,
                 f"{who} — {mission.title}: {mission.get_status_display()}.",
+                incident=mission.incident,
             )
             _log_task_to_incident_feed(
                 mission, actor,
@@ -1497,6 +1532,24 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="close")
     def close(self, request, field_key=None):
         field_command = self.get_object()
+
+        # Snapshot the incidents this post is coordinating BEFORE the serializer
+        # closes + unlinks them (it does so with a bulk queryset update — no
+        # signals, no per-incident broadcast), plus which units are still
+        # committed to each, so we can announce every cascaded closure on the
+        # live streams afterwards.
+        cascade = []
+        for inc in (
+            field_command.incidents
+            .exclude(status=Incident.Status.CLOSED)
+            .prefetch_related("tasks")
+        ):
+            unit_ids = [
+                t.assigned_unit_id for t in inc.tasks.all()
+                if t.assigned_unit_id and t.status not in Task.TERMINAL_STATUSES
+            ]
+            cascade.append((inc, inc.status, unit_ids))
+
         data = {**request.data, "status": FieldCommand.Status.CLOSED}
         serializer = self.get_serializer(field_command, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -1510,6 +1563,39 @@ class FieldCommandViewSet(viewsets.ModelViewSet):
             "status": instance.status,
             **FieldCommandSerializer(instance).data,
         })
+
+        # The serializer already drove every linked incident to CLOSED and cut
+        # it loose from the post. Mirror each of those closures onto the live
+        # streams + the audit log so the war-room map, its incident list and
+        # any other open dashboard drop them (and release their units) without
+        # a manual refresh.
+        for inc, old_status, unit_ids in cascade:
+            _end_trips_for_incident(inc.id)
+            _log_status_change(
+                incident=inc,
+                actor=actor,
+                title=f"Incident status changed: {old_status} → {Incident.Status.CLOSED}",
+                description=f"Closed automatically when field command '{instance.name}' was closed.",
+                severity=IncidentEvent.Severity.WARNING,
+            )
+            _broadcast_realtime({
+                "type": "user_action",
+                "action": "incident_status_update",
+                **_actor_fields(actor),
+                "incident_id": inc.id,
+                "incident_title": inc.title,
+                "old_status": old_status,
+                "new_status": Incident.Status.CLOSED,
+            })
+            for unit_id in unit_ids:
+                _broadcast_realtime({
+                    "type": "user_action",
+                    "action": "incident_unit_unassigned",
+                    **_actor_fields(actor),
+                    "incident_id": inc.id,
+                    "unit_id": unit_id,
+                })
+
         return Response(serializer.data)
 
 

@@ -390,6 +390,14 @@ class FieldCommandNote(models.Model):
 
     field_command = models.ForeignKey(
         FieldCommand, related_name="notes", on_delete=models.CASCADE)
+    # The incident this entry is about, when it has one — most auto-logged
+    # kinds do; a plain NOTE (and "force attached to the post") may not. Lets
+    # the field dashboard drop a live post's timeline entries for an incident
+    # once it is closed/unlinked; CASCADE so deleting an event also erases the
+    # post's log lines about it (matches the close flow, which deletes them).
+    incident = models.ForeignKey(
+        Incident, null=True, blank=True,
+        on_delete=models.CASCADE, related_name="field_command_notes")
     message = models.TextField()
     kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.NOTE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -424,12 +432,13 @@ class FieldCommandMission(models.Model):
 
     field_command = models.ForeignKey(
         FieldCommand, related_name="missions", on_delete=models.CASCADE)
-    # The event this task is for. Nullable/SET_NULL: a mission can be a plain
-    # post-level tasking with no specific incident, and it survives the
-    # incident being unlinked/removed as an audit record.
+    # The event this task is for. Nullable: a mission can be a plain post-level
+    # tasking with no specific incident. CASCADE so deleting an event also
+    # deletes its field tasks (the close flow deletes them too), rather than
+    # leaving them stranded on the post as null-incident orphans.
     incident = models.ForeignKey(
         Incident, null=True, blank=True,
-        on_delete=models.SET_NULL, related_name="field_tasks")
+        on_delete=models.CASCADE, related_name="field_tasks")
     force_type = models.CharField(
         max_length=20, choices=ForceType.choices, null=True, blank=True)
     title = models.CharField(max_length=200)

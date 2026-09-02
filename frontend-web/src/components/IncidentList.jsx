@@ -1,6 +1,7 @@
 import React from 'react';
 import { useDashboardStore } from '../store/dashboard.js';
-import { getIncidentChannelMeta } from '../utils/agencyMeta.js';
+import { getIncidentSeverityColor } from '../utils/incidentMeta.js';
+import { IncidentSeverityIcon } from './IncidentSeverityIcon.jsx';
 
 /**
  * Incident List Component - Dynamic and Interactive
@@ -27,8 +28,8 @@ export function IncidentList({
   // Filter categories with icons
   const filterCategories = [
     { id: 'ALL', label: 'All', icon: '🎯', color: '#3b82f6' },
-    { id: 'FIRE', label: 'Fire', icon: '🔥', color: '#ef4444' },
-    { id: 'POLICE', label: 'Police', icon: '👮', color: '#8b5cf6' },
+    { id: 'FIRE', label: 'Fire', icon: '🚒', color: '#ef4444' },
+    { id: 'POLICE', label: 'Police', icon: '🚓', color: '#8b5cf6' },
     { id: 'EMS', label: 'EMS', icon: '🚑', color: '#10b981' },
   ];
 
@@ -40,15 +41,10 @@ export function IncidentList({
       return channel.includes(activeFilter);
     });
 
-  const getSeverityColor = (severity) => {
-    const colors = {
-      CRITICAL: '#ef4444',
-      HIGH: '#f59e0b',
-      MED: '#eab308',
-      LOW: '#3b82f6',
-    };
-    return colors[severity] || '#6b7280';
-  };
+  // Delegates to the shared incident-severity palette (utils/incidentMeta.js)
+  // so the left accent bar, the level badge and the leading severity dot all
+  // agree — here and in every other incident list across both dashboards.
+  const getSeverityColor = (severity) => getIncidentSeverityColor({ priority: severity });
 
   const hasAssignedUnits = (incident) => {
     const assignedUnits = Array.isArray(incident?.assignedUnits)
@@ -59,25 +55,6 @@ export function IncidentList({
       : 0;
     return assignedUnits > 0 || assignedIds > 0;
   };
-
-  const getStatusIcon = (status) => {
-    const icons = {
-      OPEN: '📌',
-      IN_PROGRESS: '⚙️',
-      CLOSED: '✓',
-    };
-    return icons[status] || '•';
-  };
-
-  // Same "Dispatch Force to Point" detection and shared agency palette
-  // (utils/agencyMeta.js) as MapView.jsx's incident markers, so a
-  // point-dispatch row here matches the diamond marker shown for the same
-  // incident on the map. Unknown channel → an amber ⚡ bolt, not 🚨.
-  const isPointDispatch = (incident) =>
-    incident?.description === 'Force dispatched directly from the map.';
-
-  const getDispatchAgencyMeta = (incident) =>
-    getIncidentChannelMeta(incident, { emoji: '⚡', color: '#f59e0b' });
 
   const formatTime = (dateString) => {
     const date = new Date(dateString);
@@ -139,12 +116,8 @@ export function IncidentList({
               }} />
               <div className="incident-content">
                 <div className="incident-header">
-                  <span
-                    className="incident-icon"
-                    title={isPointDispatch(incident) ? 'Direct point dispatch' : undefined}
-                    style={isPointDispatch(incident) ? { color: getDispatchAgencyMeta(incident).color } : undefined}
-                  >
-                    {isPointDispatch(incident) ? getDispatchAgencyMeta(incident).emoji : getStatusIcon(incident.status)}
+                  <span className="incident-icon">
+                    <IncidentSeverityIcon incident={incident} />
                   </span>
                   <span className="incident-title">
                     {incident.title}

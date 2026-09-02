@@ -443,9 +443,13 @@ class FieldCommandSerializer(serializers.ModelSerializer):
     # internal numeric pk.
     id = serializers.CharField(source="field_key", read_only=True)
     operational_notes = serializers.SerializerMethodField()
-    incidents = FieldCommandIncidentSerializer(many=True, read_only=True)
+    # A CLOSED incident is no longer this post's concern — the close flow
+    # unlinks it (and deletes its tasks/log), but filter here too so legacy
+    # links and any other path can't leave a finished event — its figures,
+    # tasks or timeline entries — showing on a live post's dashboard.
+    incidents = serializers.SerializerMethodField()
     units = FieldCommandUnitSerializer(many=True, read_only=True)
-    missions = FieldCommandMissionSerializer(many=True, read_only=True)
+    missions = serializers.SerializerMethodField()
     incidents_count = serializers.SerializerMethodField()
     units_count = serializers.SerializerMethodField()
     # Write-only: append an operational note in the same create/update request
@@ -497,25 +501,44 @@ class FieldCommandSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["closed_at"]
 
+    def _prunes_stale_incidents(self, obj):
+        """A live post hides log entries / tasks for events that have left it;
+        a CLOSED post is a historical archive and shows its full record."""
+        return obj.status != FieldCommand.Status.CLOSED
+
+    def _incident_still_active(self, incident):
+        """A closed event is done with — its timeline entries and tasks drop
+        off a live post's dashboard (a deleted event's are already gone: the
+        incident FK cascades)."""
+        return bool(incident and incident.status != Incident.Status.CLOSED)
+
     def get_operational_notes(self, obj):
         """The post's Operational Timeline: its own typed notes (incident
         linked / force attached / mission / status) PLUS every field report a
         mobile unit filed against one of its linked incidents — the latter
         carrying the reporter, the incident name and any photo/video
-        attachments, so a report shows up in full and not as a flat string."""
+        attachments, so a report shows up in full and not as a flat string.
+
+        Auto-logged notes carry the incident they are about; they drop off the
+        timeline once that incident is closed or unlinked. Plain operator
+        notes (kind NOTE, no incident) always stay."""
         entries = [
             {
                 "timestamp": note.created_at.isoformat(),
                 "message": note.message,
                 "kind": note.kind,
             }
-            for note in obj.notes.all()
+            for note in obj.notes.select_related("incident").all()
+            if not self._prunes_stale_incidents(obj)
+            or note.incident_id is None
+            or self._incident_still_active(note.incident)
         ]
 
         request = self.context.get("request")
         reports = (
             IncidentEvent.objects
             .filter(incident__field_command=obj, source=IncidentEvent.Source.UNIT)
+            .exclude(incident__status=Incident.Status.CLOSED)
             .select_related("incident", "task", "task__assigned_unit")
             .prefetch_related("media")
             .order_by("-created_at")
@@ -577,13 +600,32 @@ class FieldCommandSerializer(serializers.ModelSerializer):
             "radius_meters": mi.radius_meters,
         }
 
+    def _open_incidents(self, obj):
+        return obj.incidents.exclude(status=Incident.Status.CLOSED)
+
+    def get_incidents(self, obj):
+        return FieldCommandIncidentSerializer(
+            self._open_incidents(obj), many=True, context=self.context,
+        ).data
+
+    def get_missions(self, obj):
+        # A live post drops tasks for a closed event (a deleted event's tasks
+        # are already gone — incident FK cascades). Post-level tasks with no
+        # incident, and tasks for an open incident, stay. A CLOSED post keeps
+        # its full task record as an archive.
+        qs = obj.missions.select_related("incident", "assigned_unit")
+        if self._prunes_stale_incidents(obj):
+            qs = qs.exclude(incident__status=Incident.Status.CLOSED)
+        return FieldCommandMissionSerializer(qs, many=True).data
+
     def get_figure_totals(self, obj):
         return sum_figure_reports(
             IncidentFigureReport.objects.filter(incident__field_command=obj)
+            .exclude(incident__status=Incident.Status.CLOSED)
         )
 
     def get_incidents_count(self, obj):
-        return obj.incidents.count()
+        return self._open_incidents(obj).count()
 
     def get_units_count(self, obj):
         return obj.units.count()
