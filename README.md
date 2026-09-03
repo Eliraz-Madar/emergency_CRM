@@ -130,7 +130,7 @@ The mobile app runs via Expo — scan the QR code with Expo Go on your phone, or
 | Incidents | After unit select | Lists the incidents this unit is dispatched to (was "My Tasks"); auto-refreshes every 5 s. Each card: **🚗 ON MY WAY** (accept), then **✓ ARRIVED ON SCENE**, plus **🗺 ROUTE**, **🗂 MISSIONS**, **🔢 FIGURES**, and **FILE REPORT** |
 | Missions | **🗂 MISSIONS** on an incident (shown when it has a field command) | The force-typed tasks the war-room assigned to your force for that incident, each with **ON IT** / **FINISHED**; polls every 10 s while open |
 | Figures | **🔢 FIGURES** on an incident | Casualty headcount: stepper (±) inputs for injured / trapped / dead / treated / evacuated, prefilled from your last report. **SEND FIGURES** replaces your previous numbers and rolls them into the field war-room's totals |
-| Report | Tap **FILE REPORT** on an incident | Status (En Route / In Progress / Done) + notes + photos/videos; a **Previously sent** list below the form shows this task's past reports. Saves offline if no connection |
+| Report | Tap **FILE REPORT** on an incident | Optional status change (On the Way / On Scene / Done — pre-selected to match your own task, **nothing selected until you've accepted the dispatch**) + notes + photos/videos; a **Previously sent** list below the form shows this task's past reports. Saves offline if no connection |
 | Incident Map | **ROUTE** on an incident, or Menu (⋮) → Incident Map | After accepting a dispatch: the OSRM road route to the incident, a moving vehicle marker, live distance + ETA, and the camera re-zooms to the route + vehicle every time you open the map |
 | Sync | Menu (⋮) → Sync | Shows offline reports and syncs when back online |
 

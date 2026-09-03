@@ -608,8 +608,13 @@ mobile-app/utils/taskActions.js
 
 ### Polymorphic Report Submission
 ```
-ReportScreen → PATCH /api/tasks/<id>/ (status) + POST /api/field/add-event/?fieldId=default
-                 (notes + files + task_id + incident_id)
+ReportScreen → (optional) markOnMyWay / markArrived / PATCH DONE
+              + POST /api/field/add-event/?fieldId=default (notes + files + task_id + incident_id)
+  The status chip is pre-selected from the crew's OWN task (mirrors
+  TasksScreen.displayStatusFor: DONE / arrived_at→ON_SCENE / IN_PROGRESS→EN_ROUTE),
+  and is left UNSELECTED while the task is still PENDING — a report can then be a
+  plain note/photo with no status change. Never keyed off the shared incident
+  status (another unit may already have driven it to ON_SCENE).
   → the event links to the Task (IncidentEvent.task) and appears on the Field
     Command Post's Operational Timeline with the reporter + media.
   → a "Previously sent" list under the form shows this task's past reports

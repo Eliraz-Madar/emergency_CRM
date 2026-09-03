@@ -21,11 +21,18 @@ const STATUS_OPTIONS = [
   { value: "DONE",     label: "Done",       color: "#2E7D32", bg: "#E8F5E9" },
 ];
 
-// Pre-select the option that matches where the crew already is.
+// Header pill shown before the crew has accepted the dispatch (no chip selected).
+const NOT_STARTED_CFG = { label: "Assigned", color: "#546E7A", bg: "#ECEFF1" };
+
+// Which chip (if any) matches where THIS crew is on THEIR OWN task — mirrors
+// TasksScreen's displayStatusFor. Never keys off the shared incident status
+// (another unit may have driven the incident to ON_SCENE while this crew hasn't
+// moved). Returns null until the crew taps "On My Way", so nothing is
+// pre-selected.
 function defaultStatusFor(task) {
   if (task?.status === "DONE") return "DONE";
-  if (task?.incident_status === "ON_SCENE") return "ON_SCENE";
-  return "EN_ROUTE";
+  if (task?.status === "IN_PROGRESS") return task?.arrived_at ? "ON_SCENE" : "EN_ROUTE";
+  return null;
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -44,15 +51,21 @@ function timeAgo(iso) {
 }
 
 export default function ReportScreen({ selectedTask, token, online }) {
-  const originalStatus = defaultStatusFor(selectedTask);
-  const [status, setStatus] = useState(originalStatus);
+  const [status, setStatus] = useState(() => defaultStatusFor(selectedTask));
   const [notes, setNotes] = useState("");
   const [mediaFiles, setMediaFiles] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const { user } = useUser();
   const taskTitle = selectedTask?.title || "task";
-  const activeCfg = STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[0];
+  const activeCfg = STATUS_OPTIONS.find((s) => s.value === status) || NOT_STARTED_CFG;
+
+  // Keep the pre-selected status in step with the crew's own task as it
+  // advances — they typically tap "On My Way" on the Incidents screen, then
+  // come here, and the chip should already read "On the Way".
+  useEffect(() => {
+    setStatus(defaultStatusFor(selectedTask));
+  }, [selectedTask?.id, selectedTask?.status, selectedTask?.arrived_at]);
 
   // ── Previously-sent reports for this task ──────────────────────────────────
   const [history, setHistory] = useState([]);
@@ -166,6 +179,9 @@ export default function ReportScreen({ selectedTask, token, online }) {
       await markArrived(selectedTask, token, user);
       return;
     }
+    // No status chip picked (crew hasn't accepted yet) — this is a plain
+    // note/photo report, not a status change. Don't touch the task.
+    if (status !== "DONE") return;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(`${API_BASE_URL}/api/tasks/${selectedTask.id}/`, {
@@ -227,9 +243,14 @@ export default function ReportScreen({ selectedTask, token, online }) {
 
   const handleSubmit = async () => {
     if (!selectedTask) { setError("No task selected."); return; }
-    // Offline queue stores a raw task status: EN_ROUTE / ON_SCENE both map to
-    // IN_PROGRESS; DONE stays DONE.
-    const offlineStatus = status === "DONE" ? "DONE" : "IN_PROGRESS";
+    // Nothing to send: no status change picked AND no note/photo attached.
+    if (!status && !notes.trim() && mediaFiles.length === 0) {
+      setError("Pick a status or add a note / photo.");
+      return;
+    }
+    // Offline queue stores a raw task status: EN_ROUTE / ON_SCENE map to
+    // IN_PROGRESS; DONE stays DONE; no chip picked -> no status change.
+    const offlineStatus = status === "DONE" ? "DONE" : status ? "IN_PROGRESS" : "NONE";
     setLoading(true);
     setError("");
     try {
