@@ -20,9 +20,8 @@ echo Starting Emergency CRM stack...
 echo [1/3] Backend API  (deps check + migrate + seed + runserver)
 start "Backend" powershell -NoExit -ExecutionPolicy Bypass -File "%ROOT%backend\run_backend.ps1"
 
-echo [2/3] Web Dashboard
+echo [2/3] Web Dashboard  (http://localhost:5173)
 start "Frontend" powershell -NoExit -Command "Set-Location '%ROOT%frontend-web'; npm run dev"
-echo    -> Frontend: http://localhost:5173
 
 timeout /t 6 /nobreak > nul
 start "" http://localhost:5173
