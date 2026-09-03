@@ -1705,7 +1705,7 @@ export default function Dashboard() {
       {/* Footer */}
       <div className="dashboard-footer">
         <small>
-          Emergency CRM Field Operations Dashboard | © 2024 | Mock Data Service
+          Emergency CRM Field Operations Dashboard | © 2026
         </small>
       </div>
     </div>
