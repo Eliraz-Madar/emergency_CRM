@@ -17,7 +17,19 @@ echo Starting Emergency CRM stack...
 
 echo [1/3] Backend API - preparing database...
 cd /d "%ROOT%backend"
-"%VENV_PYTHON%" -m pip install -r requirements.txt
+
+:: Only install dependencies when they're actually missing. Running
+:: "pip install" on every launch blocks the whole script for seconds on a
+:: cold start (requirement resolution + a network self-version-check), and a
+:: stray Ctrl+C in that window aborts the batch ("Terminate batch job Y/N").
+"%VENV_PYTHON%" -c "import django, rest_framework, rest_framework_simplejwt, corsheaders, faker, dateutil" >nul 2>&1
+if errorlevel 1 (
+    echo     installing backend dependencies...
+    "%VENV_PYTHON%" -m pip install -q --disable-pip-version-check -r requirements.txt
+) else (
+    echo     backend dependencies already installed
+)
+
 "%VENV_PYTHON%" manage.py migrate
 "%VENV_PYTHON%" create_sample_data.py
 

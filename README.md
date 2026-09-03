@@ -38,7 +38,7 @@ run_project.bat
 ```
 
 Requires `.venv\Scripts\python.exe` to already exist at the repo root (the script checks and exits with instructions if it's missing). It opens three terminal windows:
-- **Backend** — installs `requirements.txt`, runs `migrate`, seeds sample data, starts Django on `http://localhost:8000`
+- **Backend** — installs `requirements.txt` (only if a dependency is missing), runs `migrate`, seeds sample data, starts Django on `http://localhost:8000`
 - **Frontend** — starts Vite dev server on `http://localhost:5173`
 - **Mobile** — starts Expo; scan the QR code with Expo Go on your phone
 
@@ -323,6 +323,10 @@ run_project.bat             # One-command startup (Windows) — requires .venv a
 ### "Access is denied" when running run_project.bat
 
 Close all previous terminal windows from an earlier run, then run the bat again. Old processes may be holding ports or the DB file.
+
+### `run_project.bat` shows "ERROR: Operation cancelled by user" / "Terminate batch job (Y/N)?" on the first run
+
+The dependency step used to run `pip install` in the foreground on every launch; on a cold start that blocked for several seconds and a stray Ctrl+C (common when launching a `.bat` from a PowerShell prompt) aborted the whole batch. The script now skips `pip install` entirely when the packages are already present, so the fragile window is gone. If you still hit it, run the batch from **cmd** (`cmd /c run_project.bat`) or by double-clicking it in Explorer rather than from PowerShell.
 
 ### Mobile app shows 401 error
 
