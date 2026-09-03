@@ -38,7 +38,7 @@ run_project.bat
 ```
 
 Requires `.venv\Scripts\python.exe` to already exist at the repo root (the script checks and exits with instructions if it's missing). It opens three terminal windows:
-- **Backend** — installs `requirements.txt` (only if a dependency is missing), runs `migrate`, seeds sample data, starts Django on `http://localhost:8000`
+- **Backend** — (`backend/run_backend.ps1`) installs `requirements.txt` only if a dependency is missing, runs `migrate`, seeds sample data, starts Django on `http://localhost:8000`
 - **Frontend** — starts Vite dev server on `http://localhost:5173`
 - **Mobile** — starts Expo; scan the QR code with Expo Go on your phone
 
@@ -303,7 +303,8 @@ mobile-app/
     config.js               # API_BASE_URL (set to your machine's LAN IP)
     package.json
 
-run_project.bat             # One-command startup (Windows) — requires .venv at repo root
+run_project.bat             # One-command startup (Windows) — requires .venv at repo root; opens 3 windows
+backend/run_backend.ps1     # Backend window: deps check -> migrate -> seed -> runserver
 ```
 
 ---
@@ -324,9 +325,9 @@ run_project.bat             # One-command startup (Windows) — requires .venv a
 
 Close all previous terminal windows from an earlier run, then run the bat again. Old processes may be holding ports or the DB file.
 
-### `run_project.bat` shows "ERROR: Operation cancelled by user" / "Terminate batch job (Y/N)?" on the first run
+### `run_project.bat` shows "ERROR: Operation cancelled by user" / "Terminate batch job (Y/N)?"
 
-The dependency step used to run `pip install` in the foreground on every launch; on a cold start that blocked for several seconds and a stray Ctrl+C (common when launching a `.bat` from a PowerShell prompt) aborted the whole batch. The script now skips `pip install` entirely when the packages are already present, so the fragile window is gone. If you still hit it, run the batch from **cmd** (`cmd /c run_project.bat`) or by double-clicking it in Explorer rather than from PowerShell.
+A stray Ctrl+C on the batch's own console — very common when a `.bat` is launched from a **PowerShell** prompt (Ctrl+C left over from a previously stopped server, plus the `chcp`/PowerShell→cmd hand-off) — was killing whatever long command the batch was running inline (the DB migrate). The batch no longer runs anything long-running itself: `run_project.bat` just opens the three service windows, and the backend deps-check + migrate + seed + `runserver` all run inside `backend/run_backend.ps1` in its own window, immune to the parent console. If you still see it, run from **cmd** (`cmd /c run_project.bat`) or double-click the `.bat` in Explorer.
 
 ### Mobile app shows 401 error
 
